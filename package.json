@@ -1,0 +1,36 @@
+{
+  "name": "@pocketshell/client",
+  "version": "0.1.0",
+  "description": "PocketShell in the terminal: a TUI and agent-friendly CLI client for PocketShell hosts over local, SSH, and gateway connections.",
+  "license": "MIT",
+  "author": "Alexey Grigorev <alexey.s.grigoriev@gmail.com>",
+  "type": "module",
+  "bin": {
+    "pocketshell-client": "./dist/cli.js",
+    "psc": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev": "node --import tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@pocketshell/core": "file:../pocketshell-core",
+    "commander": "^12.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "5.7.2",
+    "vitest": "2.1.8"
+  }
+}
