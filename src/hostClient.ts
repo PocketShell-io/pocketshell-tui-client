@@ -167,8 +167,15 @@ export class HostClient {
     return this.runChecked(`a capture ${target} ${flags}`.trim());
   }
 
-  /** The attach command for a PTY (process-replacing `pocketshell sessions attach`). */
+  /**
+   * The attach command for a PTY. Prefer aplexer's own client (`a attach
+   * <id>`): it draws the status row and honours Ctrl-b d to detach.
+   * `pocketshell sessions attach` execs `a attach --no-status`, a bare relay
+   * made for Android's own chrome with no detach chord, so it is only the
+   * fallback for a row without an aplexer id.
+   */
   attachCommand(session: SessionRow): string {
+    if (session.id) return pathAwareCommand(`exec a attach ${shellQuote(session.id)}`);
     return pathAwareCommand(this.cli.buildAttachCommand(session.name));
   }
 
