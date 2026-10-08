@@ -6,6 +6,7 @@
  * Effect that the shell in index.ts runs, feeding results back as actions.
  */
 import { canonicalisePath, type HostEngineInfo, type SessionRow, type WorkspaceMembership } from '@pocketshell/core';
+import { safeLine, safeText } from '../sanitize.js';
 import type { Key } from './keys.js';
 import { editLine, inputValue, lineInput, type LineInput } from './prompt.js';
 
@@ -156,7 +157,7 @@ export function initialState(options: {
   loggedIn?: boolean | null;
 }): TuiState {
   return {
-    hostName: options.hostName,
+    hostName: safeLine(options.hostName),
     hostMode: options.hostMode,
     loggedIn: options.loggedIn ?? null,
     home: options.home ?? null,
@@ -187,6 +188,47 @@ export function initialState(options: {
     spinner: 0,
     now: options.now,
   };
+}
+
+// ── host text boundary ─────────────────────────────────────────────────────
+//
+// Everything the host says (session fields, engine labels, workspace paths,
+// captures, stderr inside error messages) is scrubbed here, as it enters the
+// state, so render only ever sees printable text. A session's identity is the
+// exception: a scrubbed `name` could address a different session, so the
+// host's own row is kept aside and the shell sends commands with that one.
+
+const ROW_TEXT = ['name', 'workspace', 'tag', 'engine', 'profile', 'agent', 'agentState', 'agentStateSource', 'phase'] as const;
+const HOST_ROWS = new WeakMap<SessionRow, SessionRow>();
+
+/** A session row safe to display. The same object when nothing needed scrubbing. */
+export function displayRow(row: SessionRow): SessionRow {
+  let clean: SessionRow | null = null;
+  for (const field of ROW_TEXT) {
+    const value = row[field];
+    if (typeof value !== 'string') continue;
+    const safe = safeLine(value);
+    if (safe === value) continue;
+    clean ??= { ...row };
+    (clean as unknown as Record<string, unknown>)[field] = safe;
+  }
+  if (!clean) return row;
+  HOST_ROWS.set(clean, HOST_ROWS.get(row) ?? row);
+  return clean;
+}
+
+/** The row exactly as the host reported it — what commands (attach, send, kill, capture) must target. */
+export function hostRow(row: SessionRow): SessionRow {
+  return HOST_ROWS.get(row) ?? row;
+}
+
+function displayEngine(engine: HostEngineInfo): HostEngineInfo {
+  // The id stays as the host spelled it: it goes back to the host in `create`.
+  return { ...engine, label: safeLine(engine.label || engine.id) };
+}
+
+function displayWorkspace(ws: WorkspaceMembership): WorkspaceMembership {
+  return { ...ws, path: safeLine(ws.path), displayPath: safeLine(ws.displayPath) };
 }
 
 // ── derived data ───────────────────────────────────────────────────────────
@@ -302,7 +344,7 @@ export function layout(state: TuiState): Layout {
 
 function withStatus(state: TuiState, text: string, kind: Status['kind'] = 'info'): TuiState {
   const seq = state.statusSeq + 1;
-  return { ...state, status: { text, kind, seq }, statusSeq: seq };
+  return { ...state, status: { text: safeLine(text), kind, seq }, statusSeq: seq };
 }
 
 /** Keep the selection valid and visible; follow it with the preview. */
@@ -563,9 +605,9 @@ export function reduce(state: TuiState, action: Action): Result {
       if (action.generation !== state.generation) return { state, effects: [] };
       const next: TuiState = {
         ...state,
-        sessions: action.sessions,
-        listErrors: action.errors,
-        workspaces: action.workspaces ?? state.workspaces,
+        sessions: action.sessions.map(displayRow),
+        listErrors: action.errors.map(safeLine),
+        workspaces: action.workspaces ? action.workspaces.map(displayWorkspace) : state.workspaces,
         loaded: true,
         loadError: null,
         refreshing: false,
@@ -575,33 +617,35 @@ export function reduce(state: TuiState, action: Action): Result {
     }
     case 'refreshFailed': {
       if (action.generation !== state.generation) return { state, effects: [] };
-      const next = { ...state, refreshing: false, loadError: action.message };
+      const message = safeLine(action.message);
+      const next = { ...state, refreshing: false, loadError: message };
       // Before the first good list the body shows the error; after, the status line does (over the last good data).
-      const same = state.status?.kind === 'error' && state.status.text === action.message;
-      return { state: same || !state.loaded ? next : withStatus(next, action.message, 'error'), effects: [] };
+      const same = state.status?.kind === 'error' && state.status.text === message;
+      return { state: same || !state.loaded ? next : withStatus(next, message, 'error'), effects: [] };
     }
     case 'enginesLoaded': {
-      let next: TuiState = { ...state, engines: action.engines, enginesError: null };
+      let next: TuiState = { ...state, engines: action.engines.map(displayEngine), enginesError: null };
       if (mode.kind === 'newEngine' && mode.cursor === 0) next = { ...next, mode: { ...mode, cursor: defaultEngineCursor(next) } };
       return { state: next, effects: [] };
     }
     case 'enginesFailed':
-      return { state: { ...state, enginesError: action.message }, effects: [] };
+      return { state: { ...state, enginesError: safeLine(action.message) }, effects: [] };
     case 'hostsLoaded': {
-      const next = { ...state, hosts: action.hosts, hostsError: null };
+      const hosts = action.hosts.map((host) => ({ ...host, name: safeLine(host.name) }));
+      const next = { ...state, hosts, hostsError: null };
       if (mode.kind === 'hosts') return { state: { ...next, mode: { ...mode, cursor: hostChoiceIndex(next) } }, effects: [] };
       return { state: next, effects: [] };
     }
     case 'hostsFailed':
-      return { state: { ...state, hostsError: action.message }, effects: [] };
+      return { state: { ...state, hostsError: safeLine(action.message) }, effects: [] };
     case 'captured':
       if (!state.preview || state.preview.key !== action.key) return { state, effects: [] };
-      return { state: { ...state, preview: { ...state.preview, text: action.text, error: null, loading: false } }, effects: [] };
+      return { state: { ...state, preview: { ...state.preview, text: safeText(action.text), error: null, loading: false } }, effects: [] };
     case 'captureFailed':
       if (!state.preview || state.preview.key !== action.key) return { state, effects: [] };
-      return { state: { ...state, preview: { ...state.preview, error: action.message, loading: false } }, effects: [] };
+      return { state: { ...state, preview: { ...state.preview, error: safeLine(action.message), loading: false } }, effects: [] };
     case 'busy':
-      return { state: { ...state, busy: action.text }, effects: [] };
+      return { state: { ...state, busy: action.text === null ? null : safeLine(action.text) }, effects: [] };
     case 'opDone': {
       let next = withStatus({ ...state, busy: null }, action.text, 'ok');
       if (action.selectKey) next = { ...next, selectedKey: action.selectKey, pendingSelect: action.selectKey };
@@ -612,7 +656,7 @@ export function reduce(state: TuiState, action: Action): Result {
     case 'hostSwitched': {
       const next: TuiState = {
         ...state,
-        hostName: action.name,
+        hostName: safeLine(action.name),
         hostMode: action.mode,
         loggedIn: action.loggedIn,
         home: action.home,
@@ -634,7 +678,7 @@ export function reduce(state: TuiState, action: Action): Result {
         mode: { kind: 'list' },
         busy: null,
       };
-      return settle(withStatus(next, `switched to ${action.name}`, 'ok'), [{ type: 'refresh' }]);
+      return settle(withStatus(next, `switched to ${next.hostName}`, 'ok'), [{ type: 'refresh' }]);
     }
     case 'loggedIn':
       return { state: { ...state, loggedIn: action.value }, effects: [] };
@@ -646,7 +690,7 @@ export function reduce(state: TuiState, action: Action): Result {
 
 /** One line, never a stack trace: what a person should read about a failure. */
 export function describeError(error: unknown): string {
-  const message = (error instanceof Error ? error.message : String(error)).replace(/\s*\n\s*/g, ' · ').trim();
+  const message = safeLine((error instanceof Error ? error.message : String(error)).replace(/\s*\n\s*/g, ' · ')).trim();
   const code = (error as { code?: unknown } | null)?.code;
   if (code === 'NOT_LOGGED_IN') {
     return /login/.test(message) ? message : `not logged in — run \`pocketshell-client login\` (${message})`;

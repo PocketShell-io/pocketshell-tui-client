@@ -4,17 +4,21 @@
  * Pure parts live next door (state.ts reducer, render.ts, keys.ts). This
  * file owns the I/O: the host connection, refresh/preview timers, running
  * effects, and the terminal hand-off for attach. Whatever happens — quit,
- * SIGTERM, an uncaught exception — the terminal is restored.
+ * SIGTERM, an uncaught exception — the terminal is restored. The one
+ * exception is a SIGTERM/SIGHUP while an attached session owns the tty: the
+ * TUI writes nothing and quits once the attach returns (see `terminate`).
  */
 import { homedir } from 'node:os';
 import { resolveHost } from '../commands/common.js';
 import { HostClient } from '../hostClient.js';
+import { safeLine } from '../sanitize.js';
 import { getHost, listHosts, type HostEntry } from '../hosts/store.js';
 import { openConnection, type Connection } from '../transport/index.js';
 import { keyToAction, parseKeys } from './keys.js';
 import { render } from './render.js';
 import {
   describeError,
+  hostRow,
   initialState,
   reduce,
   sessionKey,
@@ -47,7 +51,8 @@ function homeFor(host: HostEntry): string | null {
 }
 
 
-class App {
+/** Exported for tests; `runTui` is the entry point. */
+export class App {
   state: TuiState;
   private readonly term: Terminal;
   private readonly color = colorModeFromEnv();
@@ -57,6 +62,12 @@ class App {
 
   private suspended = false;
   private finished = false;
+  /** A SIGTERM/SIGHUP that arrived while an attached session owned the terminal: quit when it returns. */
+  private quitAfterAttach: number | null = null;
+  /** True exactly while the attach child runs on the terminal. */
+  private childRunning = false;
+  /** Ends a pending `waitForKey` early (a signal arrived while it waited). */
+  private cancelWait: (() => void) | null = null;
   private resolveDone!: (code: number) => void;
   readonly done: Promise<number>;
 
@@ -162,6 +173,25 @@ class App {
     if (!this.suspended) void this.finish(130);
   }
 
+  /**
+   * SIGTERM/SIGHUP. Outside an attach: restore and exit right away. During
+   * one the child owns the tty, so writing a restore sequence or exiting
+   * would scribble over its screen and orphan it. Instead quit as soon as
+   * the attach returns: on a hangup the child (same foreground process
+   * group) gets SIGHUP from the tty itself and exits; a SIGTERM aimed only
+   * at us leaves the session attached until the user detaches.
+   * Returns true when the caller should exit now.
+   */
+  terminate(code: number): boolean {
+    if (this.suspended && !this.finished) {
+      this.quitAfterAttach ??= code;
+      // Child already gone, waiting on "press any key": stop waiting (on a hangup no key will ever come).
+      if (!this.childRunning) this.cancelWait?.();
+      return false;
+    }
+    return true;
+  }
+
   async finish(code: number): Promise<void> {
     if (this.finished) return;
     this.finished = true;
@@ -252,14 +282,14 @@ class App {
         return;
       case 'send':
         void this.operation(`sending to ${effect.row.name}`, async (client) => {
-          await client.send(effect.row, effect.text, { enter: true });
+          await client.send(hostRow(effect.row), effect.text, { enter: true });
           this.dispatch({ type: 'opDone', text: `sent to ${effect.row.name}` });
           if (this.state.preview) this.schedulePreview(400);
         });
         return;
       case 'kill':
         void this.operation(`killing ${effect.row.name}`, async (client) => {
-          await client.killSession(effect.row.name);
+          await client.killSession(hostRow(effect.row).name);
           this.dispatch({ type: 'opDone', text: `killed ${effect.row.name}` });
           await this.refresh();
         });
@@ -267,7 +297,7 @@ class App {
       case 'create':
         void this.operation(`creating ${effect.name}`, async (client) => {
           const created = await client.createSession(effect.name, { cwd: effect.cwd, engine: effect.engine });
-          const key = created.id ? `id:${created.id}` : `name:${created.name}`;
+          const key = created.id ? `id:${created.id}` : `name:${safeLine(created.name)}`;
           const verb = created.created ? 'created' : 'reused';
           this.dispatch({ type: 'opDone', text: `${verb} ${created.name}${effect.attach ? '' : ' — ↵ attaches'}`, selectKey: key });
           await this.refresh();
@@ -378,7 +408,7 @@ class App {
     this.captureInFlight = true;
     const key = sessionKey(row);
     try {
-      const text = await client.capture(row, { mode: 'screen' });
+      const text = await client.capture(hostRow(row), { mode: 'screen' });
       this.dispatch({ type: 'captured', key, text });
     } catch (error) {
       this.dispatch({ type: 'captureFailed', key, message: describeError(error) });
@@ -398,21 +428,34 @@ class App {
   private async attach(row: SessionRow): Promise<void> {
     const client = this.client;
     if (!client || this.suspended || this.finished) return;
+    // The row may come straight from the host (create → resolveSession): label it safely, target it exactly.
+    const label = safeLine(row.name);
     this.suspended = true;
     this.detachTerminal();
-    this.term.output.write(`attaching to ${row.name} — Ctrl-b d detaches back to PocketShell\r\n`);
+    this.term.output.write(`attaching to ${label} — Ctrl-b d detaches back to PocketShell\r\n`);
     let outcome: Action;
+    this.childRunning = true;
     try {
-      const code = await client.attach(row);
+      const code = await client.attach(hostRow(row));
       outcome =
         code === 0
-          ? { type: 'opDone', text: `back from ${row.name}` }
-          : { type: 'opFailed', text: `attach to ${row.name} ended with ${code === null ? 'an error' : `exit ${code}`}` };
+          ? { type: 'opDone', text: `back from ${label}` }
+          : { type: 'opFailed', text: `attach to ${label} ended with ${code === null ? 'an error' : `exit ${code}`}` };
     } catch (error) {
       outcome = { type: 'opFailed', text: describeError(error) };
+    } finally {
+      this.childRunning = false;
     }
     if (this.finished) return;
-    if (outcome.type === 'opFailed') await this.waitForKey('press any key to return to PocketShell');
+    if (outcome.type === 'opFailed' && this.quitAfterAttach === null) {
+      await this.waitForKey('press any key to return to PocketShell');
+    }
+    if (this.quitAfterAttach !== null) {
+      // Signalled while attached: the screen is the normal one already and cooked; just finish.
+      this.suspended = false;
+      await this.finish(this.quitAfterAttach);
+      return;
+    }
     this.suspended = false;
     this.attachTerminal();
     this.dispatch(outcome);
@@ -430,16 +473,24 @@ class App {
       } catch {
         /* ignore */
       }
-      input.once('data', () => {
+      const done = () => {
+        input.off('data', done);
+        this.cancelWait = null;
         input.pause();
         try {
           if (input.isTTY) input.setRawMode(false);
         } catch {
           /* ignore */
         }
-        this.term.output.write('\r\n');
+        try {
+          this.term.output.write('\r\n');
+        } catch {
+          /* the tty may be gone (SIGHUP) */
+        }
         resolve();
-      });
+      };
+      this.cancelWait = done;
+      input.once('data', done);
       input.resume();
     });
   }
@@ -496,8 +547,11 @@ export async function runTui(options: { host?: string }): Promise<number> {
     process.exit(1);
   };
   const onSignal = (signal: NodeJS.Signals) => {
+    const code = signal === 'SIGTERM' ? 143 : signal === 'SIGHUP' ? 129 : 130;
+    // Mid-attach the child owns the tty: no restore, no exit; the app quits when attach returns.
+    if (!app.terminate(code)) return;
     app.emergencyRestore();
-    process.exit(signal === 'SIGTERM' ? 143 : signal === 'SIGHUP' ? 129 : 130);
+    process.exit(code);
   };
   const onExit = () => app.emergencyRestore();
   // SIGINT only arrives from outside (raw mode turns Ctrl+C into a key); it quits like q.

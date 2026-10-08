@@ -3,6 +3,7 @@
  * terminal cells (wide CJK/emoji = 2, combining marks = 0), truncated with an
  * ellipsis, and serialized to ANSI only at the very end. Pure; no I/O.
  */
+import { safeLine } from '../sanitize.js';
 
 export type Style =
   | 'plain'
@@ -116,10 +117,13 @@ export function lineWidth(line: Line): number {
   return width;
 }
 
-/** Replace control characters (tabs, escapes, CR) with something printable and harmless. */
+/**
+ * One printable line: tabs become two spaces, then the shared host-text
+ * scrub (whole escape sequences, C0/C1 controls, newlines, zero-width and
+ * bidi format characters) from src/sanitize.ts.
+ */
 export function sanitize(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\t/g, '  ').replace(/[\x00-\x08\x0a-\x1f\x7f\x80-\x9f]/g, '');
+  return safeLine(String(text ?? '').replace(/\t/g, '  '));
 }
 
 /** The first `width` cells of `text`; a wide char that would straddle the edge becomes a space. */
