@@ -60,6 +60,61 @@ export function validateHostName(name: string): string {
   return name;
 }
 
+const BINARY_RE = /^[A-Za-z0-9_./~+-]+$/;
+// Same rule as the gateway endpoint's DEVICE_ID_RE (kept local: hosts/ must not import the gateway stack).
+const DEVICE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,63}$/;
+const CONTROL_OR_SPACE = /[\s\x00-\x1f\x7f]/;
+
+/**
+ * The host-side `pocketshell` path is spliced into shell command lines as
+ * one bare word (so `~/.local/bin/pocketshell` still expands): only path
+ * characters, never whitespace or shell syntax, never a leading `-`.
+ */
+export function validateBinary(binary: string): string {
+  if (!BINARY_RE.test(binary) || binary.startsWith('-')) {
+    throw new HostStoreError(
+      `invalid --binary ${JSON.stringify(binary)}: use a plain path of [A-Za-z0-9_./~+-] (no spaces or shell syntax)`,
+    );
+  }
+  return binary;
+}
+
+/** An ssh destination: no leading `-` (option injection), no whitespace or controls. */
+export function validateSshDestination(destination: string): string {
+  if (!destination || destination.startsWith('-') || CONTROL_OR_SPACE.test(destination)) {
+    throw new HostStoreError(
+      `invalid ssh destination ${JSON.stringify(destination)}: it must not be empty, start with '-', or contain whitespace/control characters`,
+    );
+  }
+  return destination;
+}
+
+export function validateGatewayDeviceId(deviceId: string): string {
+  if (!DEVICE_ID_RE.test(deviceId)) {
+    throw new HostStoreError(
+      `invalid gateway device id ${JSON.stringify(deviceId)}: 3-64 of [A-Za-z0-9._:-], starting with a letter or digit`,
+    );
+  }
+  return deviceId;
+}
+
+/** Everything `addHost` checks about an entry before saving it. */
+export function validateHostEntry(entry: HostEntry): HostEntry {
+  validateHostName(entry.name);
+  if (entry.binary !== undefined) validateBinary(entry.binary);
+  if (entry.mode === 'ssh') {
+    if (!entry.ssh) throw new HostStoreError(`host ${entry.name}: ssh mode needs ssh settings`);
+    validateSshDestination(entry.ssh.destination);
+    if (entry.ssh.user !== undefined && (entry.ssh.user.startsWith('-') || CONTROL_OR_SPACE.test(entry.ssh.user) || !entry.ssh.user)) {
+      throw new HostStoreError(`invalid ssh user ${JSON.stringify(entry.ssh.user)}`);
+    }
+  } else if (entry.mode === 'gateway') {
+    if (!entry.gateway) throw new HostStoreError(`host ${entry.name}: gateway mode needs gateway settings`);
+    validateGatewayDeviceId(entry.gateway.deviceId);
+  }
+  return entry;
+}
+
 export function localHost(): HostEntry {
   return { name: LOCAL_HOST_NAME, mode: 'local' };
 }
@@ -109,7 +164,7 @@ export function getHost(name: string): HostEntry {
 }
 
 export function addHost(entry: HostEntry, options: { replace?: boolean } = {}): HostEntry {
-  validateHostName(entry.name);
+  validateHostEntry(entry);
   if (entry.name === LOCAL_HOST_NAME) throw new HostStoreError('`local` is built in and cannot be replaced');
   const data = read();
   const index = data.hosts.findIndex((host) => host.name === entry.name);

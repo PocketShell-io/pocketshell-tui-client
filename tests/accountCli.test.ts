@@ -88,11 +88,15 @@ function storeCreds(): void {
 const credPath = (): string => join(xdg, 'pocketshell', 'credentials.json');
 
 describe('CLI', () => {
-  it('whoami --json when not logged in → {"logged_in":false}, exit 3', async () => {
+  it('whoami --json when not logged in → NOT_LOGGED_IN error document, exit 3', async () => {
     const r = await cli(['whoami', '--json']);
     expect(r.code).toBe(3);
-    expect(r.stdout.trim().split('\n').map((l) => JSON.parse(l))).toEqual([{ logged_in: false }]);
-    expect(r.stderr).toMatch(/Not logged in/);
+    expect(r.stdout.trim().split('\n').map((l) => JSON.parse(l))).toEqual([
+      { ok: false, error: { code: 'NOT_LOGGED_IN', message: expect.stringMatching(/not logged in/i) } },
+    ]);
+    const human = await cli(['whoami']);
+    expect(human.code).toBe(3);
+    expect(human.stderr).toMatch(/not logged in/i);
   });
 
   it('login --json streams pending then logged_in; whoami --json verifies', async () => {
@@ -121,12 +125,12 @@ describe('CLI', () => {
     expect(lines).toEqual([
       {
         event: 'pending',
-        user_code: CODE,
-        verification_uri: 'https://app.pocketshell.io/device',
-        verification_uri_complete: `https://app.pocketshell.io/device?code=${CODE}`,
-        expires_in: 600,
+        userCode: CODE,
+        verificationUri: 'https://app.pocketshell.io/device',
+        verificationUriComplete: `https://app.pocketshell.io/device?code=${CODE}`,
+        expiresIn: 600,
       },
-      { ok: true, event: 'logged_in', email: 'you@example.com', label: 'agent-box', expires_at: expect.any(Number) },
+      { ok: true, event: 'logged_in', email: 'you@example.com', label: 'agent-box', expiresAt: expect.any(Number) },
     ]);
     expect(statSync(credPath()).mode & 0o777).toBe(0o600);
 
@@ -136,7 +140,16 @@ describe('CLI', () => {
 
     const who = await cli(['whoami', '--json']);
     expect(who.code).toBe(0);
-    expect(JSON.parse(who.stdout)).toMatchObject({ logged_in: true, verified: true, email: 'you@example.com', label: 'agent-box', broker_url: base });
+    expect(JSON.parse(who.stdout)).toMatchObject({
+      ok: true,
+      loggedIn: true,
+      verified: true,
+      email: 'you@example.com',
+      label: 'agent-box',
+      brokerUrl: base,
+      tokenId: 'tok_1',
+      expiresAt: expect.any(Number),
+    });
   }, 30_000);
 
   it('login human output', async () => {
@@ -173,7 +186,7 @@ describe('CLI', () => {
     routes['POST /cli/logout'] = () => ({ status: 401 });
     const ok = await cli(['logout', '--json']);
     expect(ok.code).toBe(0);
-    expect(JSON.parse(ok.stdout)).toMatchObject({ ok: true, result: 'logged_out', warning: null });
+    expect(JSON.parse(ok.stdout)).toMatchObject({ ok: true, loggedIn: false, result: 'logged_out', warning: null, expiresAt: null });
     expect(existsSync(credPath())).toBe(false);
 
     const none = await cli(['logout']);

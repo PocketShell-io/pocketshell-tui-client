@@ -1,5 +1,5 @@
 /** Glue every command shares: pick the host, open it, always close it. */
-import type { Command } from 'commander';
+import { InvalidArgumentError, type Command } from 'commander';
 import { HostClient } from '../hostClient.js';
 import { defaultHostName, getHost, LOCAL_HOST_NAME, type HostEntry } from '../hosts/store.js';
 import { fail, setJsonMode } from '../output.js';
@@ -17,7 +17,8 @@ export function jsonOption(command: Command): Command {
 }
 
 export function resolveHost(name: string | undefined): HostEntry {
-  return getHost(name ?? process.env.PSC_HOST ?? defaultHostName() ?? LOCAL_HOST_NAME);
+  // An empty PSC_HOST (exported but unset in a script) means "no override".
+  return getHost(name || process.env.PSC_HOST || defaultHostName() || LOCAL_HOST_NAME);
 }
 
 /** Open the host, run `body`, close it — and turn any failure into an exit code. */
@@ -44,4 +45,22 @@ export function action<A extends unknown[]>(fn: (...args: A) => Promise<void>): 
       process.exitCode = fail(error);
     }
   };
+}
+
+/** Commander option parser: a positive number of seconds (fractions allowed). */
+export function parseSeconds(value: string): number {
+  const n = Number(value);
+  if (value.trim() === '' || !Number.isFinite(n) || n <= 0) {
+    throw new InvalidArgumentError(`expected a positive number of seconds, got ${JSON.stringify(value)}`);
+  }
+  return n;
+}
+
+/** Commander option parser: a positive integer. */
+export function parsePositiveInt(value: string): number {
+  const n = Number(value);
+  if (!/^\d+$/.test(value.trim()) || !Number.isSafeInteger(n) || n <= 0) {
+    throw new InvalidArgumentError(`expected a positive integer, got ${JSON.stringify(value)}`);
+  }
+  return n;
 }

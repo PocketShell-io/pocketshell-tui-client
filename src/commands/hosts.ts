@@ -1,5 +1,5 @@
 /** `hosts list|add|remove|default|check`: the saved host inventory. */
-import type { Command } from 'commander';
+import { InvalidArgumentError, type Command } from 'commander';
 import { HostClient } from '../hostClient.js';
 import {
   addHost,
@@ -10,7 +10,8 @@ import {
   setDefaultHost,
   type HostEntry,
 } from '../hosts/store.js';
-import { emit, setJsonMode } from '../output.js';
+import { emit, EXIT, setJsonMode, usageError } from '../output.js';
+import { safeLine } from '../sanitize.js';
 import { openConnection } from '../transport/index.js';
 import { action, jsonOption } from './common.js';
 
@@ -32,7 +33,9 @@ function describe(host: HostEntry): string {
 
 function parsePort(value: string): number {
   const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid port ${value}`);
+  if (!/^\d+$/.test(value) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new InvalidArgumentError(`expected a port 1-65535, got ${JSON.stringify(value)}`);
+  }
   return port;
 }
 
@@ -60,7 +63,7 @@ export function registerHosts(program: Command): void {
       .option('-p, --port <port>', 'ssh port (ssh mode)', parsePort)
       .option('-i, --identity <file>', 'private key file')
       .option('--server <origin>', 'gateway origin, wss://host[:port] (gateway mode; default production)')
-      .option('--binary <path>', 'pocketshell binary on the host (default: pocketshell on PATH)')
+      .option('--binary <path>', 'pocketshell binary on the host, a plain path of [A-Za-z0-9_./~+-] (default: pocketshell on PATH)')
       .option('--default', 'make it the default host')
       .option('--replace', 'overwrite an existing host of the same name'),
   ).action(
@@ -82,10 +85,7 @@ export function registerHosts(program: Command): void {
       ) => {
         if (opts.json) setJsonMode(true);
         if (Boolean(opts.ssh) === Boolean(opts.gateway)) {
-          throw Object.assign(new Error('pass exactly one of --ssh <destination> or --gateway <device-id>'), {
-            code: 'USAGE',
-            exitCode: 2,
-          });
+          throw usageError('pass exactly one of --ssh <destination> or --gateway <device-id>');
         }
         const entry: HostEntry = opts.ssh
           ? {
@@ -134,7 +134,17 @@ export function registerHosts(program: Command): void {
     }),
   );
 
-  jsonOption(hosts.command('check <name>').description('connect and report the host CLI and aplexer versions')).action(
+  jsonOption(
+    hosts
+      .command('check <name>')
+      .description('connect and report the host CLI and aplexer versions')
+      .addHelpText(
+        'after',
+        '\n--json: {"ok":true,"host":...,"mode":...,"ms":N,"pocketshell":"<version>"|null,"aplexer":"<version>"|null}\n' +
+          'Cannot connect: the connection error (exit 4). Connected but no pocketshell CLI:\n' +
+          'ok:false, error {"code":"HOST_CLI_MISSING"}, exit 6 (the version fields are still included).',
+      ),
+  ).action(
     action(async (name: string, opts: { json?: boolean }) => {
       if (opts.json) setJsonMode(true);
       const host = getHost(name);
@@ -142,15 +152,26 @@ export function registerHosts(program: Command): void {
       const connection = await openConnection(host);
       try {
         const versions = await new HostClient(connection, host.binary).probe();
-        const result = { ok: versions.pocketshell !== null, host: name, mode: host.mode, ms: Date.now() - started, ...versions };
+        const ms = Date.now() - started;
+        const missing = versions.pocketshell === null;
+        const result = {
+          ok: !missing,
+          host: name,
+          mode: host.mode,
+          ms,
+          ...versions,
+          ...(missing
+            ? { error: { code: 'HOST_CLI_MISSING', message: `no working \`${host.binary ?? 'pocketshell'}\` CLI on ${name}` } }
+            : {}),
+        };
         emit(result, () =>
           [
-            `${name} (${describe(host)}) reachable in ${result.ms} ms`,
-            `pocketshell: ${versions.pocketshell ?? 'MISSING — install with `uv tool install pocketshell`'}`,
-            `aplexer:     ${versions.aplexer ?? 'missing'}`,
+            `${name} (${describe(host)}) reachable in ${ms} ms`,
+            `pocketshell: ${versions.pocketshell === null ? 'MISSING — install with `uv tool install pocketshell`' : safeLine(versions.pocketshell)}`,
+            `aplexer:     ${versions.aplexer === null ? 'missing' : safeLine(versions.aplexer)}`,
           ].join('\n'),
         );
-        if (!result.ok) process.exitCode = 6;
+        if (missing) process.exitCode = EXIT.HOST_CLI;
       } finally {
         await connection.close();
       }

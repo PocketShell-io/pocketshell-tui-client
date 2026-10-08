@@ -46,51 +46,116 @@ and `--json`.
 psc                                   interactive UI (same as `psc tui`)
 psc hosts list|add|remove|default|check
 psc sessions list                     sessions on the host
-psc sessions create NAME [-C DIR] [-e ENGINE] [--attach]
+psc sessions create NAME [-C DIR] [-e ENGINE] [--profile P] [--attach]
 psc sessions send SESSION [TEXT] [--enter]   type into a session (stdin when TEXT is - or omitted)
-psc sessions capture SESSION [--raw]  what the session shows right now
+psc sessions capture SESSION [--raw [--bytes N]] [--wait-for REGEX [--timeout S]]
 psc sessions attach SESSION           take over the terminal (Ctrl-b d detaches); also `psc attach`
-psc sessions kill SESSION
+psc sessions kill SESSION [--if-exists]
 psc sessions warnings | ack [SESSION]
 psc workspaces list|add|remove
 psc engines | profiles
-psc exec -- COMMAND...                run a command on the host
+psc exec [-t SECONDS] -- COMMAND...   run a command on the host
 psc login | logout | whoami           PocketShell account (device flow)
 psc gateway devices|pin|unpin         gateway hosts and their pinned keys
 ```
 
-`SESSION` is a session name (`workspace:tag`), its aplexer id or a unique id
-prefix, or a tag that only one session has.
+### Sessions: names and selectors
+
+`sessions create NAME -C DIR` makes a session named `<basename of DIR>:NAME`
+(`create review -C '~/git/project'` → `project:review`). Without `-e/--engine`
+the session is a plain shell; with one it launches that agent (see `psc engines`).
+Creating a name that is already live reuses it (`"created": false`).
+
+`-C` is a path **on the host**. Quote a leading `~` (`-C '~/git/project'`) so
+your local shell doesn't expand it to your local home: it must reach the host
+unexpanded and is resolved there.
+
+A `SESSION` argument is matched in this order:
+
+1. the full name (`project:review`) or the aplexer id, exactly;
+2. a tag (`review`) that exactly one session carries;
+3. a unique prefix (4+ characters) of the aplexer id.
+
+A selector that matches more than one session (a shared tag, several id
+prefixes, or a tag and a prefix pointing at different sessions) fails with
+`SESSION_AMBIGUOUS` and the candidates; no match fails with `SESSION_NOT_FOUND`.
+Both exit 5.
+
+### Driving a session
+
+- `send` types the text but does **not** submit it; add `--enter` to press
+  Enter. Text from stdin loses exactly one trailing newline, so
+  `echo 'run the tests' | psc sessions send review --enter` submits once.
+- `capture` prints the rendered screen as plain text (`--raw`: recent raw
+  output bytes, `--bytes N` with `--raw` only). systemd-run's
+  `Running as unit: …` banner is stripped.
+- `capture --wait-for REGEX [--timeout S]` polls the screen about every 500 ms
+  until the JavaScript regex matches (multiline: `^`/`$` match per line), then
+  prints it (`"matched": true, "match": "…"`). Default timeout 30 s; on timeout
+  it fails with `TIMEOUT`, exit 124, and the last capture in `error.text`.
+- `kill` of a session that no longer exists is `SESSION_NOT_FOUND` (exit 5);
+  with `--if-exists` it succeeds with `"killed": false, "alreadyGone": true`.
+
+### exec
+
+One word is a shell command line run as-is by the host's `sh`
+(`psc exec 'cd ~/git/x && make test'`); several words are an argv and each is
+shell-quoted (`psc exec -- ls -la /tmp` runs `'ls' '-la' '/tmp'`). Put `--`
+before the command so its flags aren't read as psc options. `-t/--timeout`
+(seconds, default 60) kills the command; in `local` mode its whole process
+tree is killed, over ssh/gateway the remote command may keep running.
 
 ## For agents
 
 The CLI is meant to be driven by coding agents as well as people:
 
 - `--json` (or `PSC_JSON=1`) prints exactly one JSON document on stdout per
-  command. Successes carry `"ok": true`; failures are
-  `{"ok": false, "error": {"code": "...", "message": "..."}}`, also on stdout.
+  command — including usage errors (bad flags, missing arguments). Successes
+  carry `"ok": true`; failures are
+  `{"ok": false, "error": {"code": "...", "message": "...", ...details}}`, also
+  on stdout. Some errors add fields to `error`: `candidates: [{name, id}]` for
+  `SESSION_AMBIGUOUS`, `text` (the last capture) for a `--wait-for` timeout.
   The one exception is `login --json`, which first prints a `pending` line
+  (`{"event":"pending","userCode","verificationUri","verificationUriComplete","expiresIn"}`)
   holding the code for the human, then the result.
+- JSON keys are camelCase everywhere.
 - Nothing prompts when stdin is not a terminal; ssh runs with `BatchMode=yes`
   for commands, so a missing key fails fast instead of hanging.
 - Stable exit codes:
 
-| Exit | Meaning |
-| --- | --- |
-| 0 | ok |
-| 1 | error |
-| 2 | usage / bad host config |
-| 3 | not logged in |
-| 4 | cannot connect to the host |
-| 5 | session not found |
-| 6 | the host's `pocketshell` CLI failed, is missing, or is too old |
+| Exit | Meaning | `error.code` |
+| --- | --- | --- |
+| 0 | ok | |
+| 1 | error | `ERROR`, `HOST_COMMAND_FAILED`, account errors, … |
+| 2 | usage / bad host config | `USAGE`, `HOST_STORE`, `BAD_HOST` |
+| 3 | not logged in | `NOT_LOGGED_IN` |
+| 4 | cannot connect to the host (or the connection dropped) | `CONNECT_FAILED`, `AUTH_FAILED`, `HOST_OFFLINE`, `CONNECTION_LOST`, … |
+| 5 | session not found, or the selector is ambiguous | `SESSION_NOT_FOUND`, `SESSION_AMBIGUOUS` |
+| 6 | the host's `pocketshell` CLI failed, is missing, or is too old | `HOST_CLI_FAILED`, `HOST_CLI_MISSING`, `HOST_CLI_TOO_OLD`, `HOST_CLI_MALFORMED` |
+| 124 | a host command timed out (it may still complete on the host) | `TIMEOUT` |
+| N | `exec`: the remote command's own exit code | `COMMAND_FAILED` |
+
+Result shapes worth knowing:
+
+```text
+sessions create   {"ok":true,"host","name","id","created","session":{"name","id","created"}}
+sessions send     {"ok":true,"host","session":{"name","id"},"bytes","enter"}
+sessions capture  {"ok":true,"host","session":{"name","id"},"mode","text"[,"matched","match"]}
+sessions kill     {"ok":true,"host","session":{"name","id"},"killed","alreadyGone"}
+exec              {"ok","host","command","exitCode","stdout","stderr","timedOut"[,"error"]}
+                  non-zero exit N → ok:false, error {"code":"COMMAND_FAILED","message":"exit N"}, exit N
+                  timeout → error TIMEOUT, exit 124; no exit status → error CONNECTION_LOST, exit 4
+hosts check       {"ok","host","mode","ms","pocketshell","aplexer"} (cannot connect → exit 4)
+whoami            {"ok":true,"loggedIn":true,"email","label","brokerUrl","expiresAt","tokenId","verified"}
+logout            {"ok":true,"loggedIn":false,"result","revoked","warning","expiresAt"}
+```
 
 A typical loop for an agent that drives another agent:
 
 ```bash
-psc -H box sessions create review -C ~/git/project -e claude --json
+psc -H box sessions create review -C '~/git/project' -e claude --json   # → project:review
 psc -H box sessions send review "review the open PR and summarise" --enter --json
-psc -H box sessions capture review --json      # poll the screen
+psc -H box sessions capture review --wait-for 'summary' --timeout 600 --json  # block until it shows up
 psc -H box sessions list --json                # agentState: working / waiting / idle
 ```
 

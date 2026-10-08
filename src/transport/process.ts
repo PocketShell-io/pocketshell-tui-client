@@ -7,8 +7,68 @@ import type { ExecOptions, ExecOutcome } from './types.js';
 
 /** Hard cap on captured output per stream, so a runaway command can't OOM us. */
 const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
+/** SIGTERM → SIGKILL escalation for a timed-out command's process group. */
+const KILL_GRACE_MS = 2_000;
+/** After the child exits, how long stdout/stderr may keep draining before we stop waiting. */
+const DRAIN_GRACE_MS = 250;
 
-/** Spawn `file argv`, feed stdin, capture both streams, enforce the timeout. */
+/**
+ * Process groups of captured commands still running. Each captured command
+ * runs in its own group (detached), so a timeout can kill the whole tree —
+ * `sh -c 'sleep 15; true'` leaves `sleep` behind if only `sh` is killed.
+ * The flip side: a terminal Ctrl+C no longer reaches them, so we forward
+ * SIGINT/SIGTERM/SIGHUP and kill them on exit ourselves.
+ */
+const liveGroups = new Set<number>();
+const FORWARDED = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+
+function killGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    /* already gone */
+  }
+}
+
+function onExit(): void {
+  for (const pid of liveGroups) killGroup(pid, 'SIGTERM');
+}
+
+function onSignal(signal: NodeJS.Signals): void {
+  for (const pid of liveGroups) killGroup(pid, signal === 'SIGINT' ? 'SIGINT' : 'SIGTERM');
+  // Only stand in for the default action when nobody else handles the signal.
+  if (process.listenerCount(signal) === 1) {
+    liveGroups.clear();
+    detachHandlers();
+    process.kill(process.pid, signal);
+  }
+}
+
+function detachHandlers(): void {
+  process.off('exit', onExit);
+  for (const signal of FORWARDED) process.off(signal, onSignal);
+}
+
+function watch(pid: number): void {
+  if (liveGroups.size === 0) {
+    process.on('exit', onExit);
+    for (const signal of FORWARDED) process.on(signal, onSignal);
+  }
+  liveGroups.add(pid);
+}
+
+function unwatch(pid: number): void {
+  if (liveGroups.delete(pid) && liveGroups.size === 0) detachHandlers();
+}
+
+/**
+ * Spawn `file argv`, feed stdin, capture both streams, enforce the timeout.
+ *
+ * The child leads its own process group; on timeout the whole group gets
+ * SIGTERM, then SIGKILL after 2 s. We settle on the child's `exit` (plus a
+ * short drain), not on `close`: a grandchild that inherited the pipes and
+ * outlives the child must not hold the result hostage.
+ */
 export function runCaptured(
   file: string,
   argv: readonly string[],
@@ -18,19 +78,33 @@ export function runCaptured(
     const child = spawn(file, argv, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: options.env ?? process.env,
+      detached: true,
     });
+    const pid = child.pid;
+    if (pid !== undefined) watch(pid);
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let outBytes = 0;
     let errBytes = 0;
     let timedOut = false;
     let settled = false;
+    const timers: NodeJS.Timeout[] = [];
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 2_000).unref();
-    }, options.timeoutMs);
+    timers.push(
+      setTimeout(() => {
+        timedOut = true;
+        if (pid !== undefined) killGroup(pid, 'SIGTERM');
+        else child.kill('SIGTERM');
+        timers.push(
+          setTimeout(() => {
+            if (pid !== undefined) killGroup(pid, 'SIGKILL');
+            else child.kill('SIGKILL');
+            // Even an unkillable (D-state) child must not hang the caller.
+            timers.push(setTimeout(() => finish(null), 1_000));
+          }, KILL_GRACE_MS),
+        );
+      }, options.timeoutMs),
+    );
 
     child.stdout.on('data', (chunk: Buffer) => {
       if (outBytes < MAX_CAPTURE_BYTES) out.push(chunk);
@@ -43,7 +117,14 @@ export function runCaptured(
     const finish = (exitCode: number | null, extraErr = '') => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      for (const timer of timers) clearTimeout(timer);
+      if (pid !== undefined) {
+        // A timed-out tree is killed whole; stragglers of a clean exit are left alone.
+        if (timedOut) killGroup(pid, 'SIGKILL');
+        unwatch(pid);
+      }
+      child.stdout.destroy();
+      child.stderr.destroy();
       resolve({
         exitCode: timedOut ? null : exitCode,
         stdout: Buffer.concat(out).toString('utf8'),
@@ -52,6 +133,9 @@ export function runCaptured(
       });
     };
     child.on('error', (error) => finish(null, `${error.message}\n`));
+    child.on('exit', (code) => {
+      timers.push(setTimeout(() => finish(code), DRAIN_GRACE_MS));
+    });
     child.on('close', (code) => finish(code));
 
     child.stdin.on('error', () => {

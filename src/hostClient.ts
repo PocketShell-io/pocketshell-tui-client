@@ -19,27 +19,100 @@ import {
   type WarningRow,
   type WorkspacesListing,
 } from '@pocketshell/core';
+import { HostStoreError, validateBinary } from './hosts/store.js';
 import type { Connection, ExecOutcome } from './transport/types.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * `systemd-run` (which aplexer may launch through) announces itself on
+ * stderr: `Running as unit: run-u12.service; invocation ID: 3f…` (or
+ * `Running scope as unit: …`). It is noise, never the answer: drop such
+ * lines from the start of host text.
+ */
+const SYSTEMD_NOISE = /^\s*Running (?:scope )?as unit:? .*$/;
+
+export function stripSystemdNoise(text: string): string {
+  const lines = text.split('\n');
+  let skip = 0;
+  while (skip < lines.length && SYSTEMD_NOISE.test(lines[skip]!)) skip++;
+  return skip === 0 ? text : lines.slice(skip).join('\n');
+}
+
+/** A host command (an aplexer verb, `exec`) failed, timed out, or returned no status. */
 export class HostCommandError extends Error {
-  readonly code = 'HOST_COMMAND_FAILED';
+  readonly code: string;
+  readonly exitCode: number;
   constructor(
     message: string,
     readonly outcome: ExecOutcome,
   ) {
     super(message);
     this.name = 'HostCommandError';
+    this.code = outcome.timedOut ? 'TIMEOUT' : 'HOST_COMMAND_FAILED';
+    this.exitCode = outcome.timedOut ? 124 : 1;
   }
 }
 
 export class SessionNotFound extends Error {
   readonly code = 'SESSION_NOT_FOUND';
+  readonly exitCode = 5;
   constructor(selector: string) {
     super(`no session matches ${JSON.stringify(selector)} (see \`sessions list\`)`);
     this.name = 'SessionNotFound';
   }
+}
+
+/** A selector matched more than one session; `details.candidates` lists them. */
+export class SessionAmbiguous extends Error {
+  readonly code = 'SESSION_AMBIGUOUS';
+  readonly exitCode = 5;
+  readonly details: { candidates: Array<{ name: string; id: string | null }> };
+  constructor(selector: string, rows: SessionRow[]) {
+    const candidates = rows.map((row) => ({ name: row.name, id: row.id }));
+    super(
+      `${JSON.stringify(selector)} matches ${candidates.length} sessions: ` +
+        `${candidates.map((c) => c.name).join(', ')} — use the full name or id`,
+    );
+    this.name = 'SessionAmbiguous';
+    this.details = { candidates };
+  }
+}
+
+/** The shortest id prefix `resolveSession` accepts. */
+export const MIN_ID_PREFIX = 4;
+
+const rowKey = (row: SessionRow): string => row.id ?? `name:${row.name}`;
+
+function uniqueRows(rows: SessionRow[]): SessionRow[] {
+  const seen = new Map<string, SessionRow>();
+  for (const row of rows) if (!seen.has(rowKey(row))) seen.set(rowKey(row), row);
+  return [...seen.values()];
+}
+
+/**
+ * Pick the one session a selector means. Ranking: the exact `name`
+ * (`workspace:tag`) or aplexer id wins outright; then a tag exactly one
+ * session carries; then a unique id prefix (≥ 4 characters). A tag shared
+ * by several sessions, several prefix matches, or a tag match and a prefix
+ * match naming different sessions is ambiguous — never a silent guess.
+ */
+export function pickSession(sessions: SessionRow[], selector: string): SessionRow {
+  const exact = sessions.find((row) => row.name === selector || (row.id !== null && row.id === selector));
+  if (exact) return exact;
+  const byTag = uniqueRows(sessions.filter((row) => row.tag === selector));
+  const byPrefix =
+    selector.length >= MIN_ID_PREFIX ? uniqueRows(sessions.filter((row) => row.id?.startsWith(selector))) : [];
+  const all = uniqueRows([...byTag, ...byPrefix]);
+  if (all.length === 1) return all[0]!;
+  if (all.length > 1) throw new SessionAmbiguous(selector, all);
+  throw new SessionNotFound(selector);
+}
+
+/** `exec` argv → one shell command: one word runs as-is, several are each quoted. */
+export function execCommandLine(words: readonly string[]): string {
+  if (words.length === 1) return words[0]!;
+  return words.map((word) => shellQuote(word)).join(' ');
 }
 
 export class HostClient {
@@ -49,6 +122,13 @@ export class HostClient {
     readonly connection: Connection,
     binary = 'pocketshell',
   ) {
+    // The binary is spliced into host command lines unquoted (a leading `~`
+    // must still expand), so a hand-edited hosts.json is checked here too.
+    try {
+      validateBinary(binary);
+    } catch (error) {
+      throw new HostStoreError(`host ${connection.hostName}: ${(error as Error).message}`);
+    }
     this.cli = new HostCliCore(
       {
         exec: (command, timeoutMs) => this.run(command, timeoutMs),
@@ -62,32 +142,44 @@ export class HostClient {
     return this.connection.exec(pathAwareCommand(command), { timeoutMs, stdin });
   }
 
-  /** Like `run`, but a non-zero exit is an error. */
+  /** Like `run`, but a non-zero exit (or a timeout) is an error. */
   async runChecked(command: string, timeoutMs = DEFAULT_TIMEOUT_MS, stdin?: string | Uint8Array): Promise<string> {
     const outcome = await this.run(command, timeoutMs, stdin);
-    if (outcome.timedOut) throw new HostCommandError(`\`${command}\` timed out after ${timeoutMs} ms`, outcome);
+    if (outcome.timedOut) {
+      throw new HostCommandError(
+        `\`${command}\` timed out after ${timeoutMs / 1000}s (it may still complete on the host)`,
+        outcome,
+      );
+    }
     if (outcome.exitCode !== 0) {
-      const detail = outcome.stderr.trim().split('\n').slice(-3).join(' ') || `exit ${outcome.exitCode}`;
+      const detail = stripSystemdNoise(outcome.stderr).trim().split('\n').slice(-3).join(' ') || `exit ${outcome.exitCode}`;
       throw new HostCommandError(`\`${command}\` failed: ${detail}`, outcome);
     }
     return outcome.stdout;
   }
 
-  /** Is the host CLI there at all, and which version? Never throws. */
+  /**
+   * Which host CLI and aplexer versions are installed (null = missing).
+   * One round trip; a connection failure or timeout throws (an unreachable
+   * host is never reported as reachable).
+   */
   async probe(): Promise<{ pocketshell: string | null; aplexer: string | null }> {
-    const version = async (command: string) => {
-      try {
-        const outcome = await this.run(command, 15_000);
-        return outcome.exitCode === 0 ? outcome.stdout.trim().split('\n').pop() ?? null : null;
-      } catch {
-        return null;
-      }
-    };
-    const [pocketshell, aplexer] = await Promise.all([
-      version(`${this.cli.binary} --version`),
-      version('a --version'),
-    ]);
-    return { pocketshell, aplexer };
+    const line = (label: string, command: string) =>
+      `printf '%s=%s\\n' ${label} "$(${command} --version 2>/dev/null | tail -n 1)"`;
+    const outcome = await this.run(`${line('pocketshell', this.cli.binary)}; ${line('aplexer', 'a')}`, 15_000);
+    if (outcome.timedOut) throw new HostCommandError('the version probe timed out after 15s', outcome);
+    const values: Record<string, string | null> = { pocketshell: null, aplexer: null };
+    for (const raw of outcome.stdout.split('\n')) {
+      const match = /^(pocketshell|aplexer)=(.*)$/.exec(raw.trim());
+      if (match) values[match[1]!] = match[2]!.trim() || null;
+    }
+    if (outcome.exitCode !== 0 && values.pocketshell === null && values.aplexer === null) {
+      throw new HostCommandError(
+        `the version probe failed (exit ${outcome.exitCode}): ${stripSystemdNoise(outcome.stderr).trim().split('\n').pop() ?? ''}`,
+        outcome,
+      );
+    }
+    return { pocketshell: values.pocketshell ?? null, aplexer: values.aplexer ?? null };
   }
 
   listSessions(): Promise<SessionsListing> {
@@ -95,23 +187,13 @@ export class HostClient {
   }
 
   /**
-   * Resolve what a user or agent typed to one session row: the exact
-   * `name` (`workspace:tag`), the aplexer id or a unique id prefix, or a
-   * bare tag when exactly one session carries it.
+   * Resolve what a user or agent typed to one session row (see
+   * {@link pickSession} for the ranking). Throws SessionNotFound or
+   * SessionAmbiguous.
    */
   async resolveSession(selector: string): Promise<SessionRow> {
     const { sessions } = await this.listSessions();
-    const exact = sessions.find((row) => row.name === selector || row.id === selector);
-    if (exact) return exact;
-    const byPrefix = selector.length >= 4 ? sessions.filter((row) => row.id?.startsWith(selector)) : [];
-    if (byPrefix.length === 1) return byPrefix[0]!;
-    const byTag = sessions.filter((row) => row.tag === selector);
-    if (byTag.length === 1) return byTag[0]!;
-    if (byPrefix.length > 1 || byTag.length > 1) {
-      const names = [...byPrefix, ...byTag].map((row) => row.name).join(', ');
-      throw new Error(`${JSON.stringify(selector)} is ambiguous: ${names}`);
-    }
-    throw new SessionNotFound(selector);
+    return pickSession(sessions, selector);
   }
 
   createSession(
@@ -161,10 +243,10 @@ export class HostClient {
   }
 
   /** What the session shows right now (`--screen --plain`) or its recent raw output. */
-  capture(session: SessionRow, options: { mode: 'screen' | 'raw'; bytes?: number }): Promise<string> {
+  async capture(session: SessionRow, options: { mode: 'screen' | 'raw'; bytes?: number }): Promise<string> {
     const target = shellQuote(session.id ?? session.name);
     const flags = options.mode === 'screen' ? '--screen --plain' : options.bytes ? `--bytes ${Math.floor(options.bytes)}` : '';
-    return this.runChecked(`a capture ${target} ${flags}`.trim());
+    return stripSystemdNoise(await this.runChecked(`a capture ${target} ${flags}`.trim()));
   }
 
   /**

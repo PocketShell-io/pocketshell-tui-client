@@ -9,7 +9,6 @@ import {
   cleanText,
   login,
   logout,
-  NotLoggedIn,
   openBrowser,
   whoami,
   type PendingLogin,
@@ -37,9 +36,9 @@ with the \`pocketshell\` CLI. An existing login is never replaced silently: pass
 
 --json streams TWO JSON lines on stdout (the one command that does):
   1. as soon as the code is issued, relay it to a human:
-     {"event":"pending","user_code":"BCDF-GHJK","verification_uri":"https://...",
-      "verification_uri_complete":"https://...?code=BCDF-GHJK"|null,"expires_in":600}
-  2. when done: {"ok":true,"event":"logged_in","email":...,"label":...,"expires_at":...}
+     {"event":"pending","userCode":"BCDF-GHJK","verificationUri":"https://...",
+      "verificationUriComplete":"https://...?code=BCDF-GHJK"|null,"expiresIn":600}
+  2. when done: {"ok":true,"event":"logged_in","email":...,"label":...,"expiresAt":...}
      or the standard error document {"ok":false,"error":{"code","message"}}
      (codes: ALREADY_LOGGED_IN, CANCELLED, BROKER_UNAVAILABLE, ACCOUNT_ERROR, ...).
 A failure before a code is issued prints only the error document.`;
@@ -72,10 +71,10 @@ export function registerAccount(program: Command): void {
                 process.stdout.write(
                   `${JSON.stringify({
                     event: 'pending',
-                    user_code: info.userCode,
-                    verification_uri: info.verificationUri,
-                    verification_uri_complete: info.verificationUriComplete,
-                    expires_in: info.expiresIn,
+                    userCode: info.userCode,
+                    verificationUri: info.verificationUri,
+                    verificationUriComplete: info.verificationUriComplete,
+                    expiresIn: info.expiresIn,
                   })}\n`,
                 );
               } else {
@@ -96,7 +95,7 @@ export function registerAccount(program: Command): void {
             },
           });
           emit(
-            { ok: true, event: 'logged_in', email: creds.email, label: creds.label, expires_at: creds.expiresAt },
+            { ok: true, event: 'logged_in', email: creds.email, label: creds.label, expiresAt: creds.expiresAt },
             () => `Logged in as ${cleanText(creds.email)}.`,
           );
         } finally {
@@ -122,11 +121,11 @@ export function registerAccount(program: Command): void {
       emit(
         {
           ok: true,
-          logged_in: false,
+          loggedIn: false,
           result: result.result,
           revoked: result.revoked,
           warning: result.warning,
-          expires_at: result.expiresAt,
+          expiresAt: result.expiresAt,
         },
         () => (result.result === 'not_logged_in' ? 'Not logged in.' : result.result === 'logged_out' ? 'Logged out.' : ''),
       );
@@ -139,32 +138,34 @@ export function registerAccount(program: Command): void {
       .description('show the logged-in account (checked with the broker)')
       .addHelpText(
         'after',
-        '\n--json: {"broker_url","email","expires_at","label","logged_in":true,"token_id","verified"};\n' +
-          'not logged in: {"logged_in":false}, exit 3.',
+        '\n--json: {"ok":true,"loggedIn":true,"email","label","brokerUrl","expiresAt","tokenId","verified"};\n' +
+          'not logged in: {"ok":false,"error":{"code":"NOT_LOGGED_IN","message"}}, exit 3.',
       ),
   ).action(
     action(async (opts: { json?: boolean }) => {
       if (opts.json) setJsonMode(true);
-      let result: Awaited<ReturnType<typeof whoami>>;
-      try {
-        result = await whoami();
-      } catch (error) {
-        if (!(error instanceof NotLoggedIn)) throw error;
-        if (isJsonMode()) process.stdout.write(`${JSON.stringify({ logged_in: false })}\n`);
-        process.stderr.write(`error: ${error.message}\n`);
-        process.exitCode = error.exitCode;
-        return;
-      }
-      const { info, warnings, sessionsUrl } = result;
-      emit(info, () =>
-        [
-          `Logged in as ${info.email}`,
-          `  label:    ${info.label}`,
-          `  broker:   ${cleanText(info.broker_url)}`,
-          `  expires:  ${when(info.expires_at)}`,
-          `  verified: ${info.verified ? 'yes' : 'no'}`,
-          `Review or revoke sessions at ${sessionsUrl}`,
-        ].join('\n'),
+      // NotLoggedIn propagates: {"ok":false,"error":{"code":"NOT_LOGGED_IN"}}, exit 3.
+      const { info, warnings, sessionsUrl } = await whoami();
+      emit(
+        {
+          ok: true,
+          loggedIn: true,
+          email: info.email,
+          label: info.label,
+          brokerUrl: info.broker_url,
+          expiresAt: info.expires_at,
+          tokenId: info.token_id,
+          verified: info.verified,
+        },
+        () =>
+          [
+            `Logged in as ${info.email}`,
+            `  label:    ${info.label}`,
+            `  broker:   ${cleanText(info.broker_url)}`,
+            `  expires:  ${when(info.expires_at)}`,
+            `  verified: ${info.verified ? 'yes' : 'no'}`,
+            `Review or revoke sessions at ${sessionsUrl}`,
+          ].join('\n'),
       );
       for (const warning of warnings) warn(warning);
     }),
