@@ -10,7 +10,7 @@ import { registerAccount } from './commands/account.js';
 import { registerGateway } from './commands/gateway.js';
 import { registerHosts } from './commands/hosts.js';
 import { registerCatalog, registerExec, registerSessions, registerWorkspaces } from './commands/sessions.js';
-import { fail } from './output.js';
+import { fail, setJsonMode } from './output.js';
 import { runTui } from './tui/index.js';
 import { VERSION } from './version.js';
 
@@ -22,7 +22,16 @@ program
       'Run with no arguments for the interactive UI; every action is also a subcommand (add --json for agents).',
   )
   .version(VERSION)
-  .showHelpAfterError();
+  .option('-H, --host <name>', 'saved host for every subcommand (same as the per-command -H)')
+  .option('--json', 'machine-readable output for every subcommand')
+  .showHelpAfterError()
+  // `psc -H box sessions list` and `psc sessions list -H box` both work: the
+  // program-level spelling travels to the subcommand through PSC_HOST.
+  .hook('preAction', () => {
+    const globals = program.opts<{ host?: string; json?: boolean }>();
+    if (globals.host) process.env.PSC_HOST = globals.host;
+    if (globals.json) setJsonMode(true);
+  });
 
 program
   .command('tui', { isDefault: false })
