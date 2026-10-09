@@ -20,7 +20,8 @@ function fixture() {
   mock.legacy.mockImplementation(() => { const child = new EventEmitter(); queueMicrotask(() => child.emit('close', 255)); return child; });
   return { input, output, pty, exit, data };
 }
-afterEach(() => { vi.restoreAllMocks(); mock.spawn.mockReset(); mock.legacy.mockReset(); });
+const originalPlatform = process.platform;
+afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform }); vi.useRealTimers(); vi.restoreAllMocks(); mock.spawn.mockReset(); mock.legacy.mockReset(); });
 describe('production session detach opt-in', () => {
   it('consumes split Ctrl-b d, returns0, restores terminal and never forwards detach bytes', async () => {
     const f = fixture();
@@ -91,4 +92,71 @@ describe('production session detach opt-in', () => {
     }
   });
 
+});
+
+
+describe('Windows owned helper completion in production attach', () => {
+  function windows() {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const f = fixture();
+    let complete!: () => void;
+    let refuse!: (error: Error) => void;
+    const completion = new Promise<void>((resolve, reject) => { complete = resolve; refuse = reject; });
+    const shutdownAsync = vi.fn(() => completion);
+    Object.assign(f.pty, { shutdownAsync });
+    return { ...f, complete, refuse, shutdownAsync };
+  }
+  it('waits for actual helper completion after PTY exit before terminal restoration', async () => {
+    const f = windows();
+    const pending = runInteractive('qualified-ssh', [], {}, { sessionDetach: true, input: f.input, output: f.output } as never);
+    await vi.waitFor(() => expect(mock.spawn).toHaveBeenCalledOnce());
+    f.exit.emit('exit', { exitCode: 7 });
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.input.isRaw).toBe(true);
+    expect(f.shutdownAsync).toHaveBeenCalledOnce();
+    f.complete();
+    expect(await pending).toBe(7);
+    expect(f.input.isRaw).toBe(false);
+    expect(f.pty.kill).not.toHaveBeenCalled();
+  });
+  it('refuses incomplete cleanup after eight seconds instead of detach success', async () => {
+    vi.useFakeTimers();
+    const f = windows();
+    const pending = runInteractive('qualified-ssh', [], {}, { sessionDetach: true, input: f.input, output: f.output } as never);
+    const refused = expect(pending).rejects.toThrow(/eight seconds|8000|cleanup/i);
+    await vi.waitFor(() => expect(mock.spawn).toHaveBeenCalledOnce());
+    f.input.write(Buffer.from([2, 100]));
+    f.exit.emit('exit', { exitCode: 0 });
+    await vi.advanceTimersByTimeAsync(8001);
+    await refused;
+    expect(f.input.isRaw).toBe(false);
+    expect(f.shutdownAsync).toHaveBeenCalledOnce();
+    f.complete();
+  });
+  it('waits for PTY exit as well as helper completion and keeps detached UUID transport local', async () => {
+    const f = windows();
+    const pending = runInteractive('qualified-ssh', ['remote-attach', 'UUID'], {}, { sessionDetach: true, input: f.input, output: f.output } as never);
+    await vi.waitFor(() => expect(mock.spawn).toHaveBeenCalledOnce());
+    f.input.write(Buffer.from([2, 100]));
+    f.complete();
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.input.isRaw).toBe(true);
+    expect(f.pty.write).not.toHaveBeenCalled();
+    expect(f.pty.kill).not.toHaveBeenCalled();
+    f.exit.emit('exit', { exitCode: 255 });
+    expect(await pending).toBe(0);
+    expect(f.shutdownAsync).toHaveBeenCalledOnce();
+  });
+  it('surfaces helper failure after child exit and restores terminal once', async () => {
+    const f = windows();
+    const pending = runInteractive('qualified-ssh', [], {}, { sessionDetach: true, input: f.input, output: f.output } as never);
+    const refused = expect(pending).rejects.toThrow('helper failed');
+    await vi.waitFor(() => expect(mock.spawn).toHaveBeenCalledOnce());
+    f.exit.emit('exit', { exitCode: 0 });
+    f.refuse(new Error('helper failed'));
+    await refused;
+    expect(f.input.setRawMode.mock.calls).toEqual([[true], [false]]);
+    expect(f.shutdownAsync).toHaveBeenCalledOnce();
+    expect(f.input.listenerCount('data')).toBe(0);
+  });
 });

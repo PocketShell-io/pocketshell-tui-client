@@ -26,6 +26,10 @@ export async function runSessionInteractive(file: string, argv: readonly string[
       const raw = Boolean(input.isRaw), flowing = input.readableFlowing;
       let child: IPty | undefined, done = false, stopping = false, detached = false, prefix = false;
       let failure: unknown;
+      let windowsFinishing = false;
+      let childExit!: () => void;
+      let childExitCode: number | null = null;
+      const childExited = new Promise<void>(resolve => { childExit = resolve; });
       const disposables: IDisposable[] = [], timers: NodeJS.Timeout[] = [];
       const dimensions = () => ({ cols: Math.max(1, output.columns || 80), rows: Math.max(1, output.rows || 24) });
       const kill = (signal: NodeJS.Signals) => {
@@ -48,6 +52,31 @@ export async function runSessionInteractive(file: string, argv: readonly string[
       };
       const finish = (code: number | null) => {
         if (done) return;
+        if (process.platform === 'win32' && child) {
+          if (windowsFinishing) return;
+          windowsFinishing = true; stopping = true;
+          input.pause(); input.off('data', onInput);
+          const owned = child as IPty & { shutdownAsync?: () => Promise<void> };
+          const bound = new Promise<never>((_resolve, reject) => {
+            timers.push(setTimeout(() => reject(new Error(
+              'Windows cleanup incomplete after eight seconds; detach success refused.')), 8000));
+          });
+          const cleanup = Promise.resolve().then(() => {
+            if (typeof owned.shutdownAsync !== 'function') {
+              throw new Error('Qualified Windows PTY cleanup completion bridge is required.');
+            }
+            return owned.shutdownAsync();
+          });
+          const complete = () => {
+            done = true;
+            try { restore(); } catch (error) { failure ??= error; }
+            if (failure) reject(failure); else resolve(detached ? 0 : childExitCode);
+          };
+          Promise.race([Promise.all([cleanup, childExited]), bound]).then(complete, error => {
+            failure ??= error; complete();
+          });
+          return;
+        }
         done = true;
         // This owns only the local PTY child family, never the remote worker.
         kill('SIGKILL');
@@ -58,6 +87,7 @@ export async function runSessionInteractive(file: string, argv: readonly string[
         if (done || stopping) return;
         stopping = true; detached = isDetach; failure = error;
         input.pause(); input.off('data', onInput);
+        if (process.platform === 'win32' && child) { finish(null); return; }
         kill('SIGTERM');
         if (done) return;
         timers.push(setTimeout(() => {
@@ -97,7 +127,11 @@ export async function runSessionInteractive(file: string, argv: readonly string[
       const onProcessExit = () => { kill('SIGKILL'); try { restore(); } catch { /* OS process exits */ } };
       try {
         child = spawn(file, [...argv], { ...dimensions(), env, name: env.TERM ?? 'xterm-256color', encoding: null, handleFlowControl: false });
-        disposables.push(child.onExit(event => finish(event.signal ? null : event.exitCode)));
+        disposables.push(child.onExit(event => {
+          childExitCode = event.signal ? null : event.exitCode;
+          childExit();
+          finish(childExitCode);
+        }));
         disposables.push(child.onData(data => {
           if (!done) { try { if (!output.write(data)) child!.pause(); } catch (error) { stop(false, error); } }
         }));
