@@ -65,7 +65,9 @@ export function registerHosts(program: Command): void {
       .option('--server <origin>', 'gateway origin, wss://host[:port] (gateway mode; default production)')
       .option('--binary <path>', 'pocketshell binary on the host, a plain path of [A-Za-z0-9_./~+-] (default: pocketshell on PATH)')
       .option('--native-windows-cli <path>', 'trusted provisioned absolute native Windows CLI console (gateway only; no --binary)')
-      .option('--native-transport <transport>', 'explicit native transport; only openssh-git-bash is qualified')
+      .option('--native-transport <transport>', 'explicit provisioned native transport: openssh-git-bash or openssh-cmd-git-bash')
+      .option('--native-bash <path>', 'CMD transport only: trusted provisioned absolute Bash interpreter')
+      .option('--native-bash-sha256 <digest>', 'CMD transport only: operator-verified Bash SHA256 for this device')
       .option('--default', 'make it the default host')
       .option('--replace', 'overwrite an existing host of the same name'),
   ).action(
@@ -82,6 +84,8 @@ export function registerHosts(program: Command): void {
           binary?: string;
           nativeWindowsCli?: string;
           nativeTransport?: string;
+          nativeBash?: string;
+          nativeBashSha256?: string;
           default?: boolean;
           replace?: boolean;
           json?: boolean;
@@ -113,11 +117,18 @@ export function registerHosts(program: Command): void {
               },
             };
         if (opts.binary) entry.binary = opts.binary;
-        if (opts.nativeWindowsCli !== undefined || opts.nativeTransport !== undefined) {
-          if (!opts.gateway || !opts.nativeWindowsCli || opts.nativeTransport !== 'openssh-git-bash') {
-            throw usageError('native Windows provisioning needs --gateway, --native-windows-cli and explicit --native-transport openssh-git-bash');
+        if (opts.nativeWindowsCli !== undefined || opts.nativeTransport !== undefined || opts.nativeBash !== undefined || opts.nativeBashSha256 !== undefined) {
+          if (!opts.gateway || !opts.nativeWindowsCli || !['openssh-git-bash', 'openssh-cmd-git-bash'].includes(opts.nativeTransport ?? '')) {
+            throw usageError('native Windows provisioning needs --gateway, --native-windows-cli and an explicit reviewed --native-transport');
           }
-          entry.nativeWindowsCli = { executable: opts.nativeWindowsCli, transport: 'openssh-git-bash', deviceId: opts.gateway };
+          if (opts.nativeTransport === 'openssh-cmd-git-bash') {
+            if (!opts.nativeBash || !opts.nativeBashSha256) throw usageError('CMD provisioning requires --native-bash and --native-bash-sha256 from a verified per-device receipt');
+            entry.nativeWindowsCli = { executable: opts.nativeWindowsCli, transport: 'openssh-cmd-git-bash', deviceId: opts.gateway,
+              trustedBashExecutable: opts.nativeBash, trustedBashSha256: opts.nativeBashSha256 };
+          } else {
+            if (opts.nativeBash !== undefined || opts.nativeBashSha256 !== undefined) throw usageError('Bash bindings require openssh-cmd-git-bash');
+            entry.nativeWindowsCli = { executable: opts.nativeWindowsCli, transport: 'openssh-git-bash', deviceId: opts.gateway };
+          }
         }
         addHost(entry, { replace: opts.replace });
         if (opts.default) setDefaultHost(name);

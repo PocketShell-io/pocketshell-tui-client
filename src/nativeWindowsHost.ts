@@ -2,13 +2,17 @@
 import { HostCliCore, HostCliFailed, shellQuote, type CreatedSession, type SessionsListing } from '@pocketshell/core';
 import type { Connection, ExecOutcome } from './transport/types.js';
 
-export interface NativeWindowsCliPolicy {
+interface NativeWindowsCliBase {
   /** Actual protected console path supplied by trusted endpoint provisioning. */
   executable: string;
-  transport: 'openssh-git-bash';
   /** Canonical enrolled gateway ID, not the saved display alias. */
   deviceId: string;
 }
+
+export type NativeWindowsCliPolicy = NativeWindowsCliBase & (
+  { transport: 'openssh-git-bash' } |
+  { transport: 'openssh-cmd-git-bash'; trustedBashExecutable: string; trustedBashSha256: string }
+);
 
 export class NativeWindowsError extends Error {
   readonly code = 'NATIVE_HOST_CONTRACT';
@@ -35,11 +39,26 @@ export function validateNativeWindowsPolicy(value: unknown): NativeWindowsCliPol
     || !/^[A-Za-z]:\/(?:[^"'\\$`]+\/)*pocketshell\.exe$/i.test(policy.executable)
     || [...policy.executable].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
     || policy.executable.split('/').some((part) => part === '.' || part === '..')
-    || policy.transport !== 'openssh-git-bash'
+    || !['openssh-git-bash', 'openssh-cmd-git-bash'].includes(String(policy.transport))
     || typeof policy.deviceId !== 'string' || !DEVICE.test(policy.deviceId)) {
     throw new NativeWindowsError('Native Windows policy needs a provisioned drive-absolute pocketshell.exe path, explicit openssh-git-bash transport and enrolled device ID. CMD transports are not qualified.');
   }
-  return { executable: policy.executable, transport: policy.transport, deviceId: policy.deviceId };
+  if (policy.transport === 'openssh-git-bash') {
+    if ('trustedBashExecutable' in policy || 'trustedBashSha256' in policy) throw new NativeWindowsError('Bash bindings require the explicit CMD policy.');
+    return { executable: policy.executable, transport: policy.transport, deviceId: policy.deviceId };
+  }
+  if (Object.keys(policy).some(key => !['executable', 'transport', 'deviceId', 'trustedBashExecutable', 'trustedBashSha256'].includes(key))
+    || typeof policy.trustedBashExecutable !== 'string'
+    || !/^[A-Za-z]:\/(?:[^"'\\$`%!&|<>^]+\/)*bash\.exe$/i.test(policy.trustedBashExecutable)
+    || [...policy.trustedBashExecutable].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+    || policy.trustedBashExecutable.split('/').some(part => part === '.' || part === '..')
+    || typeof policy.trustedBashSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(policy.trustedBashSha256)) {
+    throw new NativeWindowsError('CMD policy requires a trusted drive-absolute Bash path and provisioned SHA256 digest.');
+  }
+  // The main/operator provisioning receipt verifies this path+digest+device.
+  // A hash field or a reply from the invoked interpreter is not verification.
+  return { executable: policy.executable, deviceId: policy.deviceId, transport: 'openssh-cmd-git-bash',
+    trustedBashExecutable: policy.trustedBashExecutable, trustedBashSha256: policy.trustedBashSha256.toLowerCase() };
 }
 
 function success(outcome: ExecOutcome, label: string): string {
@@ -72,10 +91,20 @@ export class NativeWindowsHost {
     return this.qualification ??= this.qualify();
   }
 
+  private command(script: string, pty = false): string {
+    if (this.policy.transport === 'openssh-git-bash') return pty ? `"${script}"` : script;
+    if (script.includes('\0')) throw new NativeWindowsError('CMD Bash scripts cannot contain NUL bytes.');
+    const hex = [...Buffer.from(script, 'utf8')].map(byte => `\\x${byte.toString(16).padStart(2, '0')}`).join('');
+    // V46 grammar: the complete Bash script is data; only PTY gets CMD call.
+    const command = `"${this.policy.trustedBashExecutable.replaceAll('/', '\\')}" --noprofile --norc -c "eval $'${hex}'"`;
+    if (command.length > 8000) throw new NativeWindowsError('CMD Bash command exceeds the reviewed 8000 character bound.');
+    return pty ? `call ${command}` : command;
+  }
+
   private async qualify(): Promise<void> {
-    const version = success(await this.connection.exec(nonPtyCommand(`${shellQuote(this.policy.executable)} --version`), { timeoutMs: 15_000 }), 'version probe');
+    const version = success(await this.connection.exec(this.command(nonPtyCommand(`${shellQuote(this.policy.executable)} --version`)), { timeoutMs: 15_000 }), 'version probe');
     if (!/^pocketshell, version 0\.5\.8\s*$/.test(version.trim())) throw new NativeWindowsError('The provisioned native PocketShell CLI must report version 0.5.8.');
-    const raw = success(await this.connection.exec(nonPtyCommand(`${shellQuote(this.policy.executable)} platform --json`), { timeoutMs: 15_000 }), 'platform probe');
+    const raw = success(await this.connection.exec(this.command(nonPtyCommand(`${shellQuote(this.policy.executable)} platform --json`)), { timeoutMs: 15_000 }), 'platform probe');
     let platform: unknown;
     try { platform = JSON.parse(raw); } catch { throw new NativeWindowsError('Malformed native platform JSON.'); }
     if (!platform || typeof platform !== 'object' || Array.isArray(platform)) throw new NativeWindowsError('Malformed native platform contract.');
@@ -96,14 +125,14 @@ export class NativeWindowsHost {
 
   private async runCli(command: string, timeoutMs: number): Promise<ExecOutcome> {
     await this.ready();
-    return this.connection.exec(nonPtyCommand(command), { timeoutMs });
+    return this.connection.exec(this.command(nonPtyCommand(command)), { timeoutMs });
   }
 
   async run(command: string, timeoutMs: number, stdin?: string | Uint8Array): Promise<ExecOutcome> {
     await this.ready();
     // An unquoted builtin satisfies Win32 quote grouping without replacing
     // the shell before a generic script's remaining statements can run.
-    return this.connection.exec(`:; ${command}`, { timeoutMs, stdin });
+    return this.connection.exec(this.command(this.policy.transport === 'openssh-git-bash' ? `:; ${command}` : command), { timeoutMs, stdin });
   }
 
   async listSessions(): Promise<SessionsListing> {
@@ -160,7 +189,7 @@ export class NativeWindowsHost {
     if (!this.qualified) throw new NativeWindowsError('Native attach requires successful qualification on this connection.');
     if (!id || !UUID.test(id)) throw new NativeWindowsError('Native attach requires a full immutable UUID from the authoritative listing.');
     // Accepted Windows OpenSSH/Git Bash PTY spelling, distinct from NONPTY exec.
-    return `"${this.cli.buildAttachCommand(id)}"`;
+    return this.command(this.cli.buildAttachCommand(id), true);
   }
 
   unsupported(operation: string): never {

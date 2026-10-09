@@ -298,3 +298,75 @@ describe('generic native scripts preserve shell semantics', () => {
     expect(f.scripts[0]!.options.stdin).toBe(input);
   });
 });
+
+
+describe('V46 explicit CMD host policy', () => {
+  const cmdPolicy = { executable, deviceId: policy.deviceId, transport: 'openssh-cmd-git-bash',
+    trustedBashExecutable: 'C:/Program Files/Git/bin/bash.exe',
+    trustedBashSha256: 'fb991beb09c6c77f343a05a09842867688609df062a7bb00c719c90371c9348d' } as const;
+  function decode(command: string, pty = false): string {
+    const prefix = `${pty ? 'call ' : ''}"C:\\Program Files\\Git\\bin\\bash.exe" --noprofile --norc -c "eval $'`;
+    expect(command.startsWith(prefix)).toBe(true);
+    expect(command.endsWith("'\"")).toBe(true);
+    const bytes = command.slice(prefix.length, -2);
+    expect(bytes).toMatch(/^(?:\\x[0-9a-f]{2})*$/);
+    return Buffer.from(bytes.replaceAll('\\x', ''), 'hex').toString('utf8');
+  }
+  function cmdFixture(version = 'pocketshell, version 0.5.8\n') {
+    const commands: string[] = [], options: unknown[] = [], attached: string[] = [];
+    const connection: Connection = { hostName: profile.name, mode: 'gateway', close: async () => {},
+      exec: async (command, opts) => {
+        commands.push(command); options.push(opts);
+        const script = decode(command);
+        if (script.endsWith('--version')) return outcome(version);
+        if (script.endsWith('platform --json')) return outcome({ schema: 1, platform: 'win32', os: 'nt', cli_version: '0.5.8', capabilities: caps });
+        if (script.includes('sessions list')) return outcome({ schema: 3, sessions: [row()], errors: [] });
+        return outcome('script-result', 23);
+      }, attachInteractive: async command => { attached.push(command); return 0; } };
+    const entry = { ...profile, nativeWindowsCli: cmdPolicy as never };
+    return { client: new HostClient(connection, undefined, entry), commands, options, attached };
+  }
+  it('accepts explicit device-bound policy and wraps qualification/list NONPTY without call', async () => {
+    const f = cmdFixture(); await f.client.listSessions();
+    expect(f.commands.map(command => decode(command))).toEqual([
+      `exec '${executable}' --version`, `exec '${executable}' platform --json`, `exec '${executable}' sessions list --json`]);
+  });
+  it('keeps complete public compound script/stdin/options and PTY-only call', async () => {
+    const f = cmdFixture(); const stdin = new Uint8Array([97, 0, 10]);
+    const script = `printf 'unicode ☃ % ! & | \"'; cat | tr a-z A-Z; exit 23`;
+    expect((await f.client.run(script, 4321, stdin)).exitCode).toBe(23);
+    expect(decode(f.commands.at(-1)!)).toBe(script);
+    expect(f.options.at(-1)).toEqual({ timeoutMs: 4321, stdin });
+    expect((f.options.at(-1) as { stdin: unknown }).stdin).toBe(stdin);
+    await f.client.attach(row());
+    expect(decode(f.attached[0]!, true)).toBe(`exec '${executable}' sessions attach -- '${id}'`);
+  });
+  it.each(['C:/bad%PATH%/bash.exe', 'C:/bad!x!/bash.exe', 'C:/bad&x/bash.exe', 'C:/bad^x/bash.exe',
+    'C:/bad|x/bash.exe', 'C:/../bash.exe', 'bash.exe', 'C:\\Git\\bash.exe', 'C:/bad\n/bash.exe'])('refuses CMD expansion or untrusted path %s', trustedBashExecutable => {
+    expect(() => validateNativeWindowsPolicy({ ...cmdPolicy, trustedBashExecutable })).toThrow();
+  });
+  it.each([undefined, '', 'f'.repeat(63), 'g'.repeat(64)])('refuses absent or malformed digest %s', trustedBashSha256 => {
+    expect(() => validateNativeWindowsPolicy({ ...cmdPolicy, trustedBashSha256 })).toThrow();
+  });
+  it('refuses ambiguous policy authority and preserves canonical digest/device binding', () => {
+    expect(validateNativeWindowsPolicy({ ...cmdPolicy, trustedBashSha256: cmdPolicy.trustedBashSha256.toUpperCase() })).toEqual(cmdPolicy);
+    expect(() => validateNativeWindowsPolicy({ ...cmdPolicy, guessedPlatform: 'win32' })).toThrow();
+    expect(() => validateNativeWindowsPolicy({ ...policy, trustedBashExecutable: cmdPolicy.trustedBashExecutable })).toThrow();
+    const f = fixture();
+    expect(() => new HostClient(f.connection, undefined, { ...profile, nativeWindowsCli: { ...cmdPolicy, deviceId: 'different-device' } })).toThrow(/device ID/);
+    expect(() => new HostClient(f.connection, undefined, { ...profile, binary: 'pocketshell', nativeWindowsCli: cmdPolicy })).toThrow(/cannot coexist/);
+    expect(() => new HostClient({ ...f.connection, mode: 'ssh' }, undefined, { ...profile, nativeWindowsCli: cmdPolicy })).toThrow();
+    expect(f.commands).toHaveLength(0);
+  });
+  it('refuses NUL/over-bound scripts before execution; failed qualification never retries', async () => {
+    const f = cmdFixture(); await f.client.probe();
+    await expect(f.client.run('printf \0bad', 1000)).rejects.toThrow(/NUL/);
+    await expect(f.client.run('x'.repeat(2000), 1000)).rejects.toThrow(/8000/);
+    expect(f.commands).toHaveLength(2);
+    const bad = cmdFixture('pocketshell, version 0.5.9');
+    await expect(bad.client.probe()).rejects.toThrow(/0.5.8/);
+    await expect(bad.client.probe()).rejects.toThrow(/0.5.8/);
+    expect(bad.commands).toHaveLength(1);
+  });
+
+});
