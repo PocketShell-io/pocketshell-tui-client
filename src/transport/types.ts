@@ -22,6 +22,11 @@ export interface ExecOutcome {
   timedOut: boolean;
 }
 
+export interface AttachOptions {
+  /** Session-only local Ctrl-b d; ordinary interactive execution is unchanged. */
+  sessionDetach?: boolean;
+}
+
 export interface Connection {
   /** The saved host's name, for messages. */
   readonly hostName: string;
@@ -33,7 +38,7 @@ export interface Connection {
    * stdout, resize) until it exits. Resolves with its exit code. The caller
    * must have released the terminal (no raw mode, no TUI) before calling.
    */
-  attachInteractive(command: string): Promise<number | null>;
+  attachInteractive(command: string, options?: AttachOptions): Promise<number | null>;
   /** Release anything held open (multiplexed masters, sockets). Idempotent. */
   close(): Promise<void>;
 }

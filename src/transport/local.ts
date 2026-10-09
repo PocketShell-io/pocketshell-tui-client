@@ -6,7 +6,7 @@
  * unchanged. Attach runs the attach command on this terminal directly.
  */
 import { runCaptured, runInteractive } from './process.js';
-import type { Connection, ExecOptions, ExecOutcome } from './types.js';
+import type { AttachOptions, Connection, ExecOptions, ExecOutcome } from './types.js';
 
 export class LocalConnection implements Connection {
   readonly mode = 'local' as const;
@@ -17,8 +17,8 @@ export class LocalConnection implements Connection {
     return runCaptured('/bin/sh', ['-c', command], options);
   }
 
-  attachInteractive(command: string): Promise<number | null> {
-    return runInteractive('/bin/sh', ['-c', command]);
+  attachInteractive(command: string, options: AttachOptions = {}): Promise<number | null> {
+    return runInteractive('/bin/sh', ['-c', command], process.env, options);
   }
 
   async close(): Promise<void> {}

@@ -312,6 +312,6 @@ export class HostClient {
 
   async attach(session: SessionRow): Promise<number | null> {
     if (this.native) await this.native.ready();
-    return this.connection.attachInteractive(this.attachCommand(session));
+    return this.connection.attachInteractive(this.attachCommand(session), { sessionDetach: true });
   }
 }

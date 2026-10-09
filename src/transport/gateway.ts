@@ -37,7 +37,7 @@ import {
   SSH_FAILURE_EXIT,
 } from './openssh.js';
 import { runInteractive } from './process.js';
-import { ConnectionError, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
+import { ConnectionError, type AttachOptions, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
 
 /** Hardening options, including an unconditional gateway no-reuse policy. */
 export const HARDENING_OPTIONS: readonly string[] = [
@@ -281,9 +281,9 @@ export class GatewayConnection implements Connection {
    * session ever started — it is raised as a typed ConnectionError
    * (NOT_LOGGED_IN → exit 3, HOST_OFFLINE, ...) for the CLI/TUI to report.
    */
-  async attachInteractive(command: string): Promise<number | null> {
+  async attachInteractive(command: string, options: AttachOptions = {}): Promise<number | null> {
     const statusFile = this.statusFile();
-    const code = await runInteractive(this.sshPath, this.argv('attach', command, statusFile), sshEnvironment());
+    const code = await runInteractive(this.sshPath, this.argv('attach', command, statusFile), sshEnvironment(), options);
     const status = readStatusFile(statusFile);
     if (code === SSH_FAILURE_EXIT && status) throw proxyFailure(status, this.context());
     return code;

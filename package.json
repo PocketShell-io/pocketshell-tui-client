@@ -24,7 +24,8 @@
   "dependencies": {
     "@pocketshell/core": "file:../pocketshell-core",
     "commander": "^12.1.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "@lydell/node-pty": "1.2.0-beta.15"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
