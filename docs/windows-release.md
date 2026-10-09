@@ -1,6 +1,6 @@
 # Maintained Windows x64 PSC release
 
-This source successor keeps the accepted PSC6175 transport, local PTY relay and cleanup implementation unchanged. The two dependency overlays are now tracked release inputs. They are not edits to an installed cache and are not published as official `@lydell` bytes.
+This normal-repository successor retains the accepted PSC6175 transport, local PTY relay and cleanup logic, reconciled with current main naming. Current source differs from the previously qualified output; that output is not a qualification of the new source head. The two dependency overlays are now tracked release inputs. They are not edits to an installed cache and are not published as official `@lydell` bytes.
 
 `vendor/windows-pty-overlay/manifest.json` binds the exact locked wrapper and Windows x64 archive URLs, original SHA512 SRI and SHA256, complete original inventories, producer/upstream source correspondence, and the reviewed replacement/diff hashes. The source/recipe binding is not a reproducible native-binary attestation. All native PE/PDB files stay byte-identical. The agent replacement includes the accepted `windowsHide:true` and owned console-list cleanup; the terminal replacement includes the awaited completion bridge. They must produce exactly `87f349a7...` and `af35f5cd...`. Modified package files do not retain upstream archive SRI.
 
@@ -47,3 +47,34 @@ Rollback selects the retained prior protected entry/binding; it does not revert 
 Release packaging must retain an actual offline npm consumer install control, not just generated overlay fixtures. The prior packed0.1.0 consumer used ordinary hoisted siblings and its original Windows selector refused outside the package root. The successor must keep those sibling hashes identical while its production Windows selector creates/verifies the private closure automatically. Capture the packed archive, npm argv/PID/natural exit, visible lifecycle output, consumer layout and pre/post hashes. On Linux the npm lifecycle hook reports not-targeted; a separate call to installOverlayForPlatform(packageRoot, 'win32', 'x64') exercises the real install implementation on that actual tree, not Windows native runtime. A Linux-only --force may admit official foreign package OS metadata in this filesystem test; it is not a supported Windows install flag or authority bypass in the promotion recipe. No native addon is loaded. Existing linked/unknown nested content and outside-root direct apply must still refuse.
 
 The actual consumer control also primes the original hoisted Node resolution before provisioning. The installer resolves newly created private entries by absolute paths, so a cached earlier sibling resolution cannot redirect verification/application outside the package. The first corrected consumer control exposed this cached-resolution failure; its receipt is preserved.
+
+## Normal repository integration and qualification boundary
+
+The normal origin is PocketShell-io/pocketshell-tui-client, package
+@pocketshell/tui-client, command pocketshell-tui-client (psc remains the alias).
+The isolated reviewed9c4 portable archive retains its original package and88dist
+bytes; it is not silently renamed or relabelled as this source's emitted output.
+Main8e28dde's normal POSIX host/runtime naming is preserved. Existing qualified
+Windows hosts, account DPAPI and explicit runtime locations keep their protected
+pocketshell-client/pocketshell-client-account identity; no config or credential
+migration, fallback, automatic login, or new enrollment is added.
+
+Normal PR CI checks this exact client head against Core
+07174896ce7041370bcbf4f791ec513870b9535f, the actual current published source
+main at integration intake, not an unversioned default checkout or old UI lineage.
+Its API source pair passes the recorded local no-emit check. CI seals freshly
+emitted source/output inventories; neither CI nor this PR authorizes installation
+or qualifies a live route. The maintained normal package/lock bin identity and
+installer root check are consistent. An npm consumer of the new package name
+must be qualified independently; the previous9c4 consumer receipt is retained
+as evidence for its exact prior bytes, not new install acceptance.
+
+The exact ROOT AGENT runtime review is retained at
+docs/root-qualified-windows-lifecycle-6175.json (7413bytes,
+SHA2561a2ee68b3d006376f04efd1d92bc97f3034c319e4df8adec313eb6fa26c5d8b2).
+It accepts the isolated6175 Windows-to-EC2-to-Hetzner lifecycle only. It is not
+human acceptance, normal installation acceptance, Win35 acceptance, or a
+qualification of this newly reconciled client/Core pair. Existing protected
+account/bindings/enrollment/defaults/Node/SSH/helper and live endpoint selection
+remain under the runtime owner's authority. No registry publish, release tag,
+installed edit, or service restart is part of this draft source integration.

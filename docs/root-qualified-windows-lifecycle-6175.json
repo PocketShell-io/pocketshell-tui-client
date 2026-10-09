@@ -1,0 +1,294 @@
+{
+  "at": "2026-10-09T16:00:40.835Z",
+  "accepted": true,
+  "scope": "Isolated Windows PSC6175 -> canonical EC2 Gateway -> Hetzner",
+  "custody": [
+    {
+      "path": "C:/Users/alexey/PocketShellFleet/20261009-6cbe21e/fixtures/windows-psc6175-92e6573586bb/result.json",
+      "sha256": "0110851f0e745a65da9334cfe4d78a6ad8405731944f42b7ed6c4764bed719bc",
+      "keys": [
+        "accepted",
+        "started",
+        "nonce",
+        "route",
+        "children",
+        "cleanupErrors",
+        "invocations",
+        "directoryCreated",
+        "uuid",
+        "createdName",
+        "first",
+        "reconnect",
+        "rename",
+        "operationsComplete",
+        "sessionAbsent",
+        "emptyFixtureRemoved",
+        "ended"
+      ]
+    },
+    {
+      "path": "C:/Users/alexey/PocketShellFleet/20261009-6cbe21e/fixtures/windows-psc6175-92e6573586bb-supervisor/supervisor-result.json",
+      "sha256": "85d522f6437dcd2e1bd7f0de41515c6ae2ef0db2ab4896fe076b9745341db862",
+      "keys": [
+        "accepted",
+        "started",
+        "constructorSha256",
+        "jobSamples",
+        "jobProcessMetadata",
+        "safetyTerminationUsed",
+        "cleanupErrors",
+        "privateDesktop",
+        "rootPid",
+        "processObservationFailures",
+        "unverifiedExitedProcessObservations",
+        "naturalClientHarnessExit",
+        "activeAfterClientExit",
+        "activeAtFinalClose",
+        "ended"
+      ]
+    },
+    {
+      "path": "C:/Users/alexey/PocketShellFleet/quiet-sshd-v26a/PSC6175-c4ff588232cee369dec2cbc3-WITNESS.json",
+      "sha256": "2a315aed2f90681c2abba2fe2ef65ad4d19e1a790aaa1173d6833517f47f7f05",
+      "keys": [
+        "scope",
+        "activeDesktop",
+        "ownedRootPIDs",
+        "durationSeconds",
+        "samples",
+        "events",
+        "enumeratedVisibleWindows",
+        "limitations",
+        "callerDesktop",
+        "callerWindowStation",
+        "callerSessionId",
+        "readyMonotonicMs",
+        "stopObservedMonotonicMs",
+        "coverageEndMonotonicMs",
+        "maxBoundSeconds",
+        "stopHandshakeObserved",
+        "hiddenControl"
+      ]
+    }
+  ],
+  "first": {
+    "accepted": true,
+    "console": {
+      "clientPid": 42752,
+      "clientExit": 0,
+      "before": {
+        "input": 503,
+        "output": 7
+      },
+      "after": {
+        "input": 503,
+        "output": 7
+      },
+      "ttyRestored": true,
+      "natural": true
+    },
+    "identity": [
+      "473480",
+      "372069808"
+    ],
+    "baseline": [
+      28,
+      91
+    ],
+    "events": [
+      {
+        "kind": "genuine_prompt",
+        "utc": "2026-10-09T15:47:37.746Z"
+      },
+      {
+        "kind": "first_literal_input",
+        "utc": "2026-10-09T15:47:37.746Z",
+        "bytes": 272
+      },
+      {
+        "kind": "complete_first_literal",
+        "utc": "2026-10-09T15:47:38.121Z"
+      },
+      {
+        "kind": "unicode_cwd",
+        "utc": "2026-10-09T15:47:38.121Z"
+      },
+      {
+        "kind": "baseline_size",
+        "utc": "2026-10-09T15:47:38.121Z"
+      },
+      {
+        "kind": "outer_resize",
+        "utc": "2026-10-09T15:47:38.122Z",
+        "rows": 37,
+        "cols": 113
+      },
+      {
+        "kind": "fresh_footer_row37",
+        "utc": "2026-10-09T15:47:40.758Z"
+      },
+      {
+        "kind": "fresh_size_input",
+        "utc": "2026-10-09T15:47:40.758Z"
+      },
+      {
+        "kind": "fresh_resized_size",
+        "utc": "2026-10-09T15:47:40.984Z"
+      },
+      {
+        "kind": "actual_ctrl_b_d",
+        "utc": "2026-10-09T15:47:40.984Z"
+      },
+      {
+        "kind": "outer_exit",
+        "utc": "2026-10-09T15:47:44.151Z",
+        "exitCode": 0
+      }
+    ]
+  },
+  "reconnect": {
+    "accepted": true,
+    "console": {
+      "clientPid": 29608,
+      "clientExit": 0,
+      "before": {
+        "input": 503,
+        "output": 7
+      },
+      "after": {
+        "input": 503,
+        "output": 7
+      },
+      "ttyRestored": true,
+      "natural": true
+    },
+    "identity": [
+      "473480",
+      "372069808"
+    ],
+    "baseline": [
+      28,
+      91
+    ],
+    "events": [
+      {
+        "kind": "genuine_prompt",
+        "utc": "2026-10-09T15:48:00.355Z"
+      },
+      {
+        "kind": "first_literal_input",
+        "utc": "2026-10-09T15:48:00.355Z",
+        "bytes": 282
+      },
+      {
+        "kind": "complete_first_literal",
+        "utc": "2026-10-09T15:48:00.742Z"
+      },
+      {
+        "kind": "unicode_cwd",
+        "utc": "2026-10-09T15:48:00.742Z"
+      },
+      {
+        "kind": "baseline_size",
+        "utc": "2026-10-09T15:48:00.742Z"
+      },
+      {
+        "kind": "outer_resize",
+        "utc": "2026-10-09T15:48:00.742Z",
+        "rows": 37,
+        "cols": 113
+      },
+      {
+        "kind": "fresh_footer_row37",
+        "utc": "2026-10-09T15:48:00.944Z"
+      },
+      {
+        "kind": "fresh_size_input",
+        "utc": "2026-10-09T15:48:00.944Z"
+      },
+      {
+        "kind": "fresh_resized_size",
+        "utc": "2026-10-09T15:48:01.155Z"
+      },
+      {
+        "kind": "actual_ctrl_b_d",
+        "utc": "2026-10-09T15:48:01.156Z"
+      },
+      {
+        "kind": "outer_exit",
+        "utc": "2026-10-09T15:48:04.338Z",
+        "exitCode": 0
+      }
+    ]
+  },
+  "cleanup": {
+    "errors": [],
+    "sessionAbsent": true,
+    "emptyFixtureRemoved": true,
+    "naturalSupervisor": 0,
+    "jobAfter": 0,
+    "jobFinal": 0,
+    "safetyUsed": false
+  },
+  "observer": {
+    "sha256": "2a315aed2f90681c2abba2fe2ef65ad4d19e1a790aaa1173d6833517f47f7f05",
+    "duration": 311.132,
+    "consoleEvents": [],
+    "positive": {
+      "hwnd": 4001440,
+      "neverVisible": true,
+      "createCallbackObserved": true,
+      "showCallbackObserved": true,
+      "syntheticNotificationOnly": true
+    }
+  },
+  "limits": "Prospective active Default CREATE/SHOW scope only; no universal window claim. Reused PID current identity differs from captured trial identity, no process action. This accepts exact own WindowsPSC6175→canonicalGateway→Hetzner fixture, not unresolved Desktop intentional-detach behavior.",
+  "normalInstallationProven": false,
+  "win35Proven": false,
+  "rootRawOutputAssertions": [
+    {
+      "mode": "first",
+      "markers": [
+        {
+          "marker": "FIRST_92e6573586bb_initial",
+          "exactOutputLine": true
+        },
+        {
+          "marker": "IDENT_92e6573586bb_initial:473480 372069808:END_IDENT_92e6573586bb_initial",
+          "exactOutputLine": true
+        },
+        {
+          "marker": "BASE_92e6573586bb_initial:28 91:END_BASE_92e6573586bb_initial",
+          "exactOutputLine": true
+        },
+        {
+          "marker": "SIZE_92e6573586bb_initial:36 113:END_SIZE_92e6573586bb_initial",
+          "exactOutputLine": true
+        }
+      ],
+      "cwd": true
+    },
+    {
+      "mode": "reconnect",
+      "markers": [
+        {
+          "marker": "FIRST_92e6573586bb_reconnect",
+          "exactOutputLine": true
+        },
+        {
+          "marker": "IDENT_92e6573586bb_reconnect:473480 372069808:END_IDENT_92e6573586bb_reconnect",
+          "exactOutputLine": true
+        },
+        {
+          "marker": "BASE_92e6573586bb_reconnect:28 91:END_BASE_92e6573586bb_reconnect",
+          "exactOutputLine": true
+        },
+        {
+          "marker": "SIZE_92e6573586bb_reconnect:36 113:END_SIZE_92e6573586bb_reconnect",
+          "exactOutputLine": true
+        }
+      ],
+      "cwd": true
+    }
+  ]
+}
