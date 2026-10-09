@@ -38,7 +38,7 @@ func trusted(s, u *windows.SID) bool {
 	ti, _, _, e := windows.LookupSID("", "NT SERVICE\\TrustedInstaller")
 	return e == nil && windows.EqualSid(s, ti)
 }
-func security(h windows.Handle, private bool) error {
+func security(h windows.Handle, private bool, finalExecutable bool) error {
 	u, e := userSID()
 	if e != nil {
 		return e
@@ -73,6 +73,9 @@ func security(h windows.Handle, private bool) error {
 			f.trusted = trusted(sid, u)
 		}
 		facts = append(facts, f)
+	}
+	if finalExecutable {
+		return executablePolicy(trusted(owner, u), windows.EqualSid(owner, u), ctrl&windows.SE_DACL_PROTECTED != 0, private, facts)
 	}
 	return descriptorPolicy(trusted(owner, u), windows.EqualSid(owner, u), ctrl&windows.SE_DACL_PROTECTED != 0, private, facts)
 }
@@ -148,7 +151,7 @@ func holdDirs(path string, createFinal bool, strictFinal bool) ([]windows.Handle
 			return fail(e)
 		}
 		held = append(held, h)
-		if attributes(h, true) != nil || security(h, final && strictFinal) != nil {
+		if attributes(h, true) != nil || security(h, final && strictFinal, false) != nil {
 			return fail(refused)
 		}
 	}
@@ -168,7 +171,7 @@ func openPrivate(path string, write bool) (*os.File, error) {
 	if e != nil {
 		return nil, e
 	}
-	if attributes(h, false) != nil || security(h, true) != nil {
+	if attributes(h, false) != nil || security(h, true, false) != nil {
 		windows.CloseHandle(h)
 		return nil, refused
 	}
@@ -243,7 +246,7 @@ func writePrivate(root, name string, b []byte) error {
 			windows.DeleteFile(ptr(tmp))
 		}
 	}()
-	if attributes(h, false) != nil || security(h, true) != nil {
+	if attributes(h, false) != nil || security(h, true, false) != nil {
 		return refused
 	}
 	for off := 0; off < len(b); {
@@ -290,7 +293,7 @@ func lockDir(root string) (windows.Handle, error) {
 	if e != nil {
 		return 0, e
 	}
-	if attributes(h, false) != nil || security(h, true) != nil {
+	if attributes(h, false) != nil || security(h, true, false) != nil {
 		windows.CloseHandle(h)
 		return 0, refused
 	}
@@ -310,7 +313,7 @@ func checkPath(path string, private bool) error {
 	if attributes(h, false) != nil {
 		return refused
 	}
-	return security(h, private)
+	return security(h, private, !private)
 }
 func selfCheck() error {
 	p, e := os.Executable()

@@ -40,3 +40,17 @@ func filePolicy(reparse, directory, wantDirectory bool, links uint32, disk bool)
 	}
 	return nil
 }
+
+// FILE_WRITE_DATA and FILE_APPEND_DATA mutate a final executable, but the
+// same bits on an ancestor directory merely allow adding new children.
+func executablePolicy(ownerTrusted, ownerCurrent, protected, private bool, aces []aceFact) error {
+	if err := descriptorPolicy(ownerTrusted, ownerCurrent, protected, private, aces); err != nil {
+		return err
+	}
+	for _, a := range aces {
+		if a.kind == 0 && a.flags&8 == 0 && !a.trusted && a.mask&(0x2|0x4) != 0 {
+			return refused
+		}
+	}
+	return nil
+}

@@ -44,3 +44,24 @@ func TestOpenedHandleObjectPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestFinalExecutableMutationPolicy(t *testing.T) {
+	for _, mask := range []uint32{0x2, 0x4, 0x6} {
+		aces := []aceFact{{trusted: true, mask: dangerousAncestorRights}, {mask: mask}}
+		if executablePolicy(true, false, false, false, aces) == nil {
+			t.Fatalf("foreign final executable mutation admitted: mask %#x", mask)
+		}
+	}
+}
+
+func TestExecutableAndAncestorRightsDiffer(t *testing.T) {
+	for _, mask := range []uint32{0x2, 0x4, 0x6} {
+		aces := []aceFact{{trusted: true, mask: dangerousAncestorRights}, {mask: mask}}
+		if descriptorPolicy(true, false, false, false, aces) != nil {
+			t.Fatal("ordinary ancestor add-child rights refused")
+		}
+		if executablePolicy(true, false, false, false, []aceFact{{trusted: true, mask: mask}, {mask: 1}}) != nil {
+			t.Fatal("trusted executable or foreign read-only rights refused")
+		}
+	}
+}
