@@ -422,7 +422,7 @@ export function requirePinEntry(deviceId: string, options: { path?: string } = {
   if (!entry) {
     throw new PinError(
       `no host key is pinned for gateway device ${deviceId}. On the host, run \`pocketshell gateway show --host-key\`, ` +
-        `then here run \`pocketshell-client gateway pin ${deviceId}\` and paste that one key line. ` +
+        `then here run \`pocketshell-tui-client gateway pin ${deviceId}\` and paste that one key line. ` +
         "The gateway's advertised key is never trusted.",
       'NOT_PINNED',
     );

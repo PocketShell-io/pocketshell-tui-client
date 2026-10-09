@@ -12,7 +12,7 @@
  *    ≤ 64 KiB reads); any TEXT after ready is a protocol violation.
  *
  * stdout carries SSH bytes only. Failures print ONE line on stderr,
- * `pocketshell-client-proxy: <CODE>: <message>`, which the ssh/gateway
+ * `pocketshell-tui-client-proxy: <CODE>: <message>`, which the ssh/gateway
  * Connection parses back into a typed error (ssh itself only says 255);
  * when stderr is a terminal (an interactive attach without multiplexing)
  * the line is the human form instead, `gateway: host offline (<id>): ...`.
@@ -211,7 +211,7 @@ function tokenFailure(error: unknown): Outcome {
   return {
     code: EXIT.NO_TOKEN,
     message: notLoggedIn
-      ? detail || 'not logged in: run `pocketshell-client login`'
+      ? detail || 'not logged in: run `pocketshell-tui-client login`'
       : `could not get a gateway token: ${detail || 'unknown error'}`,
   };
 }
@@ -305,7 +305,7 @@ async function bridge(options: ProxyOptions): Promise<Outcome> {
       handshakeTimeout: timeoutMs,
       followRedirects: false,
       rejectUnauthorized: true,
-      headers: { 'User-Agent': 'pocketshell-client' },
+      headers: { 'User-Agent': 'pocketshell-tui-client' },
     });
 
     const deadline = setTimeout(() => {

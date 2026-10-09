@@ -1,7 +1,7 @@
 /**
  * `gateway devices|pin|unpin|proxy`: the gateway client side.
  *
- * Flow: `pocketshell-client login` → `gateway devices` → `gateway pin <id>`
+ * Flow: `pocketshell-tui-client login` → `gateway devices` → `gateway pin <id>`
  * (key from the host, out of band: `pocketshell gateway show --host-key`)
  * → `hosts add <name> --gateway <id> -l <user>`. Pins live in the file the
  * Python CLI uses, so a pin made by either client is honoured by both.
@@ -123,7 +123,7 @@ export function registerGateway(program: Command): void {
           ...table.map((r) => `${[0, 1, 2].map((c) => r[c]!.padEnd(widths[c]!)).join('  ')}  ${r[3]}`),
           '',
           'Advertised keys come from the gateway and are never trusted. Pin the key printed by',
-          '`pocketshell gateway show --host-key` on the host: `pocketshell-client gateway pin <id>`.',
+          '`pocketshell gateway show --host-key` on the host: `pocketshell-tui-client gateway pin <id>`.',
         ].join('\n');
       });
     }),

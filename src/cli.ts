@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * pocketshell-client (alias `psc`): PocketShell from a terminal.
+ * pocketshell-tui-client (alias `psc`): PocketShell from a terminal.
  *
  * With no arguments on a TTY it opens the TUI. Every TUI action also exists
  * as a subcommand with `--json`, so agents and scripts get the same reach.
@@ -16,7 +16,7 @@ import { VERSION } from './version.js';
 
 const program = new Command();
 program
-  .name('pocketshell-client')
+  .name('pocketshell-tui-client')
   .description(
     'PocketShell in the terminal: sessions on your hosts over local, ssh, or gateway connections.\n' +
       'Run with no arguments for the interactive UI; every action is also a subcommand (add --json for agents).',

@@ -1,5 +1,5 @@
 /**
- * Test stand-in for `pocketshell-client gateway proxy` used as the
+ * Test stand-in for `pocketshell-tui-client gateway proxy` used as the
  * ProxyCommand in the end-to-end gateway test: same argv shape
  * (`gateway proxy <id> [--server X] [--insecure-dev] [--status-file P]`),
  * same runProxy, but a fixed token instead of the account layer.

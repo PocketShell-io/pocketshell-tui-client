@@ -83,7 +83,7 @@ describe('render', () => {
       apply(base(60, 14), {
         type: 'refreshFailed',
         generation: 0,
-        message: 'not logged in: run `pocketshell-client login` and then try this host again please',
+        message: 'not logged in: run `pocketshell-tui-client login` and then try this host again please',
       }),
     );
     assertFrame(failed, 60, 14);
@@ -92,8 +92,8 @@ describe('render', () => {
         " PocketShell · local (local)",
         "────────────────────────────────────────────────────────────",
         "                     cannot reach local",
-        "   not logged in: run \`pocketshell-client login\` and then",
-        "                 try this host again please",
+        "   not logged in: run \`pocketshell-tui-client login\` and",
+        "              then try this host again please",
         "           h switches host · r retries · q quits",
         " ↵ attach  p preview  s send  n new  x kill  / filter",
       ]

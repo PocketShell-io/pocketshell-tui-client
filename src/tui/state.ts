@@ -693,7 +693,7 @@ export function describeError(error: unknown): string {
   const message = safeLine((error instanceof Error ? error.message : String(error)).replace(/\s*\n\s*/g, ' · ')).trim();
   const code = (error as { code?: unknown } | null)?.code;
   if (code === 'NOT_LOGGED_IN') {
-    return /login/.test(message) ? message : `not logged in — run \`pocketshell-client login\` (${message})`;
+    return /login/.test(message) ? message : `not logged in — run \`pocketshell-tui-client login\` (${message})`;
   }
   if (code === 'NOT_PINNED' && !/pin/i.test(message)) return `host key not pinned: ${message}`;
   return message || 'unknown error';

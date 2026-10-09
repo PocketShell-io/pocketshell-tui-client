@@ -134,7 +134,7 @@ export function load(options: { allowSharedMode?: boolean } = {}): Credentials {
     if (st.mode & 0o077 && !options.allowSharedMode) {
       throw new CredentialsUnsafe(
         `${path} is accessible by other users (mode ${mode(st)}); refusing to use it. Treat the session ` +
-          'as leaked: run `pocketshell-client logout` to revoke it, then `pocketshell-client login`.',
+          'as leaked: run `pocketshell-tui-client logout` to revoke it, then `pocketshell-tui-client login`.',
       );
     }
     if (st.size > MAX_FILE_BYTES) throw new NotLoggedIn(`${path} is too large to be a credentials file; ${LOGIN_HINT}.`);

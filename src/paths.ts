@@ -1,11 +1,11 @@
 /**
  * Where the client keeps its state.
  *
- * - `~/.config/pocketshell-client/` — this client's own files (hosts.json).
+ * - `~/.config/pocketshell-tui-client/` — this client's own files (hosts.json).
  * - `~/.config/pocketshell/` — SHARED with the `pocketshell` Python CLI:
  *   `credentials.json` (the device-login session) and `gateway_known_hosts`
  *   (gateway host-key pins). Same formats, so `pocketshell login` and
- *   `pocketshell-client login` are one login, and a pin made by either is
+ *   `pocketshell-tui-client login` are one login, and a pin made by either is
  *   honoured by both.
  */
 import { homedir } from 'node:os';
@@ -17,7 +17,7 @@ export function configHome(): string {
 }
 
 export function clientConfigDir(): string {
-  return join(configHome(), 'pocketshell-client');
+  return join(configHome(), 'pocketshell-tui-client');
 }
 
 export function sharedConfigDir(): string {
@@ -39,6 +39,6 @@ export function gatewayPinsFile(): string {
 /** Private per-user runtime dir for OpenSSH control sockets. */
 export function runtimeDir(): string {
   const xdg = process.env.XDG_RUNTIME_DIR;
-  const base = xdg && xdg.startsWith('/') ? xdg : join('/tmp', `pocketshell-client-${process.getuid?.() ?? 'u'}`);
-  return xdg && xdg.startsWith('/') ? join(base, 'pocketshell-client') : base;
+  const base = xdg && xdg.startsWith('/') ? xdg : join('/tmp', `pocketshell-tui-client-${process.getuid?.() ?? 'u'}`);
+  return xdg && xdg.startsWith('/') ? join(base, 'pocketshell-tui-client') : base;
 }
