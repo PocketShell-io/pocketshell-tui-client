@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { HostClient, SessionAmbiguous } from '../src/hostClient.js';
 import { NativeCreateUncertain, NativeWindowsHost, validateNativeWindowsPolicy } from '../src/nativeWindowsHost.js';
@@ -232,23 +233,68 @@ describe('actual native NONPTY exec boundary', () => {
     await expect(f.client.probe()).resolves.toEqual({pocketshell:'pocketshell, version 0.5.8',aplexer:null});
     expect(f.commands).toEqual([`exec '${executable}' --version`,`exec '${executable}' platform --json`]);
   });
-  it('all native NONPTY run paths have exactly one exec while PTY spelling remains unchanged', async () => {
+  it('all internal native CLI NONPTY paths retain exactly one exec while PTY spelling remains unchanged', async () => {
     const f=fixture({requireExec:true});
     const sessions=await f.client.listSessions();
     await f.client.addWorkspace('C:/one/project');
     await f.client.createSession('main',{cwd:'C:/one/project'});
     await f.client.killSession('project:main',id);
-    await f.client.run(`exec '${executable}' workspaces --json`,1200);
-    await f.client.run(`exec exec '${executable}' workspaces --json`,1200);
     expect(f.commands.every(c=>c.startsWith('exec ')&&!c.startsWith('exec exec '))).toBe(true);
     expect(f.commands.every(c=>!c.includes('/bin/sh')&&!c.includes('export PATH'))).toBe(true);
     await f.client.attach(sessions.sessions[0]!);
     expect(f.attached).toEqual([`"exec '${executable}' sessions attach -- '${id}'"`]);
   });
-  it('native run preserves timeout and stdin through the single exec boundary', async () => {
+  it('native generic run preserves timeout and stdin through the harmless builtin boundary', async () => {
     const f=fixture();const native=new NativeWindowsHost(f.connection,policy);await native.ready();
     const seen:any[]=[];const original=f.connection.exec;f.connection.exec=async(c,o)=>{seen.push({c,o});return original(c,o);};
     const input=new Uint8Array([1,2,3]);await native.run(`'${executable}' fixture`,901,input);
-    expect(seen).toEqual([{c:`exec '${executable}' fixture`,o:{timeoutMs:901,stdin:input}}]);
+    expect(seen).toEqual([{c:`:; '${executable}' fixture`,o:{timeoutMs:901,stdin:input}}]);
+  });
+});
+
+
+describe('generic native scripts preserve shell semantics', () => {
+  function realShellFixture() {
+    const f = fixture();
+    const qualifiedExec = f.connection.exec;
+    const scripts: { command: string; options: { timeoutMs: number; stdin?: string | Uint8Array } }[] = [];
+    f.connection.exec = async (command, options) => {
+      if (command.endsWith('--version') || command.endsWith('platform --json')) return qualifiedExec(command, options);
+      scripts.push({ command, options });
+      // Actual local POSIX shell exercises the production HostClient boundary;
+      // native CLI qualification stays mocked, and no Windows endpoint is used.
+      const result = spawnSync('/bin/sh', ['-c', command], {
+        input: options.stdin, timeout: options.timeoutMs, encoding: 'utf8',
+      });
+      return { exitCode: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', timedOut: (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' };
+    };
+    return { ...f, scripts };
+  }
+
+  it('executes the complete nonce, hostname, uname and final exit through production HostClient.run', async () => {
+    const f = realShellFixture();
+    const script = "printf 'fleet-script-fixture\\n'; hostname; uname -s; exit 17";
+    const result = await f.client.run(script, 4_000);
+    const lines = result.stdout.trimEnd().split('\n');
+    expect(lines[0]).toBe('fleet-script-fixture');
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).not.toBe('');
+    expect(lines[2]).toBe('Linux');
+    expect(result.exitCode).toBe(17);
+    expect(result.timedOut).toBe(false);
+    expect(f.scripts).toEqual([{ command: `:; ${script}`, options: { timeoutMs: 4_000, stdin: undefined } }]);
+    expect(f.commands).toEqual([`exec '${executable}' --version`, `exec '${executable}' platform --json`]);
+  });
+
+  it('retains pipeline, stdin bytes and explicit exit with the original options', async () => {
+    const f = realShellFixture();
+    const input = new Uint8Array([97, 98, 99, 0, 10]);
+    const script = "printf 'prefix\\n'; cat | tr 'a-z' 'A-Z'; printf 'done\\n'; exit 23";
+    const result = await f.client.run(script, 4_321, input);
+    expect(result.stdout).toBe('prefix\nABC\0\ndone\n');
+    expect(result.exitCode).toBe(23);
+    expect(result.timedOut).toBe(false);
+    expect(f.scripts).toEqual([{ command: `:; ${script}`, options: { timeoutMs: 4_321, stdin: input } }]);
+    expect(f.scripts[0]!.options.stdin).toBe(input);
   });
 });

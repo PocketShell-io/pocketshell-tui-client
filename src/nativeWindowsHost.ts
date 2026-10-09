@@ -65,7 +65,7 @@ export class NativeWindowsHost {
   constructor(readonly connection: Connection, policy: NativeWindowsCliPolicy) {
     this.policy = Object.freeze(validateNativeWindowsPolicy(policy));
     if (connection.mode !== 'gateway') throw new NativeWindowsError('Native Windows policy is enabled only for an explicitly provisioned gateway host.');
-    this.cli = new HostCliCore({ exec: (command, timeoutMs) => this.run(command, timeoutMs) }, shellQuote(this.policy.executable));
+    this.cli = new HostCliCore({ exec: (command, timeoutMs) => this.runCli(command, timeoutMs) }, shellQuote(this.policy.executable));
   }
 
   ready(): Promise<void> {
@@ -94,10 +94,16 @@ export class NativeWindowsHost {
     if (!this.capabilities.has(capability)) throw new NativeWindowsError(`This provisioned native host does not advertise ${capability}.`);
   }
 
+  private async runCli(command: string, timeoutMs: number): Promise<ExecOutcome> {
+    await this.ready();
+    return this.connection.exec(nonPtyCommand(command), { timeoutMs });
+  }
+
   async run(command: string, timeoutMs: number, stdin?: string | Uint8Array): Promise<ExecOutcome> {
     await this.ready();
-    // Native NONPTY Git Bash commands require exactly one leading exec.
-    return this.connection.exec(nonPtyCommand(command), { timeoutMs, stdin });
+    // An unquoted builtin satisfies Win32 quote grouping without replacing
+    // the shell before a generic script's remaining statements can run.
+    return this.connection.exec(`:; ${command}`, { timeoutMs, stdin });
   }
 
   async listSessions(): Promise<SessionsListing> {
@@ -142,7 +148,7 @@ export class NativeWindowsHost {
   async killSession(id: string): Promise<void> {
     await this.requireCapability('sessions.kill');
     if (!UUID.test(id)) throw new NativeWindowsError('Native kill requires a full immutable session UUID.');
-    const result = await this.run(`${this.cli.binary} sessions kill --json -- ${shellQuote(id)}`, 20_000);
+    const result = await this.runCli(`${this.cli.binary} sessions kill --json -- ${shellQuote(id)}`, 20_000);
     let payload: unknown;
     try { payload = JSON.parse(success(result, 'kill')); } catch { throw new NativeWindowsError('Native kill failed or returned malformed JSON.'); }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)
