@@ -1,6 +1,6 @@
 /** Native Windows security authority. No shell or environment-selected helper. */
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, win32, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,7 @@ export class WindowsSecurityError extends Error {
   readonly code = 'WINDOWS_SECURITY';
   constructor() { super('Windows protected state or executable binding refused'); }
 }
-export interface WindowsBindings { version: 1; sshFamily: 'win32-openssh'; helper: string; helperSha256: string; ssh: string; sshSha256: string; node: string; nodeSha256: string; entry: string; entrySha256: string; systemRoot: string; }
+export interface WindowsBindings { version: 2; sshFamily: 'win32-openssh'; helper: string; helperSha256: string; ssh: string; sshSha256: string; node: string; nodeSha256: string; entry: string; entrySha256: string; systemRoot: string; systemDrive: string; programData: string; }
 export type Kind = 'credentials' | 'pins' | 'hosts' | 'empty' | 'status';
 export interface NativeRequest { op: 'preflight' | 'read' | 'write' | 'remove' | 'exists' | 'check-executable' | 'check-identity'; root: string; kind?: Kind; name?: string; data?: string; path?: string; }
 export interface NativeReply { version: 1; ok: boolean; code?: string; present?: boolean; data?: string; }
@@ -31,8 +31,11 @@ export function bindings(): WindowsBindings {
   try {
     const p = join(dirname(dirname(fileURLToPath(import.meta.url))), 'windows-bindings.json');
     const b = JSON.parse(readFileSync(p, 'utf8')) as WindowsBindings;
-    if (b.version !== 1 || Object.keys(b).length !== 11 || b.sshFamily !== 'win32-openssh') throw new WindowsSecurityError();
+    if (b.version !== 2 || Object.keys(b).length !== 13 || b.sshFamily !== 'win32-openssh') throw new WindowsSecurityError();
     windowsAbsolute(b.systemRoot);
+    if (!/^[A-Za-z]:$/.test(b.systemDrive) || b.systemRoot.slice(0,2).toLowerCase() !== b.systemDrive.toLowerCase()) throw new WindowsSecurityError();
+    const programData=windowsAbsolute(b.programData);
+    if (programData.length <= 3 || !statSync(programData).isDirectory() || win32.normalize(realpathSync(programData)).toLowerCase() !== programData.toLowerCase()) throw new WindowsSecurityError();
     for (const [path, digest] of [[b.helper,b.helperSha256],[b.ssh,b.sshSha256],[b.node,b.nodeSha256],[b.entry,b.entrySha256]]) {
       windowsAbsolute(path!); if (!/^[a-f0-9]{64}$/.test(digest!) || sha(path!) !== digest) throw new WindowsSecurityError();
       if (win32.normalize(realpathSync(path!)).toLowerCase() !== win32.normalize(path!).toLowerCase()) throw new WindowsSecurityError();
@@ -46,7 +49,7 @@ export function callNative(request: NativeRequest): NativeReply {
     const b = bindings(); windowsAbsolute(request.root);
     const r = spawnSync(b.helper, [], { shell: false, windowsHide: true, stdio: ['pipe','pipe','pipe'],
       input: JSON.stringify({ version: 1, ...request }), encoding: 'utf8', timeout: 10000, maxBuffer: 2 * 1024 * 1024,
-      cwd: dirname(b.helper), env: { SystemRoot: b.systemRoot, WINDIR: b.systemRoot } });
+      cwd: dirname(b.helper), env: { SystemRoot: b.systemRoot, WINDIR: b.systemRoot, SystemDrive: b.systemDrive, ProgramData: b.programData } });
     if (r.error || r.status !== 0 || r.signal || r.stderr) throw new WindowsSecurityError();
     const v = JSON.parse(r.stdout) as NativeReply;
     if (v.version !== 1 || typeof v.ok !== 'boolean' || !v.ok || Object.keys(v).some(k => !['version','ok','present','data'].includes(k))) throw new WindowsSecurityError();
@@ -69,7 +72,7 @@ export function closedWindowsEnvironment(roots: { config: string; runtime: strin
   if (!broker.startsWith('https://') || new URL(broker).username || new URL(broker).password) throw new WindowsSecurityError();
   callNative({op:'preflight',root:roots.config}); callNative({op:'preflight',root:roots.runtime});
   callNative({op:'check-executable',root:roots.config,path:b.ssh}); callNative({op:'check-executable',root:roots.config,path:b.node}); callNative({op:'check-executable',root:roots.config,path:b.entry});
-  return { SystemRoot:b.systemRoot,WINDIR:b.systemRoot,USERPROFILE:roots.home,HOME:roots.home,
+  return { SystemRoot:b.systemRoot,WINDIR:b.systemRoot,SystemDrive:b.systemDrive,ProgramData:b.programData,USERPROFILE:roots.home,HOME:roots.home,
     XDG_CONFIG_HOME:roots.config,XDG_RUNTIME_DIR:roots.runtime,TEMP:roots.runtime,TMP:roots.runtime,
     PATH:win32.dirname(b.ssh),POCKETSHELL_BROKER_URL:broker };
 }

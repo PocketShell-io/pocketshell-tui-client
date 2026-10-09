@@ -1,13 +1,13 @@
 import { win32 } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-const fake=vi.hoisted(()=>({calls:[] as any[],bad:false,present:true,body:'',writes:[] as string[]}));
+const fake=vi.hoisted(()=>({calls:[] as any[],bad:false,present:true,body:'',writes:[] as string[],bindingOverride:{} as Record<string,unknown>,redirectProgramData:false,programDataDirectory:true}));
 vi.mock('node:fs',async(importOriginal)=>{
  const fs=await importOriginal<typeof import('node:fs')>();
  return {...fs,readFileSync:vi.fn((p:any)=>{
   const path=String(p);
-  if(path.endsWith('windows-bindings.json')) {const d='7c1bff98308b66764533f8062caf9a7161c8af0b69b980e385214067c95633ef';return JSON.stringify({version:1,sshFamily:'win32-openssh',helper:'C:\\owned\\psc-security.exe',helperSha256:d,ssh:'C:\\system\\ssh.exe',sshSha256:d,node:'C:\\owned\\node.exe',nodeSha256:d,entry:'C:\\owned\\dist\\cli.js',entrySha256:d,systemRoot:'C:\\Windows'});}
+  if(path.endsWith('windows-bindings.json')) {const d='7c1bff98308b66764533f8062caf9a7161c8af0b69b980e385214067c95633ef';return JSON.stringify({version:2,sshFamily:'win32-openssh',helper:'C:\\owned\\psc-security.exe',helperSha256:d,ssh:'C:\\system\\ssh.exe',sshSha256:d,node:'C:\\owned\\node.exe',nodeSha256:d,entry:'C:\\owned\\dist\\cli.js',entrySha256:d,systemRoot:'C:\\Windows',systemDrive:'C:',programData:'C:\\ProgramData',...fake.bindingOverride});}
   return Buffer.from('bound-fixture');
- }),realpathSync:vi.fn((p:any)=>p)};
+ }),statSync:vi.fn((p:any)=>String(p)==='C:\\ProgramData'?{isDirectory:()=>fake.programDataDirectory}:fs.statSync(p)),realpathSync:vi.fn((p:any)=>fake.redirectProgramData&&String(p)==='C:\\ProgramData'?'C:\\redirected':p)};
 });
 vi.mock('node:child_process',()=>({spawnSync:vi.fn((file,argv,opts)=>{
  const req=JSON.parse(opts.input);fake.calls.push({file,argv,opts,req});
@@ -17,14 +17,14 @@ vi.mock('node:child_process',()=>({spawnSync:vi.fn((file,argv,opts)=>{
  if(req.op==='read'&&fake.present)r.data=Buffer.from(fake.body).toString('base64');
  return {status:0,stdout:JSON.stringify(r),stderr:''};
 }),spawn:vi.fn(()=>{throw Error('real spawn forbidden')})}));
-import { windowsAbsolute, windowsProxyCommand, callNative, closedWindowsEnvironment, nativeWrite } from '../src/platform/windows.js';
+import { windowsAbsolute, windowsProxyCommand, callNative, closedWindowsEnvironment, nativeWrite, bindings } from '../src/platform/windows.js';
 import { load, save, exists, remove, type Credentials } from '../src/account/credentials.js';
 import { buildGatewaySshArgv } from '../src/transport/gateway.js';
 import { resolveEndpoint, hostKeyAlias } from '../src/gateway/endpoint.js';
 import { addPin, loadPinEntries, requirePinEntry, parseHostKey, fingerprint } from '../src/gateway/pins.js';
 import { deviceLogin } from '../src/account/device.js';
 const realPlatform=process.platform;
-afterEach(()=>{Object.defineProperty(process,'platform',{value:realPlatform});fake.bad=false;fake.present=true;fake.calls=[];fake.writes=[];fake.body='';vi.unstubAllEnvs();});
+afterEach(()=>{Object.defineProperty(process,'platform',{value:realPlatform});fake.bad=false;fake.present=true;fake.calls=[];fake.writes=[];fake.body='';fake.bindingOverride={};fake.redirectProgramData=false;fake.programDataDirectory=true;vi.unstubAllEnvs();});
 function windows(){Object.defineProperty(process,'platform',{value:'win32'});vi.stubEnv('XDG_CONFIG_HOME','C:\\owned\\config');vi.stubEnv('XDG_RUNTIME_DIR','C:\\owned\\runtime');}
 function roundtrip(s:string):string[]{
  const out:string[]=[];let i=0;
@@ -41,7 +41,7 @@ describe('Windows source-only boundary',()=>{
  it('refuses ssh percent expansions and controls',()=>{expect(()=>windowsProxyCommand(['C:/owned/node.exe','%h'])).toThrow();expect(()=>windowsProxyCommand(['C:/owned/node.exe','x\n'])).toThrow();});
  it('bound helper receives secret only via stdin, hidden shell=false and closed environment',()=>{
   nativeWrite('C:/owned/config','credentials',Buffer.from('fake-secret'));const c=fake.calls.at(-1);expect(c.file).toBe('C:\\owned\\psc-security.exe');expect(c.argv).toEqual([]);
-  expect(c.opts.shell).toBe(false);expect(c.opts.windowsHide).toBe(true);expect(c.opts.stdio).toEqual(['pipe','pipe','pipe']);expect(Object.keys(c.opts.env).sort()).toEqual(['SystemRoot','WINDIR']);expect(JSON.stringify(c.argv)+JSON.stringify(c.opts.env)).not.toContain('fake-secret');
+  expect(c.opts.shell).toBe(false);expect(c.opts.windowsHide).toBe(true);expect(c.opts.stdio).toEqual(['pipe','pipe','pipe']);expect(Object.keys(c.opts.env).sort()).toEqual(['ProgramData','SystemDrive','SystemRoot','WINDIR']);expect(JSON.stringify(c.argv)+JSON.stringify(c.opts.env)).not.toContain('fake-secret');
  });
  it('native failure never returns raw body or stderr',()=>{fake.bad=true;expect(()=>callNative({op:'preflight',root:'C:/owned/config'})).toThrow('Windows protected state or executable binding refused');});
  it('Windows credentials read/write remain strict and separate, native remove/exists',()=>{
@@ -88,6 +88,30 @@ describe('Windows source-only boundary',()=>{
   for(const body of [`* ${key}\n`,line,line+'\n'+line+'\n',`${hostKeyAlias('fixture-device')} ssh-ed25519 AAAA fixture-device\n`]){
    fake.body=body;expect(()=>loadPinEntries()).toThrow();
   }
+ });
+
+ it('bound system values replace poisoned inherited values for SSH and native helper',()=>{
+  windows();for(const key of ['SystemDrive','SYSTEMDRIVE','systemdrive'])vi.stubEnv(key,'Z:');
+  for(const key of ['ProgramData','PROGRAMDATA','programdata'])vi.stubEnv(key,'Z:/poison');
+  const env=closedWindowsEnvironment({config:'C:/owned/config',runtime:'C:/owned/runtime',home:'C:/owned/home'},'https://broker.example');
+  expect(env.SystemDrive).toBe('C:');expect(env.ProgramData).toBe('C:\\ProgramData');
+  expect(Object.keys(env).filter(k=>k.toLowerCase()==='systemdrive')).toEqual(['SystemDrive']);
+  expect(Object.keys(env).filter(k=>k.toLowerCase()==='programdata')).toEqual(['ProgramData']);
+  expect(fake.calls.length).toBeGreaterThan(0);
+  for(const c of fake.calls){expect(c.opts.env).toEqual({SystemRoot:'C:\\Windows',WINDIR:'C:\\Windows',SystemDrive:'C:',ProgramData:'C:\\ProgramData'});}
+ });
+ it.each([
+  {systemDrive:undefined},{systemDrive:''},{systemDrive:'C:\\'},{systemDrive:'C:relative'},{systemDrive:'Z:'},{systemDrive:'C:\n'},
+  {programData:undefined},{programData:''},{programData:'C:relative'},{programData:'\\\\server\\share'},
+  {programData:'C:/a/../ProgramData'},{programData:'C:/ProgramData:stream'},{programData:'C:/ProgramData\n'},{programData:'C:/'}
+ ])('invalid system binding refuses launch before native invocation %j',override=>{
+  windows();fake.bindingOverride=override;expect(()=>closedWindowsEnvironment({config:'C:/owned/config',runtime:'C:/owned/runtime',home:'C:/owned/home'},'https://broker.example')).toThrow('binding refused');expect(fake.calls).toHaveLength(0);
+ });
+ it('refuses obsolete schema and redirected ProgramData binding before native invocation',()=>{
+  fake.bindingOverride={version:1};expect(()=>bindings()).toThrow('binding refused');
+  fake.bindingOverride={SystemDrive:'Z:'};expect(()=>bindings()).toThrow('binding refused');
+  fake.bindingOverride={};fake.programDataDirectory=false;expect(()=>bindings()).toThrow('binding refused');
+  fake.programDataDirectory=true;fake.redirectProgramData=true;expect(()=>bindings()).toThrow('binding refused');expect(fake.calls).toHaveLength(0);
  });
 
 });
