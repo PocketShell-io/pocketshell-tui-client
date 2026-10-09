@@ -30,7 +30,8 @@
           "path": "node-pty.d.ts",
           "sha256": "8609af75d5c53fb1dfc11ba52e31024981a43c23c4bed83cecebf208d9423a9c"
         }
-      ]
+      ],
+      "asset": "node-pty-1.2.0-beta.15.tgz"
     },
     {
       "package": "@lydell/node-pty-win32-x64",
@@ -123,7 +124,8 @@
           "path": "prebuilds/win32-x64/conpty.pdb",
           "sha256": "9275fecdca50f646579134e44604ba0ce81b184cea8edfc7c9fa53e59b475013"
         }
-      ]
+      ],
+      "asset": "node-pty-win32-x64-1.2.0-beta.15.tgz"
     }
   ],
   "patches": [

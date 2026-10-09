@@ -4,18 +4,40 @@ import fs from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { applyOverlay, installOverlayForPlatform } from '../scripts/apply-windows-pty-overlay.mjs';
 
-const lane = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const originals = resolve(lane, '../psc-windows-detach-qualification-20261009/original');
-const scratch = join(lane, 'packaging-fixtures'); fs.mkdirSync(scratch, { recursive: true });
+const lane = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const scratch = join(lane, '.tmp/windows-overlay-fixtures'); fs.mkdirSync(scratch, { recursive: true });
 const sha = p => createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const manifest = JSON.parse(fs.readFileSync(new URL('../vendor/windows-pty-overlay/manifest.json', import.meta.url)));
 function fixture() {
   const root = fs.mkdtempSync(join(scratch, 'overlay-'));
   const deps = join(root, 'node_modules/@lydell'); fs.mkdirSync(deps, { recursive: true });
-  for (const name of ['node-pty', 'node-pty-win32-x64']) fs.cpSync(join(originals, name), join(deps, name), { recursive: true });
+  for (const archive of manifest.archives) {
+    const compressed = fs.readFileSync(new URL('../vendor/windows-pty-overlay/'+archive.asset, import.meta.url));
+    assert.equal('sha512-'+createHash('sha512').update(compressed).digest('base64'), archive.integrity);
+    const tar = gunzipSync(compressed), seen = new Set();
+    for (let offset = 0; offset < tar.length; ) {
+      const header = tar.subarray(offset, offset + 512); offset += 512;
+      if (header.every(x => x === 0)) break;
+      const field = (at, length) => header.toString('utf8', at, at+length).split('\0')[0];
+      assert.ok(header[156] === 48 || header[156] === 0, 'only regular fixture archive entries');
+      const name = field(0, 100), prefix = field(345, 155);
+      const relativePath = (prefix ? prefix+'/' : '')+name;
+      assert.ok(relativePath.startsWith('package/'));
+      const path = relativePath.slice(8), expected = archive.files.find(f => f.path === path);
+      assert.ok(expected && !seen.has(path), 'only exact original inventory members'); seen.add(path);
+      const size = parseInt(field(124, 12).trim(), 8); assert.ok(Number.isSafeInteger(size) && size >= 0);
+      const bytes = tar.subarray(offset, offset+size); assert.equal(bytes.length, size);
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), expected.sha256);
+      const target = join(deps, archive.package.slice('@lydell/'.length), path);
+      fs.mkdirSync(dirname(target), { recursive: true }); fs.writeFileSync(target, bytes);
+      offset += Math.ceil(size/512)*512;
+    }
+    assert.equal(seen.size, archive.files.length);
+  }
   function writable(dir) { for (const name of fs.readdirSync(dir)) { const p = join(dir, name); if (fs.statSync(p).isDirectory()) writable(p); else fs.chmodSync(p, 0o644); } }
   writable(deps);
   fs.writeFileSync(join(root, 'package.json'), '{"type":"module"}');
@@ -95,7 +117,20 @@ test('changed maintained payload refuses before any dependency write', () => {
     fs.copyFileSync(new URL('../scripts/apply-windows-pty-overlay.mjs', import.meta.url), join(scripts, 'apply-windows-pty-overlay.mjs'));
     fs.cpSync(fileURLToPath(new URL('../vendor/windows-pty-overlay', import.meta.url)), vendor, { recursive: true });
     fs.appendFileSync(join(vendor, manifest.patches[0].payload), 'x'); const before = census(f);
-    assert.throws(() => execFileSync(process.execPath, [join(scripts, 'apply-windows-pty-overlay.mjs'), '--target-root', f.root], { stdio: 'pipe' }));
+    assert.throws(() => execFileSync(process.execPath, [join(scripts, 'apply-windows-pty-overlay.mjs'), '--target-root', f.root], { stdio: 'pipe', shell: false, windowsHide: true }));
+    assert.deepEqual(census(f), before);
+  } finally { f.dispose(); }
+});
+
+
+test('changed original SRI archive refuses before dependency writes', () => {
+  const f = fixture(); try {
+    const scripts = join(f.root, 'scripts'), vendor = join(f.root, 'vendor/windows-pty-overlay');
+    fs.mkdirSync(scripts); fs.mkdirSync(dirname(vendor));
+    fs.copyFileSync(new URL('../scripts/apply-windows-pty-overlay.mjs', import.meta.url), join(scripts, 'apply-windows-pty-overlay.mjs'));
+    fs.cpSync(fileURLToPath(new URL('../vendor/windows-pty-overlay', import.meta.url)), vendor, { recursive: true });
+    fs.appendFileSync(join(vendor, manifest.archives[0].asset), 'x'); const before = census(f);
+    assert.throws(() => execFileSync(process.execPath, [join(scripts, 'apply-windows-pty-overlay.mjs'), '--target-root', f.root], { stdio: 'pipe', shell: false, windowsHide: true }));
     assert.deepEqual(census(f), before);
   } finally { f.dispose(); }
 });

@@ -47,6 +47,11 @@ function atomicWrite(path, bytes) {
 }
 
 export function applyOverlay(packageRoot, { verifyOnly = false } = {}) {
+  for (const archive of manifest.archives) {
+    const bytes = fs.readFileSync(join(payloadRoot, archive.asset));
+    const sri = 'sha512-' + createHash('sha512').update(bytes).digest('base64');
+    if (sri !== archive.integrity || hash(bytes) !== archive.archiveSha256) fail('original upstream archive integrity differs');
+  }
   const require = createRequire(join(resolve(packageRoot), 'package.json'));
   // resolve() inspects package metadata only; never load a foreign JS/native addon.
   let wrapper, platform;
