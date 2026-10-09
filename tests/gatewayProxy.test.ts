@@ -2,15 +2,18 @@
  * The proxy against an in-process fake gateway (a local `ws` server that
  * speaks the client route of the gateway protocol).
  */
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { NotLoggedIn } from '../src/account/index.js';
 import { resolveEndpoint } from '../src/gateway/endpoint.js';
-import { EXIT, runProxy } from '../src/gateway/proxy.js';
-import { PROXY_MARKER } from '../src/transport/openssh.js';
+import { EXIT, friendlyLine, runProxy } from '../src/gateway/proxy.js';
+import { newStatusFilePath, PROXY_MARKER, readStatusFile, writeStatusFile } from '../src/transport/openssh.js';
 
 interface Fake {
   port: number;
@@ -56,7 +59,10 @@ async function fakeGateway(
 
 const READY = JSON.stringify({ type: 'ready', v: 1, device_id: 'home-lab', ssh_host_key: 'ssh-ed25519 AAAA' });
 
-function start(port: number, opts: { tokenProvider?: () => Promise<string>; handshakeTimeoutMs?: number; deviceId?: string } = {}) {
+function start(
+  port: number,
+  opts: { tokenProvider?: () => Promise<string>; handshakeTimeoutMs?: number; deviceId?: string; statusFile?: string } = {},
+) {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const lines: string[] = [];
@@ -70,6 +76,7 @@ function start(port: number, opts: { tokenProvider?: () => Promise<string>; hand
     stdout,
     diagnostic: (line) => lines.push(line),
     handshakeTimeoutMs: opts.handshakeTimeoutMs ?? 5_000,
+    ...(opts.statusFile ? { statusFile: opts.statusFile } : {}),
   });
   return { result, stdin, stdout, lines, output: () => Buffer.concat(out) };
 }
@@ -248,5 +255,83 @@ describe('gateway proxy', () => {
     const run = start(fake.port, { deviceId: '../etc' });
     expect(await run.result).toBe(EXIT.USAGE);
     expect(fake.requests).toHaveLength(0);
+  });
+});
+
+describe('the status file (ControlPersist silences the proxy stderr)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'psc-status-')); // 0700, ours
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('records a pre-tunnel failure atomically (0600), read once then deleted', async () => {
+    const fake = await fakeGateway((ws) => {
+      ws.send(JSON.stringify({ type: 'error', v: 1, code: 'host_offline', message: 'host is asleep' }));
+      ws.close(4503);
+    });
+    const statusFile = newStatusFilePath(dir);
+    const run = start(fake.port, { statusFile });
+    expect(await run.result).toBe(EXIT.HOST_OFFLINE);
+    expect(statSync(statusFile).mode & 0o777).toBe(0o600);
+    expect(readFileSync(statusFile, 'utf8')).toBe(`${run.lines[0]}\n`);
+    expect(existsSync(`${statusFile}.tmp`)).toBe(false);
+    expect(readStatusFile(statusFile)).toEqual({ code: 'HOST_OFFLINE', message: 'gateway refused: host_offline: host is asleep' });
+    expect(existsSync(statusFile)).toBe(false);
+    expect(readStatusFile(statusFile)).toBeNull();
+  });
+
+  it('records a token-mint failure (broker 401 → NotLoggedIn) as NOT_LOGGED_IN', async () => {
+    const fake = await fakeGateway(() => {});
+    const statusFile = newStatusFilePath(dir);
+    const run = start(fake.port, {
+      statusFile,
+      tokenProvider: async () => {
+        throw new NotLoggedIn('Your PocketShell login is no longer valid');
+      },
+    });
+    expect(await run.result).toBe(EXIT.NO_TOKEN);
+    expect(readStatusFile(statusFile)).toMatchObject({ code: 'NOT_LOGGED_IN' });
+  });
+
+  it('writes nothing for a clean session or a loss after ready (a session ran)', async () => {
+    const lost = await fakeGateway((ws) => {
+      ws.send(READY);
+      setTimeout(() => ws.terminate(), 50);
+    });
+    const statusFile = newStatusFilePath(dir);
+    expect(await start(lost.port, { statusFile }).result).toBe(EXIT.LOST);
+    expect(existsSync(statusFile)).toBe(false);
+  });
+
+  it('refuses paths outside a private dir of ours, odd names, symlinks and existing temp files', () => {
+    const open = mkdtempSync(join(tmpdir(), 'psc-open-'));
+    try {
+      chmodSync(open, 0o777);
+      expect(() => writeStatusFile(join(open, 'st-0123456789abcdef01234567'), 'x')).toThrow(/group\/others/);
+      expect(() => writeStatusFile(join(dir, 'evil'), 'x')).toThrow(/status-file path/);
+      expect(() => writeStatusFile(`${dir}/../${dir.split('/').pop()}/st-0123456789abcdef01234567`, 'x')).toThrow();
+      expect(() => writeStatusFile('relative/st-0123456789abcdef01234567', 'x')).toThrow();
+      const target = join(dir, 'target');
+      writeFileSync(target, 'keep');
+      const linked = join(dir, 'st-aaaaaaaaaaaaaaaaaaaaaaaa');
+      symlinkSync(target, `${linked}.tmp`);
+      expect(() => writeStatusFile(linked, 'x')).toThrow();
+      expect(readFileSync(target, 'utf8')).toBe('keep');
+      symlinkSync(target, join(dir, 'st-bbbbbbbbbbbbbbbbbbbbbbbb'));
+      expect(readStatusFile(join(dir, 'st-bbbbbbbbbbbbbbbbbbbbbbbb'))).toBeNull(); // O_NOFOLLOW
+    } finally {
+      rmSync(open, { recursive: true, force: true });
+    }
+  });
+
+  it('a refused status file never breaks the proxy itself', async () => {
+    const fake = await fakeGateway((ws) => ws.close(4404));
+    const run = start(fake.port, { statusFile: '/etc/st-0123456789abcdef01234567' });
+    expect(await run.result).toBe(EXIT.NOT_FOUND);
+    expect(run.lines[0]).toMatch(/DEVICE_NOT_FOUND/);
+  });
+
+  it('the terminal form of the failure line is human', () => {
+    expect(friendlyLine('HOST_OFFLINE', 'gateway refused: host_offline: asleep', 'laptop')).toBe(
+      'gateway: host offline (laptop): gateway refused: host_offline: asleep',
+    );
   });
 });

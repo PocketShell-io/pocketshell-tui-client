@@ -10,8 +10,8 @@
  */
 import type { SshHostConfig } from '../hosts/store.js';
 import {
-  classifySshFailure,
   controlPathFor,
+  explainSshExit,
   findSsh,
   multiplexOptions,
   runSshCaptured,
@@ -83,14 +83,18 @@ export class OpenSshConnection implements Connection {
 
   async exec(command: string, options: ExecOptions): Promise<ExecOutcome> {
     const outcome = await runSshCaptured(this.sshPath, this.argv('exec', command), options);
-    const failure = classifySshFailure(outcome, {
-      hostName: this.hostName,
-      how: `over ssh (${this.config.destination})`,
-      hint: {
-        HOST_KEY_FAILED: `connect once with \`ssh ${this.config.destination}\` to verify and accept the host key`,
-        AUTH_FAILED: 'key-based login is required for non-interactive use (load the key into ssh-agent or set --identity)',
+    const failure = await explainSshExit(
+      outcome,
+      {
+        hostName: this.hostName,
+        how: `over ssh (${this.config.destination})`,
+        hint: {
+          HOST_KEY_FAILED: `connect once with \`ssh ${this.config.destination}\` to verify and accept the host key`,
+          AUTH_FAILED: 'key-based login is required for non-interactive use (load the key into ssh-agent or set --identity)',
+        },
       },
-    });
+      { sshPath: this.sshPath, controlPath: this.controlPath },
+    );
     if (failure) throw failure;
     return outcome;
   }

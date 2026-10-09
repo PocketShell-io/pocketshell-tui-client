@@ -28,12 +28,16 @@ import { DEFAULT_SERVER, EndpointError, hostKeyAlias, legacyHostKeyAlias, resolv
 import { PinError, pinFilePath, requirePinEntry } from '../gateway/pins.js';
 import type { GatewayHostConfig } from '../hosts/store.js';
 import {
-  classifySshFailure,
   controlPathFor,
+  explainSshExit,
   findSsh,
   multiplexOptions,
+  newStatusFilePath,
+  proxyFailure,
+  readStatusFile,
   runSshCaptured,
   shQuote,
+  SSH_FAILURE_EXIT,
 } from './openssh.js';
 import { runInteractive } from './process.js';
 import { ConnectionError, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
@@ -129,12 +133,22 @@ export function cliInvocation(): string[] {
   throw new ConnectionError('cannot locate the pocketshell-client entry point for the gateway ProxyCommand', 'INTERNAL', 1);
 }
 
-/** The ProxyCommand string: each element shell-quoted, `%` doubled for ssh. */
-export function proxyCommand(deviceId: string, endpoint: GatewayEndpoint, invocation: readonly string[]): string {
+/**
+ * The ProxyCommand string: each element shell-quoted, `%` doubled for ssh.
+ * `statusFile` (see openssh.ts) is where the proxy also records its final
+ * failure marker, since ControlPersist sends its stderr to /dev/null.
+ */
+export function proxyCommand(
+  deviceId: string,
+  endpoint: GatewayEndpoint,
+  invocation: readonly string[],
+  statusFile?: string | null,
+): string {
   if (!invocation[0] || !isAbsolute(invocation[0])) throw usage('cannot locate an absolute node interpreter path');
   const argv = [...invocation, 'gateway', 'proxy', validateDeviceId(deviceId)];
   if (endpoint.wsBase !== DEFAULT_SERVER) argv.push('--server', endpoint.wsBase);
   if (!endpoint.secure) argv.push('--insecure-dev');
+  if (statusFile) argv.push('--status-file', checkSshPath(statusFile, 'status file'));
   return argv.map((word) => shQuote(checkProxyElement(word)).replace(/%/g, '%%')).join(' ');
 }
 
@@ -150,6 +164,8 @@ export interface GatewayArgvInput {
   invocation: readonly string[];
   kind: 'exec' | 'attach';
   command: string;
+  /** Fresh per ssh invocation; omitted → the proxy reports on stderr only. */
+  statusFile?: string | null;
 }
 
 /** The hardened ssh argv (without argv[0]). Pure apart from the identity-file existence check. */
@@ -165,7 +181,7 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
   argv.push(
     '-o', `UserKnownHostsFile=${checkSshPath(input.pinFile, 'pin file')}`,
     '-o', `HostKeyAlias=${input.alias}`,
-    '-o', `ProxyCommand=${proxyCommand(deviceId, endpoint, input.invocation)}`,
+    '-o', `ProxyCommand=${proxyCommand(deviceId, endpoint, input.invocation, input.statusFile)}`,
   );
   if (input.controlPath) argv.push(...multiplexOptions(checkSshPath(input.controlPath, 'control socket')));
   else argv.push('-o', 'ControlMaster=no', '-o', 'ControlPath=none');
@@ -204,26 +220,59 @@ export class GatewayConnection implements Connection {
   constructor(
     readonly hostName: string,
     private readonly sshPath: string,
-    private readonly argvInput: Omit<GatewayArgvInput, 'kind' | 'command'>,
+    private readonly argvInput: Omit<GatewayArgvInput, 'kind' | 'command' | 'statusFile'>,
   ) {}
 
-  argv(kind: 'exec' | 'attach', command: string): string[] {
-    return buildGatewaySshArgv({ ...this.argvInput, kind, command });
+  argv(kind: 'exec' | 'attach', command: string, statusFile?: string | null): string[] {
+    return buildGatewaySshArgv({ ...this.argvInput, kind, command, statusFile });
   }
 
-  async exec(command: string, options: ExecOptions): Promise<ExecOutcome> {
-    const outcome = await runSshCaptured(this.sshPath, this.argv('exec', command), { ...options, env: sshEnvironment() });
-    const failure = classifySshFailure(outcome, {
+  /**
+   * A fresh status-file path for one ssh run, next to the control socket
+   * (our private dir). Only needed with multiplexing: without ControlPersist
+   * the proxy's stderr marker reaches us directly.
+   */
+  private statusFile(): string | null {
+    const { controlPath } = this.argvInput;
+    return controlPath ? newStatusFilePath(dirname(controlPath)) : null;
+  }
+
+  private context() {
+    return {
       hostName: this.hostName,
       how: `through the gateway (device ${this.argvInput.deviceId})`,
       hint: HINTS,
+    };
+  }
+
+  async exec(command: string, options: ExecOptions): Promise<ExecOutcome> {
+    const statusFile = this.statusFile();
+    const outcome = await runSshCaptured(this.sshPath, this.argv('exec', command, statusFile), {
+      ...options,
+      env: sshEnvironment(),
+    });
+    const failure = await explainSshExit(outcome, this.context(), {
+      sshPath: this.sshPath,
+      controlPath: this.argvInput.controlPath,
+      statusFile,
     });
     if (failure) throw failure;
     return outcome;
   }
 
-  attachInteractive(command: string): Promise<number | null> {
-    return runInteractive(this.sshPath, this.argv('attach', command), sshEnvironment());
+  /**
+   * Interactive attach. ssh owns the terminal, so a proxy failure prints
+   * (when stderr is not silenced) the proxy's friendly TTY line; and when
+   * ssh exits 255 and the status file shows the tunnel never came up — no
+   * session ever started — it is raised as a typed ConnectionError
+   * (NOT_LOGGED_IN → exit 3, HOST_OFFLINE, ...) for the CLI/TUI to report.
+   */
+  async attachInteractive(command: string): Promise<number | null> {
+    const statusFile = this.statusFile();
+    const code = await runInteractive(this.sshPath, this.argv('attach', command, statusFile), sshEnvironment());
+    const status = readStatusFile(statusFile);
+    if (code === SSH_FAILURE_EXIT && status) throw proxyFailure(status, this.context());
+    return code;
   }
 
   async close(): Promise<void> {

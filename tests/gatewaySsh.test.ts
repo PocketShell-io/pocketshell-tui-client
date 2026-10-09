@@ -5,7 +5,7 @@
  * to localhost.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { connect, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -22,7 +22,7 @@ import {
   openGatewayConnection,
   proxyCommand,
 } from '../src/transport/gateway.js';
-import { controlPathFor, findSsh } from '../src/transport/openssh.js';
+import { controlPathFor, findSsh, PROXY_MARKER, runSshCaptured } from '../src/transport/openssh.js';
 import { ConnectionError } from '../src/transport/types.js';
 
 const savedXdg = process.env.XDG_CONFIG_HOME;
@@ -203,7 +203,7 @@ describe.skipIf(!e2e)('end to end through a fake gateway to the local sshd', () 
 
   afterAll(async () => {
     // Stop any master we started, then the fake gateway.
-    for (const id of ['local-box']) {
+    for (const id of ['local-box', 'offline-mux', 'nologin-mux', 'attach-mux']) {
       const cp = controlPathFor('g', [id, port], controlDir);
       spawnSync('ssh', ['-o', `ControlPath=${cp}`, '-O', 'exit', 'x'], { stdio: 'ignore' });
     }
@@ -263,5 +263,85 @@ describe.skipIf(!e2e)('end to end through a fake gateway to the local sshd', () 
     } finally {
       mode = 'bridge';
     }
+  }, 60_000);
+
+  // --- with multiplexing ON (the default config) --------------------------
+  // ControlPersist makes OpenSSH send the ProxyCommand's stderr to
+  // /dev/null, so these go through the proxy's status file.
+
+  const wrongKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGuV1O9rNRp7VtgPq3H6Mze4PugDi32wsIYRrGAzHWLb';
+  const muxed = (id: string) => connection(id, controlPathFor('g', [id, port], controlDir));
+  const leftovers = () => readdirSync(controlDir).filter((name) => name.startsWith('st-'));
+
+  it('mux: the proxy stderr marker really is lost (why the status file exists)', async () => {
+    addPin('offline-mux', parseHostKey(wrongKey));
+    mode = 'offline';
+    try {
+      const raw = await runSshCaptured(findSsh(), muxed('offline-mux').argv('exec', 'true'), { timeoutMs: 30_000 });
+      expect(raw.exitCode).toBe(255);
+      expect(raw.stderr).not.toContain(PROXY_MARKER);
+      expect(raw.stderr).toMatch(/Connection closed by UNKNOWN port 65535/);
+    } finally {
+      mode = 'bridge';
+    }
+  }, 60_000);
+
+  it('mux: a host-offline refusal is HOST_OFFLINE (exit 4), not CONNECT_FAILED', async () => {
+    addPin('offline-mux', parseHostKey(wrongKey));
+    mode = 'offline';
+    try {
+      const error = await muxed('offline-mux')
+        .exec('true', { timeoutMs: 30_000 })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(error).toBeInstanceOf(ConnectionError);
+      expect(error).toMatchObject({ code: 'HOST_OFFLINE', exitCode: 4 });
+      expect((error as Error).message).toMatch(/host is offline.*gateway run/);
+      expect(leftovers()).toEqual([]);
+    } finally {
+      mode = 'bridge';
+    }
+  }, 60_000);
+
+  it('mux: a token-mint failure inside the proxy (broker 401) is NOT_LOGGED_IN, exit 3', async () => {
+    addPin('nologin-mux', parseHostKey(wrongKey));
+    process.env.PSC_TEST_GATEWAY_TOKEN_ERROR = 'Your PocketShell login is no longer valid; run `pocketshell-client login`.';
+    const before = connections;
+    try {
+      await expect(muxed('nologin-mux').exec('true', { timeoutMs: 30_000 })).rejects.toMatchObject({
+        code: 'NOT_LOGGED_IN',
+        exitCode: 3,
+        message: expect.stringMatching(/login is no longer valid/),
+      });
+      expect(connections).toBe(before); // never dialed the gateway
+      expect(leftovers()).toEqual([]);
+    } finally {
+      delete process.env.PSC_TEST_GATEWAY_TOKEN_ERROR;
+    }
+  }, 60_000);
+
+  it('mux: attach that never gets a session raises the typed error too', async () => {
+    addPin('attach-mux', parseHostKey(wrongKey));
+    mode = 'offline';
+    try {
+      await expect(muxed('attach-mux').attachInteractive('true')).rejects.toMatchObject({ code: 'HOST_OFFLINE', exitCode: 4 });
+      expect(leftovers()).toEqual([]);
+    } finally {
+      mode = 'bridge';
+    }
+  }, 60_000);
+
+  it('mux: a remote command that itself exits 255 with ssh-looking stderr is passed through', async () => {
+    const conn = muxed('local-box');
+    const nested = await conn.exec(`echo 'ssh: connect to host inner port 22: Connection refused' >&2; exit 255`, {
+      timeoutMs: 30_000,
+    });
+    expect(nested).toMatchObject({ exitCode: 255, stdout: '', timedOut: false });
+    expect(nested.stderr).toContain('Connection refused');
+    const withOutput = await conn.exec(`echo partial; echo 'Permission denied (publickey).' >&2; exit 255`, { timeoutMs: 30_000 });
+    expect(withOutput).toMatchObject({ exitCode: 255, stdout: 'partial\n' });
+    expect(leftovers()).toEqual([]);
   }, 60_000);
 });

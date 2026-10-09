@@ -13,15 +13,20 @@
  *
  * stdout carries SSH bytes only. Failures print ONE line on stderr,
  * `pocketshell-client-proxy: <CODE>: <message>`, which the ssh/gateway
- * Connection parses back into a typed error (ssh itself only says 255).
- * Gateway-supplied text is sanitized first. The token never leaves memory
- * except in the auth frame.
+ * Connection parses back into a typed error (ssh itself only says 255);
+ * when stderr is a terminal (an interactive attach without multiplexing)
+ * the line is the human form instead, `gateway: host offline (<id>): ...`.
+ * With `--status-file`, a failure before the tunnel is up is ALSO written
+ * there (atomically, 0600, inside our private dir only): with ControlPersist
+ * OpenSSH sends a ProxyCommand's stderr to /dev/null, so the file is the
+ * only way the marker reaches the client. Gateway-supplied text is
+ * sanitized first. The token never leaves memory except in the auth frame.
  */
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import type { Readable, Writable } from 'node:stream';
 import WebSocket from 'ws';
-import { PROXY_MARKER } from '../transport/openssh.js';
+import { PROXY_MARKER, writeStatusFile } from '../transport/openssh.js';
 import { clientSshUrl, validateDeviceId, type GatewayEndpoint } from './endpoint.js';
 import { isPlainObject, parseStrictJson, sanitizeRemoteText, StrictJsonError } from './text.js';
 
@@ -54,6 +59,45 @@ export const EXIT_CODE_NAME: Record<number, string> = {
   10: 'GATEWAY_QUOTA',
   11: 'CONNECTION_LOST',
 };
+
+/** Short human summaries for the terminal form of the failure line. */
+const SUMMARY: Record<string, string> = {
+  INTERNAL: 'internal error',
+  USAGE: 'invalid arguments',
+  NOT_LOGGED_IN: 'not logged in',
+  CONNECT_FAILED: 'cannot connect',
+  GATEWAY_TIMEOUT: 'timed out',
+  GATEWAY_PROTOCOL: 'protocol error',
+  GATEWAY_UNAUTHORIZED: 'not authorized',
+  DEVICE_NOT_FOUND: 'unknown device',
+  HOST_OFFLINE: 'host offline',
+  GATEWAY_QUOTA: 'quota exceeded',
+  CONNECTION_LOST: 'connection lost',
+};
+
+/** The machine-readable failure line (stderr when piped, and the status file). */
+export function markerLine(codeName: string, message: string): string {
+  return `${PROXY_MARKER}: ${codeName}: ${message}`;
+}
+
+/** The human failure line, for a terminal: `gateway: host offline (laptop): ...`. */
+export function friendlyLine(codeName: string, message: string, deviceId: string): string {
+  return `gateway: ${SUMMARY[codeName] ?? 'failed'} (${sanitizeRemoteText(deviceId, 80)}): ${message}`;
+}
+
+/**
+ * Record a failure in the status file, if one was requested. Never throws:
+ * a refused path (outside a private dir of ours, existing tmp, symlink)
+ * just means the client falls back to stderr / ssh's own diagnostics.
+ */
+export function recordStatus(statusFile: string | undefined, line: string): void {
+  if (!statusFile) return;
+  try {
+    writeStatusFile(statusFile, line);
+  } catch {
+    /* refused or unwritable */
+  }
+}
 
 export const CLOSE_CODE_EXIT: Record<number, number> = {
   4400: EXIT.PROTOCOL,
@@ -144,14 +188,21 @@ export interface ProxyOptions {
   tokenProvider: () => Promise<string>;
   stdin: Readable;
   stdout: Writable;
-  /** One diagnostic line (no newline). Default: process.stderr. */
+  /**
+   * One diagnostic line (no newline), always the marker form. Default:
+   * process.stderr — the marker form, or the human form on a terminal.
+   */
   diagnostic?: (line: string) => void;
+  /** Also record a pre-tunnel failure here (see the module comment). */
+  statusFile?: string;
   handshakeTimeoutMs?: number;
 }
 
 interface Outcome {
   code: number;
   message: string;
+  /** The tunnel had reached `ready`: a session may have run. */
+  established?: boolean;
 }
 
 function tokenFailure(error: unknown): Outcome {
@@ -193,7 +244,6 @@ function closeOutcome(closeCode: number, fallback: number): Outcome {
 
 /** Run the bridge; resolve with the process exit status. Never rejects. */
 export async function runProxy(options: ProxyOptions): Promise<number> {
-  const diagnostic = options.diagnostic ?? ((line: string) => process.stderr.write(`${line}\n`));
   let outcome: Outcome;
   try {
     outcome = await bridge(options);
@@ -201,8 +251,16 @@ export async function runProxy(options: ProxyOptions): Promise<number> {
     outcome = { code: EXIT.INTERNAL, message: `internal error (${error instanceof Error ? error.name : 'unknown'})` };
   }
   if (outcome.code !== EXIT.OK && outcome.message) {
+    const codeName = EXIT_CODE_NAME[outcome.code] ?? 'INTERNAL';
+    const marker = markerLine(codeName, outcome.message);
+    // Only pre-tunnel failures: they prove no session ran, and the client
+    // is still waiting to read the file (a later loss in a background
+    // master would only leave a stale file behind).
+    if (!outcome.established) recordStatus(options.statusFile, marker);
     try {
-      diagnostic(`${PROXY_MARKER}: ${EXIT_CODE_NAME[outcome.code] ?? 'INTERNAL'}: ${outcome.message}`);
+      if (options.diagnostic) options.diagnostic(marker);
+      else if (process.stderr.isTTY) process.stderr.write(`${friendlyLine(codeName, outcome.message, options.deviceId)}\n`);
+      else process.stderr.write(`${marker}\n`);
     } catch {
       /* stderr gone */
     }
@@ -280,6 +338,7 @@ async function bridge(options: ProxyOptions): Promise<Outcome> {
 
     function finish(result: Outcome): void {
       if (phase === 'done') return;
+      if (phase === 'ready') result = { ...result, established: true };
       phase = 'done';
       clearTimeout(deadline);
       if (errorWait) clearTimeout(errorWait);

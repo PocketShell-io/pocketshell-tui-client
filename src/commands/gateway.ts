@@ -22,9 +22,8 @@ import {
   removePin,
   type HostKey,
 } from '../gateway/pins.js';
-import { runProxy } from '../gateway/proxy.js';
+import { markerLine, recordStatus, runProxy } from '../gateway/proxy.js';
 import { emit, note, setJsonMode } from '../output.js';
-import { PROXY_MARKER } from '../transport/openssh.js';
 import { action, jsonOption } from './common.js';
 
 const MAX_PIN_INPUT_BYTES = 16384;
@@ -168,15 +167,20 @@ export function registerGateway(program: Command): void {
       .description(
         'OpenSSH ProxyCommand used by gateway hosts: bridges stdin/stdout to the device through the gateway ' +
           '(stdout carries SSH bytes only; not for interactive use)',
+      )
+      .option(
+        '--status-file <path>',
+        'also record a pre-tunnel failure in this file (set by the client; must be inside its private runtime dir)',
       ),
-  ).action(async (deviceId: string, opts: { server?: string; insecureDev?: boolean }) => {
+  ).action(async (deviceId: string, opts: { server?: string; insecureDev?: boolean; statusFile?: string }) => {
     let endpoint: GatewayEndpoint;
     try {
       validateDeviceId(deviceId);
       endpoint = endpointFrom(opts);
     } catch (error) {
-      const message = error instanceof EndpointError ? error.message : 'invalid arguments';
-      process.stderr.write(`${PROXY_MARKER}: USAGE: ${message}\n`);
+      const line = markerLine('USAGE', error instanceof EndpointError ? error.message : 'invalid arguments');
+      recordStatus(opts.statusFile, line);
+      process.stderr.write(`${line}\n`);
       process.exit(2);
     }
     const code = await runProxy({
@@ -185,6 +189,7 @@ export function registerGateway(program: Command): void {
       tokenProvider: mintGatewayToken,
       stdin: process.stdin,
       stdout: process.stdout,
+      ...(opts.statusFile !== undefined ? { statusFile: opts.statusFile } : {}),
     });
     process.exit(code);
   });
