@@ -19,12 +19,13 @@ vi.mock('node:child_process',()=>({spawnSync:vi.fn((file,argv,opts)=>{
 }),spawn:vi.fn(()=>{throw Error('real spawn forbidden')})}));
 import { windowsAbsolute, windowsProxyCommand, callNative, closedWindowsEnvironment, nativeWrite, bindings } from '../src/platform/windows.js';
 import { load, save, exists, remove, type Credentials } from '../src/account/credentials.js';
-import { buildGatewaySshArgv } from '../src/transport/gateway.js';
+import { buildGatewaySshArgv, cliInvocation } from '../src/transport/gateway.js';
 import { resolveEndpoint, hostKeyAlias } from '../src/gateway/endpoint.js';
 import { addPin, loadPinEntries, requirePinEntry, parseHostKey, fingerprint } from '../src/gateway/pins.js';
 import { deviceLogin } from '../src/account/device.js';
 const realPlatform=process.platform;
-afterEach(()=>{Object.defineProperty(process,'platform',{value:realPlatform});fake.bad=false;fake.present=true;fake.calls=[];fake.writes=[];fake.body='';fake.bindingOverride={};fake.redirectProgramData=false;fake.programDataDirectory=true;vi.unstubAllEnvs();});
+const realExecPath=process.execPath;
+afterEach(()=>{Object.defineProperty(process,'platform',{value:realPlatform});Object.defineProperty(process,'execPath',{value:realExecPath});fake.bad=false;fake.present=true;fake.calls=[];fake.writes=[];fake.body='';fake.bindingOverride={};fake.redirectProgramData=false;fake.programDataDirectory=true;vi.unstubAllEnvs();});
 function windows(){Object.defineProperty(process,'platform',{value:'win32'});vi.stubEnv('XDG_CONFIG_HOME','C:\\owned\\config');vi.stubEnv('XDG_RUNTIME_DIR','C:\\owned\\runtime');}
 function roundtrip(s:string):string[]{
  const out:string[]=[];let i=0;
@@ -112,6 +113,22 @@ describe('Windows source-only boundary',()=>{
   fake.bindingOverride={SystemDrive:'Z:'};expect(()=>bindings()).toThrow('binding refused');
   fake.bindingOverride={};fake.programDataDirectory=false;expect(()=>bindings()).toThrow('binding refused');
   fake.programDataDirectory=true;fake.redirectProgramData=true;expect(()=>bindings()).toThrow('binding refused');expect(fake.calls).toHaveLength(0);
+ });
+
+ it.each([
+  ['C:/owned/node.exe','C:\\owned\\node.exe'],
+  ['c:/OWNED/NODE.EXE','C:\\owned\\node.exe'],
+  ['C:\\owned\\node.exe','c:/OWNED/NODE.EXE']
+ ])('actual cliInvocation accepts validated slash/case-equivalent Node paths %j', (bound,actual)=>{
+  windows();fake.bindingOverride={node:bound};Object.defineProperty(process,'execPath',{value:actual});
+  expect(cliInvocation()).toEqual([bound,'C:\\owned\\dist\\cli.js']);expect(fake.calls).toHaveLength(0);
+ });
+ it.each(['C:relative','\\rooted','\\\\server\\share\\node.exe','C:/owned/../node.exe','C:/owned/node.exe:stream','C:/owned/node.exe\n'])('actual cliInvocation refuses malformed running interpreter %j',actual=>{
+  windows();Object.defineProperty(process,'execPath',{value:actual});expect(()=>cliInvocation()).toThrow();expect(fake.calls).toHaveLength(0);
+ });
+ it('actual cliInvocation refuses different valid interpreter and malformed provisioned interpreter',()=>{
+  windows();Object.defineProperty(process,'execPath',{value:'C:/different/node.exe'});expect(()=>cliInvocation()).toThrow('Windows interpreter binding mismatch');
+  fake.bindingOverride={node:'C:relative'};expect(()=>cliInvocation()).toThrow('binding refused');expect(fake.calls).toHaveLength(0);
  });
 
 });

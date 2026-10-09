@@ -110,7 +110,7 @@ function checkProxyElement(value: string): string {
  */
 export function cliInvocation(): string[] {
   if(process.platform==='win32') { const b=bindings();
-    if(b.node.toLowerCase()!==process.execPath.toLowerCase()) throw usage('Windows interpreter binding mismatch');
+    if(windowsAbsolute(b.node).toLowerCase()!==windowsAbsolute(process.execPath).toLowerCase()) throw usage('Windows interpreter binding mismatch');
     return [b.node,b.entry];
   }
   const node = process.execPath;
