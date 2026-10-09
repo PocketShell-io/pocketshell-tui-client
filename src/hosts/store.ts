@@ -5,6 +5,7 @@
  * `local` host (this machine, local mode) always exists and is never
  * stored, so a fresh install can be used before anything is configured.
  */
+import { nativeRead, nativeWrite } from '../platform/windows.js';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { hostsFile } from '../paths.js';
@@ -134,7 +135,9 @@ export function localHost(): HostEntry {
 function read(): HostsFileShape {
   let raw: string;
   try {
-    raw = readFileSync(hostsFile(), 'utf8');
+    if (process.platform === 'win32') {
+      const b=nativeRead(dirname(hostsFile()), 'hosts'); if (b===null) return {version:1,hosts:[]}; raw=b.toString('utf8');
+    } else raw = readFileSync(hostsFile(), 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, hosts: [] };
     throw error;
@@ -153,6 +156,7 @@ function read(): HostsFileShape {
 
 function write(data: HostsFileShape): void {
   const file = hostsFile();
+  if (process.platform === 'win32') { nativeWrite(dirname(file),'hosts',Buffer.from(`${JSON.stringify(data,null,2)}\n`)); return; }
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });

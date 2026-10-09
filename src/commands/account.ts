@@ -31,7 +31,7 @@ const LOGIN_HELP = `
 Prints a short code and a URL; approve the code in the browser while signed in
 to PocketShell. The session is stored in
 \${XDG_CONFIG_HOME:-~/.config}/pocketshell/credentials.json (mode 0600), shared
-with the \`pocketshell\` CLI. An existing login is never replaced silently: pass
+with the \`pocketshell\` CLI on POSIX. Windows uses a separately approved current-user DPAPI PSC store and never imports a Python session. An existing login is never replaced silently: pass
 --force to replace it (the old session is then revoked). Ctrl+C cancels (exit 130).
 
 --json streams TWO JSON lines on stdout (the one command that does):

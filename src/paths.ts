@@ -10,9 +10,11 @@
  */
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { windowsAbsolute } from './platform/windows.js';
 
 export function configHome(): string {
   const xdg = process.env.XDG_CONFIG_HOME;
+  if (process.platform === 'win32') return windowsAbsolute(xdg ?? join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'PocketShell'));
   return xdg && xdg.startsWith('/') ? xdg : join(homedir(), '.config');
 }
 
@@ -21,7 +23,7 @@ export function clientConfigDir(): string {
 }
 
 export function sharedConfigDir(): string {
-  return join(configHome(), 'pocketshell');
+  return join(configHome(), process.platform === 'win32' ? 'pocketshell-client-account' : 'pocketshell');
 }
 
 export function hostsFile(): string {
@@ -29,7 +31,7 @@ export function hostsFile(): string {
 }
 
 export function credentialsFile(): string {
-  return join(sharedConfigDir(), 'credentials.json');
+  return join(sharedConfigDir(), process.platform === 'win32' ? 'credentials.dpapi' : 'credentials.json');
 }
 
 export function gatewayPinsFile(): string {
@@ -39,6 +41,7 @@ export function gatewayPinsFile(): string {
 /** Private per-user runtime dir for OpenSSH control sockets. */
 export function runtimeDir(): string {
   const xdg = process.env.XDG_RUNTIME_DIR;
+  if (process.platform === 'win32') return windowsAbsolute(xdg ?? join(configHome(), 'pocketshell-client-runtime'));
   const base = xdg && xdg.startsWith('/') ? xdg : join('/tmp', `pocketshell-client-${process.getuid?.() ?? 'u'}`);
   return xdg && xdg.startsWith('/') ? join(base, 'pocketshell-client') : base;
 }

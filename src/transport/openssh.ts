@@ -13,6 +13,7 @@
  *   from the gateway proxy's status file, its stderr marker line, or ssh's
  *   own diagnostics, without swallowing a remote command's own exit 255.
  */
+import { bindings, callNative, nativeRead, nativeWrite } from '../platform/windows.js';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
@@ -71,6 +72,7 @@ let sshPathCache: string | undefined;
 
 /** The absolute path of the OpenSSH client on PATH. */
 export function findSsh(): string {
+  if (process.platform === 'win32') { const b=bindings(); callNative({op:'check-executable',root:runtimeDir(),path:b.ssh}); return b.ssh; }
   if (sshPathCache) return sshPathCache;
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     if (!dir || !isAbsolute(dir)) continue;
@@ -110,6 +112,7 @@ let controlDirCache: string | undefined;
  * is not worth the speed.
  */
 export function controlDir(): string {
+  if (process.platform === 'win32') { const dir=runtimeDir(); callNative({op:'preflight',root:dir}); return dir; }
   if (controlDirCache) return controlDirCache;
   const candidates = [runtimeDir(), join('/tmp', `psc-${process.getuid?.() ?? 'u'}`)];
   const problems: string[] = [];
@@ -316,6 +319,7 @@ const STALE_STATUS_MS = 10 * 60_000;
 
 /** A fresh status-file path in `dir` (our private control dir); sweeps stale ones. */
 export function newStatusFilePath(dir: string): string {
+  if (process.platform === 'win32') { if(dir!==runtimeDir()) throw new Error('Windows status root refused'); callNative({op:'preflight',root:dir}); return join(dir, `st-${randomBytes(12).toString('hex')}`); }
   try {
     const now = Date.now();
     for (const name of readdirSync(dir)) {
@@ -350,6 +354,10 @@ function checkStatusPath(path: string): void {
  * O_NOFOLLOW, 0600), then rename it into place. Throws on any refusal.
  */
 export function writeStatusFile(path: string, line: string): void {
+  if (process.platform === 'win32') {
+    if(dirname(path)!==runtimeDir() || !STATUS_FILE_RE.test(basename(path))) throw new Error('Windows status path refused');
+    nativeWrite(dirname(path),'status',Buffer.from(`${line.slice(0,MAX_STATUS_BYTES-2)}\n`),basename(path)); return;
+  }
   checkStatusPath(path);
   const tmp = `${path}.tmp`;
   const fd = openSync(
@@ -372,6 +380,14 @@ export interface ProxyStatus {
 
 /** Read, delete and parse a status file. Null when absent, unsafe or not a marker. */
 export function readStatusFile(path: string | null | undefined): ProxyStatus | null {
+  if(process.platform==='win32') {
+    if(!path) return null;
+    if(dirname(path)!==runtimeDir() || !STATUS_FILE_RE.test(basename(path))) return null;
+    const b=nativeRead(dirname(path),'status',basename(path)); if(b===null) return null;
+    callNative({op:'remove',root:dirname(path),kind:'status',name:basename(path)});
+    for(const line of lines(b.toString('utf8'))) {const m=PROXY_MARKER_RE.exec(line);if(m)return {code:m[1]!,message:m[2]!};}
+    return null;
+  }
   if (!path) return null;
   let text = '';
   try {

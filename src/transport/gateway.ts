@@ -13,6 +13,9 @@
  * proxy, gets current broker authorization and verifies the current full pin.
  * Direct SSH mode retains its separate explicit multiplexing behavior.
  */
+import { bindings, callNative, closedWindowsEnvironment, nativeWrite, windowsAbsolute, windowsProxyCommand, quoteWindowsArg } from '../platform/windows.js';
+import { configHome, runtimeDir, sharedConfigDir } from '../paths.js';
+import { brokerUrl } from '../account/index.js';
 import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
@@ -78,6 +81,11 @@ function usage(message: string): ConnectionError {
 }
 
 export function checkSshPath(path: string, what: string): string {
+  if (process.platform === 'win32') {
+    const p=windowsAbsolute(path).replace(/\\/g,'/');
+    if (/[\x00-\x20\x7f%$~'\"`]|[^\x21-\x7e]/.test(p)) throw usage(`${what} contains unsupported OpenSSH option characters`);
+    return p;
+  }
   if (!isAbsolute(path)) throw usage(`${what} path must be absolute`);
   if (UNSAFE_PATH_RE.test(path)) {
     throw usage(
@@ -101,6 +109,10 @@ function checkProxyElement(value: string): string {
  * gateway.ts → src/cli.ts, run through tsx's loader by absolute path.
  */
 export function cliInvocation(): string[] {
+  if(process.platform==='win32') { const b=bindings();
+    if(b.node.toLowerCase()!==process.execPath.toLowerCase()) throw usage('Windows interpreter binding mismatch');
+    return [b.node,b.entry];
+  }
   const node = process.execPath;
   const candidates: string[] = [];
   try {
@@ -141,6 +153,12 @@ export function proxyCommand(
   invocation: readonly string[],
   statusFile?: string | null,
 ): string {
+  if(process.platform==='win32') {
+    const b=bindings(); if(invocation.length!==2 || invocation[0]!==b.node || invocation[1]!==b.entry || !endpoint.secure) throw usage('Windows proxy binding refused');
+    const args=[...invocation,'gateway','proxy',validateDeviceId(deviceId),'--server',endpoint.wsBase];
+    if(statusFile)args.push('--status-file',checkSshPath(statusFile,'status file'));
+    return windowsProxyCommand(args);
+  }
   if (!invocation[0] || !isAbsolute(invocation[0])) throw usage('cannot locate an absolute node interpreter path');
   const argv = [...invocation, 'gateway', 'proxy', validateDeviceId(deviceId)];
   if (endpoint.wsBase !== DEFAULT_SERVER) argv.push('--server', endpoint.wsBase);
@@ -174,7 +192,9 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
     throw usage(`host key alias does not belong to device ${deviceId}`);
   }
   const argv = ['-F', 'none'];
-  for (const opt of HARDENING_OPTIONS) argv.push('-o', opt);
+  let empty: string | null=null;
+  if(process.platform==='win32') { nativeWrite(sharedConfigDir(),'empty',Buffer.alloc(0)); empty=checkSshPath(join(sharedConfigDir(),'known_hosts_empty'),'empty global pins'); }
+  for (const opt of HARDENING_OPTIONS) argv.push('-o', empty && opt==='GlobalKnownHostsFile=/dev/null' ? `GlobalKnownHostsFile=${empty}` : opt);
   if (kind === 'exec') argv.push('-o', 'BatchMode=yes');
   argv.push(
     '-o', `UserKnownHostsFile=${checkSshPath(input.pinFile, 'pin file')}`,
@@ -188,6 +208,7 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
   if (input.identityFile !== undefined) {
     const raw = input.identityFile.startsWith('~/') ? join(homedir(), input.identityFile.slice(2)) : input.identityFile;
     const ident = checkSshPath(resolvePath(raw), 'identity file');
+    if(process.platform==='win32') callNative({op:'check-identity',root:runtimeDir(),path:ident});
     if (!existsSync(ident)) throw usage(`identity file ${ident} does not exist`);
     argv.push('-i', ident);
   }
@@ -198,6 +219,7 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
 
 /** ssh's environment: the ProxyCommand always runs under /bin/sh. */
 export function sshEnvironment(): NodeJS.ProcessEnv {
+  if(process.platform==='win32') return closedWindowsEnvironment({config:configHome(),runtime:runtimeDir(),home:homedir()},brokerUrl());
   return { ...process.env, SHELL: '/bin/sh' };
 }
 
@@ -311,7 +333,8 @@ export async function openGatewayConnection(hostName: string, config: GatewayHos
   let statusDir: string | null = null;
   try {
     statusDir = controlDir();
-  } catch {
+  } catch (error) {
+    if(process.platform==='win32') throw error;
     statusDir = null;
   }
   const input = {

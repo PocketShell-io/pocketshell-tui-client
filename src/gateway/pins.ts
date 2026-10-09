@@ -13,6 +13,7 @@
  * would honour ANY known_hosts syntax in this file (markers, wildcards,
  * hashed names), every line is validated strictly on every read.
  */
+import { nativeRead, nativeWrite } from '../platform/windows.js';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
@@ -258,6 +259,11 @@ function readAll(fd: number, max: number): Buffer {
 
 /** Read and strictly validate the whole pin file. Missing file → no pins. */
 export function loadPinEntries(path = pinFilePath()): Map<string, PinEntry> {
+  let data: Buffer;
+  if (process.platform === 'win32') {
+    if (path !== pinFilePath()) throw new PinError('custom Windows pin store refused','PIN_FILE_UNSAFE');
+    try { data=nativeRead(dirname(path),'pins') ?? Buffer.alloc(0); } catch { throw new PinError('Windows pin custody refused','PIN_FILE_UNSAFE'); }
+  } else {
   const dir = dirname(path);
   let dfd: number;
   try {
@@ -280,7 +286,7 @@ export function loadPinEntries(path = pinFilePath()): Map<string, PinEntry> {
     if (code === 'ELOOP') throw new PinError(`pin file ${path} is a symlink; refusing to trust it`, 'PIN_FILE_UNSAFE');
     throw new PinError(`cannot open pin file ${path}: ${code ?? 'error'}`, 'PIN_FILE_UNSAFE');
   }
-  let data: Buffer;
+
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) throw new PinError(`pin file ${path} is not a regular file`, 'PIN_FILE_UNSAFE');
@@ -288,6 +294,7 @@ export function loadPinEntries(path = pinFilePath()): Map<string, PinEntry> {
     data = readAll(fd, MAX_PIN_FILE_BYTES);
   } finally {
     closeSync(fd);
+  }
   }
   if (data.length > MAX_PIN_FILE_BYTES) throw new PinError(`pin file ${path} is too large`, 'PIN_FILE_UNSAFE');
   if (!/^[\x00-\x7f]*$/.test(data.toString('latin1'))) throw new PinError(`pin file ${path} contains non-ASCII bytes`, 'PIN_FILE_UNSAFE');
@@ -327,7 +334,7 @@ function ensurePrivateDir(dir: string): void {
 
 function writePins(pins: Map<string, HostKey>, path: string): void {
   const dir = dirname(path);
-  ensurePrivateDir(dir);
+  if (process.platform !== 'win32') ensurePrivateDir(dir);
   const body = Buffer.from(
     [...pins.keys()]
       .sort()
@@ -335,6 +342,10 @@ function writePins(pins: Map<string, HostKey>, path: string): void {
       .join(''),
     'ascii',
   );
+  if (process.platform === 'win32') {
+    if (path !== pinFilePath()) throw new PinError('custom Windows pin store refused','PIN_FILE_UNSAFE');
+    try { nativeWrite(dir,'pins',body); return; } catch { throw new PinError('Windows pin custody refused','PIN_FILE_UNSAFE'); }
+  }
   const tmp = join(dir, `.${basename(path)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
   const fd = openSync(tmp, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600);
   try {
