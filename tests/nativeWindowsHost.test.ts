@@ -13,13 +13,14 @@ const profile: HostEntry = { name: 'display-alias', mode: 'gateway', gateway: { 
 const row = (uuid = id, workspace = 'C:/one/project') => ({ name: 'project:main', id: uuid, workspace, tag: 'main', attached: false });
 const outcome = (value: unknown, exitCode = 0): ExecOutcome => ({ exitCode, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr: '', timedOut: false });
 
-function fixture(options: { capabilities?: string[]; version?: string; platform?: unknown; rows?: ReturnType<typeof row>[]; create?: ExecOutcome; rereadFails?: boolean } = {}) {
+function fixture(options: { capabilities?: string[]; version?: string; platform?: unknown; rows?: ReturnType<typeof row>[]; create?: ExecOutcome; rereadFails?: boolean; requireExec?: boolean } = {}) {
   const commands: string[] = [];
   const attached: string[] = [];
   const connection: Connection = {
     hostName: profile.name, mode: 'gateway', close: async () => {},
     exec: async (command) => {
       commands.push(command);
+      if (options.requireExec && !command.startsWith('exec ')) return outcome('', 2);
       if (command.endsWith('--version')) return outcome(options.version ?? 'pocketshell, version 0.5.8\n');
       if (command.endsWith('platform --json')) return outcome(options.platform ?? { schema: 1, platform: 'win32', os: 'nt', cli_version: '0.5.8', capabilities: options.capabilities ?? caps });
       if (command.includes('sessions list')) return options.rereadFails ? outcome('', 1) : outcome({ schema: 3, sessions: options.rows ?? [row()], errors: [] });
@@ -51,7 +52,7 @@ describe('explicit native gateway profile', () => {
   it('probes only provisioned CLI and validates actual capability payload', async () => {
     const f = fixture();
     expect(await f.client.probe()).toEqual({ pocketshell: 'pocketshell, version 0.5.8', aplexer: null });
-    expect(f.commands).toEqual([`'${executable}' --version`, `'${executable}' platform --json`]);
+    expect(f.commands).toEqual([`exec '${executable}' --version`, `exec '${executable}' platform --json`]);
     const bad = fixture({ capabilities: ['sessions.list'] });
     await expect(bad.client.listSessions()).rejects.toThrow(/incompatible/);
     expect(bad.commands).toHaveLength(2);
@@ -79,7 +80,7 @@ describe('native session routing', () => {
     const f = fixture();
     const listing = await f.client.listSessions();
     expect(listing.sessions[0]).toMatchObject({ id, workspace: 'C:/one/project' });
-    expect(f.commands.at(-1)).toBe(`'${executable}' sessions list --json`);
+    expect(f.commands.at(-1)).toBe(`exec '${executable}' sessions list --json`);
     await f.client.attach(listing.sessions[0]!);
     expect(f.attached).toEqual([`"exec '${executable}' sessions attach -- '${id}'"`]);
     expect(f.commands.every((command) => !command.includes('/bin/sh') && !command.includes(' a ') && !command.includes('export PATH'))).toBe(true);
@@ -102,7 +103,7 @@ describe('native session routing', () => {
     expect((await f.client.resolveSession('C:/two/project:main')).id).toBe(second);
     await expect(f.client.killSession('project:main')).rejects.toBeInstanceOf(SessionAmbiguous);
     await f.client.killSession('project:main', second);
-    expect(f.commands.at(-1)).toBe(`'${executable}' sessions kill --json -- '${second}'`);
+    expect(f.commands.at(-1)).toBe(`exec '${executable}' sessions kill --json -- '${second}'`);
   });
 
   it.each([{ rows: [row(null as unknown as string)] }, { rows: [row(id), row(id)] }])('refuses missing or duplicate native UUID authority', async ({ rows }) => {
@@ -112,7 +113,7 @@ describe('native session routing', () => {
   it('uses canonical enrolled ID for roots, never the display alias', async () => {
     const f = fixture();
     await f.client.addWorkspace('C:/spaces and unicode/☃');
-    expect(f.commands.at(-1)).toBe(`'${executable}' workspaces add 'C:/spaces and unicode/☃' --host 'enrolled-fixture' --json`);
+    expect(f.commands.at(-1)).toBe(`exec '${executable}' workspaces add 'C:/spaces and unicode/☃' --host 'enrolled-fixture' --json`);
     expect(f.commands.at(-1)).not.toContain(profile.name);
     const readonly = fixture({ capabilities: ['workspaces', 'tree', 'sessions.list', 'sessions.attach'] });
     await expect(readonly.client.addWorkspace('C:/one')).rejects.toThrow(/workspaces.add/);
@@ -221,5 +222,33 @@ describe('native session routing', () => {
     expect(await createResult).toBeInstanceOf(NativeCreateUncertain);
     await expect(f.client.createSession('main')).rejects.toThrow(/Reread/);
     expect(f.commands.filter((command) => command.includes('sessions create'))).toHaveLength(1);
+  });
+});
+
+
+describe('actual native NONPTY exec boundary', () => {
+  it('exec-prefixed qualification succeeds on the observed bare-command exit2 fixture', async () => {
+    const f=fixture({requireExec:true});
+    await expect(f.client.probe()).resolves.toEqual({pocketshell:'pocketshell, version 0.5.8',aplexer:null});
+    expect(f.commands).toEqual([`exec '${executable}' --version`,`exec '${executable}' platform --json`]);
+  });
+  it('all native NONPTY run paths have exactly one exec while PTY spelling remains unchanged', async () => {
+    const f=fixture({requireExec:true});
+    const sessions=await f.client.listSessions();
+    await f.client.addWorkspace('C:/one/project');
+    await f.client.createSession('main',{cwd:'C:/one/project'});
+    await f.client.killSession('project:main',id);
+    await f.client.run(`exec '${executable}' workspaces --json`,1200);
+    await f.client.run(`exec exec '${executable}' workspaces --json`,1200);
+    expect(f.commands.every(c=>c.startsWith('exec ')&&!c.startsWith('exec exec '))).toBe(true);
+    expect(f.commands.every(c=>!c.includes('/bin/sh')&&!c.includes('export PATH'))).toBe(true);
+    await f.client.attach(sessions.sessions[0]!);
+    expect(f.attached).toEqual([`"exec '${executable}' sessions attach -- '${id}'"`]);
+  });
+  it('native run preserves timeout and stdin through the single exec boundary', async () => {
+    const f=fixture();const native=new NativeWindowsHost(f.connection,policy);await native.ready();
+    const seen:any[]=[];const original=f.connection.exec;f.connection.exec=async(c,o)=>{seen.push({c,o});return original(c,o);};
+    const input=new Uint8Array([1,2,3]);await native.run(`'${executable}' fixture`,901,input);
+    expect(seen).toEqual([{c:`exec '${executable}' fixture`,o:{timeoutMs:901,stdin:input}}]);
   });
 });

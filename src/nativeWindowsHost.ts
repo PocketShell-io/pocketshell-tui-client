@@ -47,6 +47,10 @@ function success(outcome: ExecOutcome, label: string): string {
   return outcome.stdout;
 }
 
+function nonPtyCommand(command: string): string {
+  return `exec ${command.replace(/^(?:exec[ \t]+)+/, '')}`;
+}
+
 /** One instance per pinned gateway connection. Installation hashes remain provisioning authority. */
 export class NativeWindowsHost {
   readonly policy: NativeWindowsCliPolicy;
@@ -69,9 +73,9 @@ export class NativeWindowsHost {
   }
 
   private async qualify(): Promise<void> {
-    const version = success(await this.connection.exec(`${shellQuote(this.policy.executable)} --version`, { timeoutMs: 15_000 }), 'version probe');
+    const version = success(await this.connection.exec(nonPtyCommand(`${shellQuote(this.policy.executable)} --version`), { timeoutMs: 15_000 }), 'version probe');
     if (!/^pocketshell, version 0\.5\.8\s*$/.test(version.trim())) throw new NativeWindowsError('The provisioned native PocketShell CLI must report version 0.5.8.');
-    const raw = success(await this.connection.exec(`${shellQuote(this.policy.executable)} platform --json`, { timeoutMs: 15_000 }), 'platform probe');
+    const raw = success(await this.connection.exec(nonPtyCommand(`${shellQuote(this.policy.executable)} platform --json`), { timeoutMs: 15_000 }), 'platform probe');
     let platform: unknown;
     try { platform = JSON.parse(raw); } catch { throw new NativeWindowsError('Malformed native platform JSON.'); }
     if (!platform || typeof platform !== 'object' || Array.isArray(platform)) throw new NativeWindowsError('Malformed native platform contract.');
@@ -92,8 +96,8 @@ export class NativeWindowsHost {
 
   async run(command: string, timeoutMs: number, stdin?: string | Uint8Array): Promise<ExecOutcome> {
     await this.ready();
-    // Accepted NONPTY Git Bash transport: plain script, no /bin/sh/PATH wrapper.
-    return this.connection.exec(command, { timeoutMs, stdin });
+    // Native NONPTY Git Bash commands require exactly one leading exec.
+    return this.connection.exec(nonPtyCommand(command), { timeoutMs, stdin });
   }
 
   async listSessions(): Promise<SessionsListing> {
