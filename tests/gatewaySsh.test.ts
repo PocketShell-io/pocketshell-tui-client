@@ -22,7 +22,7 @@ import {
   openGatewayConnection,
   proxyCommand,
 } from '../src/transport/gateway.js';
-import { controlPathFor, findSsh, PROXY_MARKER, runSshCaptured } from '../src/transport/openssh.js';
+import { findSsh, PROXY_MARKER, runSshCaptured } from '../src/transport/openssh.js';
 import { ConnectionError } from '../src/transport/types.js';
 
 const savedXdg = process.env.XDG_CONFIG_HOME;
@@ -75,7 +75,7 @@ describe('buildGatewaySshArgv', () => {
     endpoint: prod,
     pinFile: '/home/u/.config/pocketshell/gateway_known_hosts',
     alias: hostKeyAlias('Home-Lab'),
-    controlPath: '/run/user/1/pocketshell-tui-client/g-0123456789abcdef',
+    statusDir: '/run/user/1/pocketshell-tui-client',
     invocation: ['/usr/bin/node', '/opt/psc/dist/cli.js'],
   };
 
@@ -105,9 +105,9 @@ describe('buildGatewaySshArgv', () => {
       `UserKnownHostsFile=${base.pinFile}`,
       `HostKeyAlias=${hostKeyAlias('Home-Lab')}`,
       'ProxyCommand=/usr/bin/node /opt/psc/dist/cli.js gateway proxy Home-Lab',
-      'ControlMaster=auto',
-      `ControlPath=${base.controlPath}`,
-      'ControlPersist=60',
+      'ControlMaster=no',
+      'ControlPath=none',
+      'ControlPersist=no',
     ]) {
       expect(argv).toContain(opt);
     }
@@ -122,9 +122,10 @@ describe('buildGatewaySshArgv', () => {
   });
 
   it('without a control dir, multiplexing is explicitly off', () => {
-    const argv = buildGatewaySshArgv({ ...base, controlPath: null, kind: 'exec', command: 'x' });
+    const argv = buildGatewaySshArgv({ ...base, statusDir: null, kind: 'exec', command: 'x' });
     expect(argv).toContain('ControlMaster=no');
     expect(argv).toContain('ControlPath=none');
+    expect(argv).toContain('ControlPersist=no');
   });
 
   it('refuses unsafe users and paths', () => {
@@ -202,29 +203,24 @@ describe.skipIf(!e2e)('end to end through a fake gateway to the local sshd', () 
   });
 
   afterAll(async () => {
-    // Stop any master we started, then the fake gateway.
-    for (const id of ['local-box', 'offline-mux', 'nologin-mux', 'attach-mux']) {
-      const cp = controlPathFor('g', [id, port], controlDir);
-      spawnSync('ssh', ['-o', `ControlPath=${cp}`, '-O', 'exit', 'x'], { stdio: 'ignore' });
-    }
     for (const client of wss.clients) client.terminate();
     await new Promise<void>((r) => wss.close(() => r()));
     rmSync(controlDir, { recursive: true, force: true });
   });
 
-  function connection(deviceId: string, controlPath: string | null): GatewayConnection {
+  function connection(deviceId: string, statusDir: string | null): GatewayConnection {
     return new GatewayConnection('lab', findSsh(), {
       deviceId,
       endpoint: resolveEndpoint(`ws://127.0.0.1:${port}`, true),
       pinFile: pinFilePath(),
       alias: hostKeyAlias(deviceId),
-      controlPath,
+      statusDir,
       invocation,
     });
   }
 
-  it('runs commands over the tunnel and multiplexes the second call', async () => {
-    const conn = connection('local-box', controlPathFor('g', ['local-box', port], controlDir));
+  it('runs each command over a fresh tunnel', async () => {
+    const conn = connection('local-box', controlDir);
     const before = connections;
     let t = Date.now();
     const first = await conn.exec(`printf '%s\\n' "it's" "$((6*7))"; echo err >&2; exit 7`, { timeoutMs: 30_000 });
@@ -235,8 +231,8 @@ describe.skipIf(!e2e)('end to end through a fake gateway to the local sshd', () 
     const second = await conn.exec('cat', { timeoutMs: 30_000, stdin: 'piped stdin' });
     const secondMs = Date.now() - t;
     expect(second).toMatchObject({ exitCode: 0, stdout: 'piped stdin' });
-    expect(connections - before).toBe(1); // the second exec reused the master
-    console.log(`gateway e2e: first exec ${firstMs} ms, multiplexed second exec ${secondMs} ms`);
+    expect(connections - before).toBe(2); // each exec reauthorizes and repins
+    console.log(`gateway e2e: first exec ${firstMs} ms, fresh second exec ${secondMs} ms`);
   }, 60_000);
 
   it('a key that does not match the pin is a HOST_KEY_FAILED ConnectionError', async () => {
@@ -265,32 +261,30 @@ describe.skipIf(!e2e)('end to end through a fake gateway to the local sshd', () 
     }
   }, 60_000);
 
-  // --- with multiplexing ON (the default config) --------------------------
-  // ControlPersist makes OpenSSH send the ProxyCommand's stderr to
-  // /dev/null, so these go through the proxy's status file.
+  // --- independent per-invocation status receipts --------------------------
 
   const wrongKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGuV1O9rNRp7VtgPq3H6Mze4PugDi32wsIYRrGAzHWLb';
-  const muxed = (id: string) => connection(id, controlPathFor('g', [id, port], controlDir));
+  const withStatus = (id: string) => connection(id, controlDir);
   const leftovers = () => readdirSync(controlDir).filter((name) => name.startsWith('st-'));
 
-  it('mux: the proxy stderr marker really is lost (why the status file exists)', async () => {
+  it('the proxy stderr marker is retained without multiplexing', async () => {
     addPin('offline-mux', parseHostKey(wrongKey));
     mode = 'offline';
     try {
-      const raw = await runSshCaptured(findSsh(), muxed('offline-mux').argv('exec', 'true'), { timeoutMs: 30_000 });
+      const raw = await runSshCaptured(findSsh(), withStatus('offline-mux').argv('exec', 'true'), { timeoutMs: 30_000 });
       expect(raw.exitCode).toBe(255);
-      expect(raw.stderr).not.toContain(PROXY_MARKER);
+      expect(raw.stderr).toContain(PROXY_MARKER);
       expect(raw.stderr).toMatch(/Connection closed by UNKNOWN port 65535/);
     } finally {
       mode = 'bridge';
     }
   }, 60_000);
 
-  it('mux: a host-offline refusal is HOST_OFFLINE (exit 4), not CONNECT_FAILED', async () => {
+  it('status: a host-offline refusal is HOST_OFFLINE (exit 4), not CONNECT_FAILED', async () => {
     addPin('offline-mux', parseHostKey(wrongKey));
     mode = 'offline';
     try {
-      const error = await muxed('offline-mux')
+      const error = await withStatus('offline-mux')
         .exec('true', { timeoutMs: 30_000 })
         .then(
           () => null,
@@ -305,12 +299,12 @@ describe.skipIf(!e2e)('end to end through a fake gateway to the local sshd', () 
     }
   }, 60_000);
 
-  it('mux: a token-mint failure inside the proxy (broker 401) is NOT_LOGGED_IN, exit 3', async () => {
+  it('status: a token-mint failure inside the proxy (broker 401) is NOT_LOGGED_IN, exit 3', async () => {
     addPin('nologin-mux', parseHostKey(wrongKey));
     process.env.PSC_TEST_GATEWAY_TOKEN_ERROR = 'Your PocketShell login is no longer valid; run `pocketshell-tui-client login`.';
     const before = connections;
     try {
-      await expect(muxed('nologin-mux').exec('true', { timeoutMs: 30_000 })).rejects.toMatchObject({
+      await expect(withStatus('nologin-mux').exec('true', { timeoutMs: 30_000 })).rejects.toMatchObject({
         code: 'NOT_LOGGED_IN',
         exitCode: 3,
         message: expect.stringMatching(/login is no longer valid/),
@@ -322,24 +316,26 @@ describe.skipIf(!e2e)('end to end through a fake gateway to the local sshd', () 
     }
   }, 60_000);
 
-  it('mux: attach that never gets a session raises the typed error too', async () => {
+  it('status: attach that never gets a session raises the typed error too', async () => {
     addPin('attach-mux', parseHostKey(wrongKey));
     mode = 'offline';
     try {
-      await expect(muxed('attach-mux').attachInteractive('true')).rejects.toMatchObject({ code: 'HOST_OFFLINE', exitCode: 4 });
+      await expect(withStatus('attach-mux').attachInteractive('true')).rejects.toMatchObject({ code: 'HOST_OFFLINE', exitCode: 4 });
       expect(leftovers()).toEqual([]);
     } finally {
       mode = 'bridge';
     }
   }, 60_000);
 
-  it('mux: a remote command that itself exits 255 with ssh-looking stderr is passed through', async () => {
-    const conn = muxed('local-box');
+  it('status: remote exit 255 with output is passed through; empty ssh-like errors remain ambiguous', async () => {
+    const conn = withStatus('local-box');
     const nested = await conn.exec(`echo 'ssh: connect to host inner port 22: Connection refused' >&2; exit 255`, {
       timeoutMs: 30_000,
+    }).catch((error) => {
+      expect(error).toMatchObject({ code: 'CONNECT_FAILED' });
+      return null;
     });
-    expect(nested).toMatchObject({ exitCode: 255, stdout: '', timedOut: false });
-    expect(nested.stderr).toContain('Connection refused');
+    expect(nested).toBeNull();
     const withOutput = await conn.exec(`echo partial; echo 'Permission denied (publickey).' >&2; exit 255`, { timeoutMs: 30_000 });
     expect(withOutput).toMatchObject({ exitCode: 255, stdout: 'partial\n' });
     expect(leftovers()).toEqual([]);

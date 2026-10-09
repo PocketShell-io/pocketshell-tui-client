@@ -124,8 +124,9 @@ export class App {
     this.attachTerminal();
     this.scheduleRender();
     try {
-      this.connection = await openConnection(this.host);
-      this.client = new HostClient(this.connection, this.host.binary);
+      const startingHost = this.host;
+      this.connection = await openConnection(startingHost);
+      this.client = new HostClient(this.connection, startingHost.binary, startingHost);
     } catch (error) {
       this.connectError = describeError(error);
     }
@@ -289,7 +290,7 @@ export class App {
         return;
       case 'kill':
         void this.operation(`killing ${effect.row.name}`, async (client) => {
-          await client.killSession(hostRow(effect.row).name);
+          await client.killSession(hostRow(effect.row).name, hostRow(effect.row).id);
           this.dispatch({ type: 'opDone', text: `killed ${effect.row.name}` });
           await this.refresh();
         });
@@ -516,7 +517,7 @@ export class App {
     const old = this.connection;
     this.host = entry;
     this.connection = connection;
-    this.client = connection ? new HostClient(connection, entry.binary) : null;
+    this.client = connection ? new HostClient(connection, entry.binary, entry) : null;
     this.connectError = connectError;
     void old?.close().catch(() => {});
     const loggedIn = await loginState();

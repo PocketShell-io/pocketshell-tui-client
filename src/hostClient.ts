@@ -19,7 +19,8 @@ import {
   type WarningRow,
   type WorkspacesListing,
 } from '@pocketshell/core';
-import { HostStoreError, validateBinary } from './hosts/store.js';
+import { HostStoreError, validateBinary, validateHostEntry, type HostEntry } from './hosts/store.js';
+import { NativeWindowsHost } from './nativeWindowsHost.js';
 import type { Connection, ExecOutcome } from './transport/types.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -117,11 +118,22 @@ export function execCommandLine(words: readonly string[]): string {
 
 export class HostClient {
   readonly cli: HostCliCore;
+  readonly native?: NativeWindowsHost;
 
   constructor(
     readonly connection: Connection,
     binary = 'pocketshell',
+    host?: HostEntry,
   ) {
+    if (host?.nativeWindowsCli !== undefined) {
+      validateHostEntry(host);
+      if (host.name !== connection.hostName || host.mode !== connection.mode || binary !== 'pocketshell') {
+        throw new HostStoreError('Native policy does not match this connection or conflicts with a legacy binary override.');
+      }
+      this.native = new NativeWindowsHost(connection, host.nativeWindowsCli);
+      this.cli = this.native.cli;
+      return;
+    }
     // The binary is spliced into host command lines unquoted (a leading `~`
     // must still expand), so a hand-edited hosts.json is checked here too.
     try {
@@ -139,6 +151,7 @@ export class HostClient {
 
   /** Run a raw command under the user's full PATH. */
   run(command: string, timeoutMs = DEFAULT_TIMEOUT_MS, stdin?: string | Uint8Array): Promise<ExecOutcome> {
+    if (this.native) return this.native.run(command, timeoutMs, stdin);
     return this.connection.exec(pathAwareCommand(command), { timeoutMs, stdin });
   }
 
@@ -164,6 +177,11 @@ export class HostClient {
    * host is never reported as reachable).
    */
   async probe(): Promise<{ pocketshell: string | null; aplexer: string | null }> {
+    if (this.native) {
+      await this.native.ready();
+      // Bundle identity is provisioning authority; no raw PATH a probe is performed.
+      return { pocketshell: 'pocketshell, version 0.5.8', aplexer: null };
+    }
     const line = (label: string, command: string) =>
       `printf '%s=%s\\n' ${label} "$(${command} --version 2>/dev/null | tail -n 1)"`;
     const outcome = await this.run(`${line('pocketshell', this.cli.binary)}; ${line('aplexer', 'a')}`, 15_000);
@@ -183,6 +201,7 @@ export class HostClient {
   }
 
   listSessions(): Promise<SessionsListing> {
+    if (this.native) return this.native.listSessions();
     return this.cli.listSessions();
   }
 
@@ -193,6 +212,12 @@ export class HostClient {
    */
   async resolveSession(selector: string): Promise<SessionRow> {
     const { sessions } = await this.listSessions();
+    if (this.native) {
+      const exact = uniqueRows(sessions.filter((row) => row.id === selector || row.name === selector
+        || (row.workspace !== null && row.tag !== null && `${row.workspace}:${row.tag}` === selector)));
+      if (exact.length > 1) throw new SessionAmbiguous(selector, exact);
+      if (exact.length === 1) return exact[0]!;
+    }
     return pickSession(sessions, selector);
   }
 
@@ -200,50 +225,73 @@ export class HostClient {
     name: string,
     options: { cwd?: string | null; engine?: string | null; profile?: string | null } = {},
   ): Promise<CreatedSession> {
+    if (this.native) return this.native.createSession(name, options);
     return this.cli.createSession(name, options);
   }
 
-  killSession(name: string): Promise<void> {
+  async killSession(name: string, immutableId?: string | null): Promise<void> {
+    if (this.native) {
+      const row = await this.resolveSession(immutableId ?? name);
+      return this.native.killSession(row.id!);
+    }
     return this.cli.killSession(name);
   }
 
-  listWarnings(): Promise<WarningRow[]> {
+  async listWarnings(): Promise<WarningRow[]> {
+    if (this.native) this.native.unsupported('session warnings');
     return this.cli.listWarnings();
   }
 
-  ackWarnings(selector?: string | null): Promise<void> {
+  async ackWarnings(selector?: string | null): Promise<void> {
+    if (this.native) this.native.unsupported('session warning acknowledgement');
     return this.cli.ackWarnings(selector);
   }
 
-  listEngines(): Promise<HostEngineInfo[]> {
+  async listEngines(): Promise<HostEngineInfo[]> {
+    if (this.native) this.native.unsupported('engine catalogs');
     return this.cli.listEngines();
   }
 
-  listProfiles(): Promise<HostProfileInfo[]> {
+  async listProfiles(): Promise<HostProfileInfo[]> {
+    if (this.native) this.native.unsupported('profile catalogs');
     return this.cli.listProfiles();
   }
 
   /** The workspace registry is partitioned per client host identity: the saved host name. */
-  listWorkspaces(): Promise<WorkspacesListing> {
+  async listWorkspaces(): Promise<WorkspacesListing> {
+    if (this.native) {
+      await this.native.requireCapability('workspaces');
+      return this.cli.listWorkspaces(this.native.policy.deviceId);
+    }
     return this.cli.listWorkspaces(this.connection.hostName);
   }
 
-  addWorkspace(path: string): Promise<WorkspacesListing> {
+  async addWorkspace(path: string): Promise<WorkspacesListing> {
+    if (this.native) {
+      await this.native.requireCapability('workspaces.add');
+      return this.cli.addWorkspace(this.native.policy.deviceId, path);
+    }
     return this.cli.addWorkspace(this.connection.hostName, path);
   }
 
-  removeWorkspace(path: string): Promise<WorkspacesListing> {
+  async removeWorkspace(path: string): Promise<WorkspacesListing> {
+    if (this.native) {
+      await this.native.requireCapability('workspaces.remove');
+      return this.cli.removeWorkspace(this.native.policy.deviceId, path);
+    }
     return this.cli.removeWorkspace(this.connection.hostName, path);
   }
 
   /** Type into a session without attaching: `a send <id> --stdin [--enter]`. */
   async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<void> {
+    if (this.native) this.native.unsupported('session send (not advertised by the reviewed native CLI)');
     const target = shellQuote(session.id ?? session.name);
     await this.runChecked(`a send ${target} --stdin${options.enter ? ' --enter' : ''}`, DEFAULT_TIMEOUT_MS, text);
   }
 
   /** What the session shows right now (`--screen --plain`) or its recent raw output. */
   async capture(session: SessionRow, options: { mode: 'screen' | 'raw'; bytes?: number }): Promise<string> {
+    if (this.native) this.native.unsupported('session capture (not advertised by the reviewed native CLI)');
     const target = shellQuote(session.id ?? session.name);
     const flags = options.mode === 'screen' ? '--screen --plain' : options.bytes ? `--bytes ${Math.floor(options.bytes)}` : '';
     return stripSystemdNoise(await this.runChecked(`a capture ${target} ${flags}`.trim()));
@@ -257,11 +305,13 @@ export class HostClient {
    * fallback for a row without an aplexer id.
    */
   attachCommand(session: SessionRow): string {
+    if (this.native) return this.native.attachCommand(session.id);
     if (session.id) return pathAwareCommand(`exec a attach ${shellQuote(session.id)}`);
     return pathAwareCommand(this.cli.buildAttachCommand(session.name));
   }
 
-  attach(session: SessionRow): Promise<number | null> {
-    return this.connection.attachInteractive(this.attachCommand(session));
+  async attach(session: SessionRow): Promise<number | null> {
+    if (this.native) await this.native.ready();
+    return this.connection.attachInteractive(this.attachCommand(session), { sessionDetach: true });
   }
 }

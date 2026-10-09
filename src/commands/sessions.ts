@@ -183,7 +183,7 @@ export function registerSessions(program: Command): void {
           );
           return;
         }
-        await client.killSession(row.name);
+        await client.killSession(row.name, row.id);
         emit({ ok: true, host: host.name, session: ref(row), killed: true, alreadyGone: false }, () => `killed ${safeLine(row.name)}`);
       }),
     ),

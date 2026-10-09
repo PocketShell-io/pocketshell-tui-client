@@ -9,15 +9,13 @@
  * (the user's ~/.ssh/config is not read), every hardening `-o` first (for
  * ssh the first value wins), the destination after `--`.
  *
- * DEVIATION from the Python CLI: multiplexing is ON here (ControlMaster=
- * auto, ControlPersist=60). Every exec would otherwise mint a token, open a
- * WebSocket and redo the SSH handshake (≈1 s+ each), and an agent issues
- * many execs. The control socket lives in our private runtime dir (0700,
- * owned by the user, checked); anyone able to use it already runs as the
- * user and holds the user's SSH keys, so sharing the authenticated
- * connection grants nothing new. Caveat: after `gateway pin --replace` /
- * `unpin`, a live master keeps serving for up to ControlPersist seconds.
+ * Gateway invocations never reuse an SSH master. Every command opens a new
+ * proxy, gets current broker authorization and verifies the current full pin.
+ * Direct SSH mode retains its separate explicit multiplexing behavior.
  */
+import { bindings, callNative, closedWindowsEnvironment, nativeWrite, windowsAbsolute, windowsProxyCommand, quoteWindowsArg } from '../platform/windows.js';
+import { configHome, runtimeDir, sharedConfigDir } from '../paths.js';
+import { brokerUrl } from '../account/index.js';
 import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
@@ -28,10 +26,9 @@ import { DEFAULT_SERVER, EndpointError, hostKeyAlias, legacyHostKeyAlias, resolv
 import { PinError, pinFilePath, requirePinEntry } from '../gateway/pins.js';
 import type { GatewayHostConfig } from '../hosts/store.js';
 import {
-  controlPathFor,
+  controlDir,
   explainSshExit,
   findSsh,
-  multiplexOptions,
   newStatusFilePath,
   proxyFailure,
   readStatusFile,
@@ -40,10 +37,13 @@ import {
   SSH_FAILURE_EXIT,
 } from './openssh.js';
 import { runInteractive } from './process.js';
-import { ConnectionError, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
+import { ConnectionError, type AttachOptions, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
 
-/** Hardening options (sshcmd.py HARDENING_OPTIONS minus the ControlMaster trio). */
+/** Hardening options, including an unconditional gateway no-reuse policy. */
 export const HARDENING_OPTIONS: readonly string[] = [
+  'ControlMaster=no',
+  'ControlPath=none',
+  'ControlPersist=no',
   'IgnoreUnknown=EnableEscapeCommandline',
   'EnableEscapeCommandline=no',
   'StrictHostKeyChecking=yes',
@@ -81,6 +81,11 @@ function usage(message: string): ConnectionError {
 }
 
 export function checkSshPath(path: string, what: string): string {
+  if (process.platform === 'win32') {
+    const p=windowsAbsolute(path).replace(/\\/g,'/');
+    if (/[\x00-\x20\x7f%$~'\"`]|[^\x21-\x7e]/.test(p)) throw usage(`${what} contains unsupported OpenSSH option characters`);
+    return p;
+  }
   if (!isAbsolute(path)) throw usage(`${what} path must be absolute`);
   if (UNSAFE_PATH_RE.test(path)) {
     throw usage(
@@ -104,6 +109,10 @@ function checkProxyElement(value: string): string {
  * gateway.ts → src/cli.ts, run through tsx's loader by absolute path.
  */
 export function cliInvocation(): string[] {
+  if(process.platform==='win32') { const b=bindings();
+    if(windowsAbsolute(b.node).toLowerCase()!==windowsAbsolute(process.execPath).toLowerCase()) throw usage('Windows interpreter binding mismatch');
+    return [b.node,b.entry];
+  }
   const node = process.execPath;
   const candidates: string[] = [];
   try {
@@ -136,7 +145,7 @@ export function cliInvocation(): string[] {
 /**
  * The ProxyCommand string: each element shell-quoted, `%` doubled for ssh.
  * `statusFile` (see openssh.ts) is where the proxy also records its final
- * failure marker, since ControlPersist sends its stderr to /dev/null.
+ * pre-session failure marker for consistent captured and interactive errors.
  */
 export function proxyCommand(
   deviceId: string,
@@ -144,6 +153,12 @@ export function proxyCommand(
   invocation: readonly string[],
   statusFile?: string | null,
 ): string {
+  if(process.platform==='win32') {
+    const b=bindings(); if(invocation.length!==2 || invocation[0]!==b.node || invocation[1]!==b.entry || !endpoint.secure) throw usage('Windows proxy binding refused');
+    const args=[...invocation,'gateway','proxy',validateDeviceId(deviceId),'--server',endpoint.wsBase];
+    if(statusFile)args.push('--status-file',checkSshPath(statusFile,'status file'));
+    return windowsProxyCommand(args);
+  }
   if (!invocation[0] || !isAbsolute(invocation[0])) throw usage('cannot locate an absolute node interpreter path');
   const argv = [...invocation, 'gateway', 'proxy', validateDeviceId(deviceId)];
   if (endpoint.wsBase !== DEFAULT_SERVER) argv.push('--server', endpoint.wsBase);
@@ -160,7 +175,8 @@ export interface GatewayArgvInput {
   alias: string;
   user?: string;
   identityFile?: string;
-  controlPath: string | null;
+  /** Private per-invocation error receipts only; never an SSH control socket. */
+  statusDir?: string | null;
   invocation: readonly string[];
   kind: 'exec' | 'attach';
   command: string;
@@ -176,15 +192,15 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
     throw usage(`host key alias does not belong to device ${deviceId}`);
   }
   const argv = ['-F', 'none'];
-  for (const opt of HARDENING_OPTIONS) argv.push('-o', opt);
+  let empty: string | null=null;
+  if(process.platform==='win32') { nativeWrite(sharedConfigDir(),'empty',Buffer.alloc(0)); empty=checkSshPath(join(sharedConfigDir(),'known_hosts_empty'),'empty global pins'); }
+  for (const opt of HARDENING_OPTIONS) argv.push('-o', empty && opt==='GlobalKnownHostsFile=/dev/null' ? `GlobalKnownHostsFile=${empty}` : opt);
   if (kind === 'exec') argv.push('-o', 'BatchMode=yes');
   argv.push(
     '-o', `UserKnownHostsFile=${checkSshPath(input.pinFile, 'pin file')}`,
     '-o', `HostKeyAlias=${input.alias}`,
     '-o', `ProxyCommand=${proxyCommand(deviceId, endpoint, input.invocation, input.statusFile)}`,
   );
-  if (input.controlPath) argv.push(...multiplexOptions(checkSshPath(input.controlPath, 'control socket')));
-  else argv.push('-o', 'ControlMaster=no', '-o', 'ControlPath=none');
   if (input.user !== undefined) {
     if (!USER_RE.test(input.user)) throw usage(`invalid login name ${JSON.stringify(input.user).slice(0, 80)}`);
     argv.push('-l', input.user);
@@ -192,6 +208,7 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
   if (input.identityFile !== undefined) {
     const raw = input.identityFile.startsWith('~/') ? join(homedir(), input.identityFile.slice(2)) : input.identityFile;
     const ident = checkSshPath(resolvePath(raw), 'identity file');
+    if(process.platform==='win32') callNative({op:'check-identity',root:runtimeDir(),path:ident});
     if (!existsSync(ident)) throw usage(`identity file ${ident} does not exist`);
     argv.push('-i', ident);
   }
@@ -202,6 +219,7 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
 
 /** ssh's environment: the ProxyCommand always runs under /bin/sh. */
 export function sshEnvironment(): NodeJS.ProcessEnv {
+  if(process.platform==='win32') return closedWindowsEnvironment({config:configHome(),runtime:runtimeDir(),home:homedir()},brokerUrl());
   return { ...process.env, SHELL: '/bin/sh' };
 }
 
@@ -227,14 +245,10 @@ export class GatewayConnection implements Connection {
     return buildGatewaySshArgv({ ...this.argvInput, kind, command, statusFile });
   }
 
-  /**
-   * A fresh status-file path for one ssh run, next to the control socket
-   * (our private dir). Only needed with multiplexing: without ControlPersist
-   * the proxy's stderr marker reaches us directly.
-   */
+  /** A fresh pre-session failure receipt, consumed after each SSH run. */
   private statusFile(): string | null {
-    const { controlPath } = this.argvInput;
-    return controlPath ? newStatusFilePath(dirname(controlPath)) : null;
+    const { statusDir } = this.argvInput;
+    return statusDir ? newStatusFilePath(statusDir) : null;
   }
 
   private context() {
@@ -253,7 +267,7 @@ export class GatewayConnection implements Connection {
     });
     const failure = await explainSshExit(outcome, this.context(), {
       sshPath: this.sshPath,
-      controlPath: this.argvInput.controlPath,
+      controlPath: null,
       statusFile,
     });
     if (failure) throw failure;
@@ -267,16 +281,16 @@ export class GatewayConnection implements Connection {
    * session ever started — it is raised as a typed ConnectionError
    * (NOT_LOGGED_IN → exit 3, HOST_OFFLINE, ...) for the CLI/TUI to report.
    */
-  async attachInteractive(command: string): Promise<number | null> {
+  async attachInteractive(command: string, options: AttachOptions = {}): Promise<number | null> {
     const statusFile = this.statusFile();
-    const code = await runInteractive(this.sshPath, this.argv('attach', command, statusFile), sshEnvironment());
+    const code = await runInteractive(this.sshPath, this.argv('attach', command, statusFile), sshEnvironment(), options);
     const status = readStatusFile(statusFile);
     if (code === SSH_FAILURE_EXIT && status) throw proxyFailure(status, this.context());
     return code;
   }
 
   async close(): Promise<void> {
-    // Left to expire via ControlPersist (see the module comment).
+    // No persistent SSH master or reusable control socket is created.
   }
 }
 
@@ -316,11 +330,12 @@ export async function openGatewayConnection(hostName: string, config: GatewayHos
   }
   const sshPath = findSsh();
   checkLogin();
-  let controlPath: string | null = null;
+  let statusDir: string | null = null;
   try {
-    controlPath = controlPathFor('g', [config.deviceId, endpoint.wsBase, config.user ?? null, config.identityFile ?? null, alias]);
-  } catch {
-    controlPath = null;
+    statusDir = controlDir();
+  } catch (error) {
+    if(process.platform==='win32') throw error;
+    statusDir = null;
   }
   const input = {
     deviceId: config.deviceId,
@@ -329,7 +344,7 @@ export async function openGatewayConnection(hostName: string, config: GatewayHos
     alias,
     ...(config.user !== undefined ? { user: config.user } : {}),
     ...(config.identityFile !== undefined ? { identityFile: config.identityFile } : {}),
-    controlPath,
+    statusDir,
     invocation: cliInvocation(),
   };
   // Validate the whole argv now so a bad config fails before the first exec.

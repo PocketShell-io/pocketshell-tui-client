@@ -5,10 +5,12 @@
  * `local` host (this machine, local mode) always exists and is never
  * stored, so a fresh install can be used before anything is configured.
  */
+import { nativeRead, nativeWrite } from '../platform/windows.js';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { hostsFile } from '../paths.js';
 import type { HostMode } from '../transport/types.js';
+import { validateNativeWindowsPolicy, type NativeWindowsCliPolicy } from '../nativeWindowsHost.js';
 
 export const LOCAL_HOST_NAME = 'local';
 
@@ -37,6 +39,8 @@ export interface HostEntry {
   gateway?: GatewayHostConfig;
   /** Path of the `pocketshell` binary on the host; default `pocketshell` on PATH. */
   binary?: string;
+  /** Trusted local provisioning, bound to the gateway ID and accepted SSH shell transport. */
+  nativeWindowsCli?: NativeWindowsCliPolicy;
 }
 
 interface HostsFileShape {
@@ -101,6 +105,15 @@ export function validateGatewayDeviceId(deviceId: string): string {
 /** Everything `addHost` checks about an entry before saving it. */
 export function validateHostEntry(entry: HostEntry): HostEntry {
   validateHostName(entry.name);
+  if (entry.nativeWindowsCli !== undefined) {
+    let policy: NativeWindowsCliPolicy;
+    try { policy = validateNativeWindowsPolicy(entry.nativeWindowsCli); }
+    catch (error) { throw new HostStoreError(`host ${entry.name}: ${(error as Error).message}`); }
+    if (entry.mode !== 'gateway' || !entry.gateway || policy.deviceId !== entry.gateway.deviceId
+      || entry.binary !== undefined) {
+      throw new HostStoreError(`host ${entry.name}: native policy must match its gateway device ID, and cannot coexist with --binary or a direct/local host`);
+    }
+  }
   if (entry.binary !== undefined) validateBinary(entry.binary);
   if (entry.mode === 'ssh') {
     if (!entry.ssh) throw new HostStoreError(`host ${entry.name}: ssh mode needs ssh settings`);
@@ -122,7 +135,9 @@ export function localHost(): HostEntry {
 function read(): HostsFileShape {
   let raw: string;
   try {
-    raw = readFileSync(hostsFile(), 'utf8');
+    if (process.platform === 'win32') {
+      const b=nativeRead(dirname(hostsFile()), 'hosts'); if (b===null) return {version:1,hosts:[]}; raw=b.toString('utf8');
+    } else raw = readFileSync(hostsFile(), 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, hosts: [] };
     throw error;
@@ -141,6 +156,7 @@ function read(): HostsFileShape {
 
 function write(data: HostsFileShape): void {
   const file = hostsFile();
+  if (process.platform === 'win32') { nativeWrite(dirname(file),'hosts',Buffer.from(`${JSON.stringify(data,null,2)}\n`)); return; }
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
@@ -160,6 +176,7 @@ export function getHost(name: string): HostEntry {
   if (name === LOCAL_HOST_NAME) return localHost();
   const host = read().hosts.find((entry) => entry.name === name);
   if (!host) throw new HostStoreError(`no saved host named ${JSON.stringify(name)} (see \`hosts list\`)`);
+  if (host.nativeWindowsCli !== undefined) validateHostEntry(host);
   return host;
 }
 

@@ -16,7 +16,7 @@ import { userInfo, hostname } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import * as broker from './broker.js';
 import { sameOrigin, webOrigin } from './config.js';
-import { save, type Credentials } from './credentials.js';
+import { save, preflightStorage, type Credentials } from './credentials.js';
 import { AccountError, BrokerUnavailable, LoginCancelled } from './errors.js';
 import { cleanText, httpsUrl } from './sanitize.js';
 
@@ -100,6 +100,7 @@ function cancelled(signal: AbortSignal | undefined, error: unknown): boolean {
  * login — see `login()` in index.ts for that). Returns the saved credentials.
  */
 export async function deviceLogin(options: DeviceLoginOptions): Promise<Credentials> {
+  preflightStorage();
   const { baseUrl, label, signal } = options;
   const sleep = options.sleep ?? defaultSleep;
   const monotonic = options.monotonic ?? defaultMonotonic;

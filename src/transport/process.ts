@@ -3,6 +3,7 @@
  * command itself, ssh and gateway run OpenSSH).
  */
 import { spawn } from 'node:child_process';
+import { runSessionInteractive, type SessionInteractiveOptions } from './sessionInteractive.js';
 import type { ExecOptions, ExecOutcome } from './types.js';
 
 /** Hard cap on captured output per stream, so a runaway command can't OOM us. */
@@ -79,6 +80,7 @@ export function runCaptured(
       stdio: ['pipe', 'pipe', 'pipe'],
       env: options.env ?? process.env,
       detached: true,
+      windowsHide: true,
     });
     const pid = child.pid;
     if (pid !== undefined) watch(pid);
@@ -156,7 +158,9 @@ export function runInteractive(
   file: string,
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
+  options: SessionInteractiveOptions = {},
 ): Promise<number | null> {
+  if (options.sessionDetach) return runSessionInteractive(file, argv, env, options);
   return new Promise((resolve) => {
     const ignore = () => {};
     process.on('SIGINT', ignore);

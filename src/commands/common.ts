@@ -30,7 +30,7 @@ export async function withHost(
   const host = resolveHost(options.host);
   const connection = await openConnection(host);
   try {
-    await body(new HostClient(connection, host.binary), host);
+    await body(new HostClient(connection, host.binary, host), host);
   } finally {
     await connection.close();
   }

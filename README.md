@@ -178,3 +178,58 @@ npm test            # vitest
 
 `@pocketshell/core` is linked from the sibling checkout (`file:../pocketshell-core`);
 rebuild it there (`npm run build`) after changing it.
+# Provisioned native Windows gateway hosts
+
+A trusted enrollment/provisioning record can opt a saved gateway host into the
+native Windows CLI contract. Supply the actual protected console path and
+canonical enrolled device ID; neither a Windows-looking display alias nor a
+drive path automatically selects this adapter. The endpoint must use the
+independently qualified Windows OpenSSH/Git Bash shell transport. For example,
+after replacing every provisioning placeholder with its independently verified
+value:
+
+```sh
+psc hosts add win35-native --gateway YOUR_ENROLLED_DEVICE_ID --user user \
+  --native-windows-cli 'C:/PROVISIONED_RUNTIME/Scripts/pocketshell.exe' \
+  --native-transport openssh-git-bash
+```
+
+The stored `nativeWindowsCli` policy contains `executable`, explicit
+`transport: "openssh-git-bash"` and a `deviceId` exactly matching `gateway.deviceId`.
+It cannot coexist with a legacy `--binary` override or a direct/local host.
+Protected installation/source/RECORD/bundled-payload hash custody is established
+out of band during provisioning, as in Desktop; this client does not claim to
+verify the remote executable hash. Existing independent SSH-key pin and account
+authorization remain the gateway transport's responsibility. Changing a display
+alias does not change the native workspace registry identity.
+
+Each connection validates the actual CLI version0.5.8 and platform schema1,
+win32/nt and advertised capabilities. It uses the quoted absolute executable for
+schema3 sessions, workspace registration, capability-gated create/kill and
+interactive full-UUID attach, with the accepted distinct NONPTY/PTY quoting.
+Full workspace paths and immutable UUIDs distinguish repeated display names;
+ambiguous names refuse. Capture/send, warning/catalog verbs are not implemented
+by this reviewed native profile and fail explicitly; no raw PATH `a`, shim,
+tmux or POSIX PATH-wrapper fallback is attempted. It makes no tree cache writes,
+so it does not manufacture CAS versions or tag-based tree identities.
+
+An uncertain create (timeout, lost or malformed result) triggers an authoritative
+session reread and reports uncertainty without automatic retry or adopting a
+guessed UUID. A failed reread blocks subsequent creation on that client instance
+until an explicit successful list. A new CLI process is a new instance; the user
+must deliberately check the listing before retrying. Definite backend failures
+remain failures. Native CMD/Bash-hex transport and actual end-to-end gateway
+runtime qualification are separate gates; this source adapter does not approve
+them. Hosts without the explicit native policy retain their Linux/POSIX behavior.
+
+## Windows outgoing client source candidate
+
+The Windows branch uses local drive-absolute paths, separate DPAPI-backed account state (`pocketshell-client-account/credentials.dpapi`), and the protected state helper described in `native/psc-security/README.md`. Python's plaintext credentials are neither imported nor overwritten. Device login preflights storage before requesting a grant. Pin parsing, full SSH public-key validation, aliases and explicit replacement checks remain the existing shared logic; Windows storage routes through the protected helper.
+
+Reviewed protected staging must supply `dist/windows-bindings.json`, adjacent to the emitted CLI tree, with exactly these fields: `version` (2), `sshFamily` (`win32-openssh`), absolute `helper`, `ssh`, `node`, `entry`, `systemRoot`, `systemDrive`, `programData`, and lowercase full SHA256 `helperSha256`, `sshSha256`, `nodeSha256`, `entrySha256`. The helper basename is `psc-security.exe`, and SSH is a qualified Win32 OpenSSH `ssh.exe`. Source mode looks for the equivalent `src/windows-bindings.json`; this candidate supplies neither file nor a runtime bypass. The manifest, Node executable, CLI tree and helper must be staged under verified protected ancestors by the parent. Digests bind reviewed files; a writable manifest is not an independent trust anchor. A manifest chosen by environment, cwd, PATH or an SSH override is refused.
+
+The actual Node WSS gateway proxy remains the existing implementation. Windows ProxyCommand quotes a bound Node/CLI argv for the qualified Win32 OpenSSH CreateProcess profile, without a POSIX shell or cmd.exe. Gateway SSH keeps complete out-of-band host-key pins, strict host checking, a protected empty global known-hosts file, public-key-only authentication and disabled connection reuse. Paths inserted in OpenSSH file options currently refuse spaces and unsupported characters; this limitation is explicit and must be respected by staging. Proxy argv quoting has separate round-trip tests.
+
+Windows SSH and native helper children receive a fresh allowlisted environment with bound system directories, fixed `SystemDrive` and `ProgramData`, owned config/runtime/home, fixed SSH directory PATH and an HTTPS broker. Inherited Node options, TLS overrides, proxies, agent/askpass and shell variables are excluded. Native helper invocation is direct, hidden, shell=false, with bounded pipes and generic errors. This is a source candidate: Linux mocks and policy checks are not Windows DPAPI/ACL/SSH runtime acceptance. The parent owns installation, native qualification, deployment and enrollment after independent source review.
+
+Schema v2 requires `systemDrive` to be a drive letter plus colon matching `systemRoot`, and `programData` to be a canonical existing local drive-absolute directory path (not a volume root or redirected path). Both values come only from the protected staging manifest; caller environment values, including alternate casing, are never inherited. Parent supplies the qualified actual paths. The existing protected-prefix ACL policy is unchanged.

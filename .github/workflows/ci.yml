@@ -1,0 +1,62 @@
+name: Source-paired maintained client
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  source:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: client
+      - uses: actions/checkout@v4
+        with:
+          repository: PocketShell-io/pocketshell-core
+          ref: 07174896ce7041370bcbf4f791ec513870b9535f
+          path: pocketshell-core
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.13.1'
+      - name: Install locked Core sources without lifecycle hooks
+        working-directory: pocketshell-core
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Emit pinned Core ESM contracts without a shell build wrapper
+        working-directory: pocketshell-core
+        run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: Fix emitted Core ESM extensions
+        working-directory: pocketshell-core
+        run: node scripts/fix-esm-extensions.mjs
+      - name: Install locked client dependencies without lifecycle hooks
+        working-directory: client
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Source typecheck
+        working-directory: client
+        run: npm run typecheck
+      - name: Linux production controls
+        if: runner.os == 'Linux'
+        working-directory: client
+        run: npm test
+      - name: Upstream integrity and private overlay packaging controls
+        working-directory: client
+        run: npm run test:packaging
+      - name: Emit exact client head using TypeScript directly
+        working-directory: client
+        run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: Read-only release inventory
+        working-directory: client
+        run: node scripts/record-ci-custody.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-paired-${{ runner.os }}-${{ github.sha }}
+          path: |
+            client/ci-custody.json
+            client/dist
+          if-no-files-found: error

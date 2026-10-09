@@ -1,0 +1,21 @@
+--- original/lib/windowsTerminal.js
++++ patched/lib/windowsTerminal.js
+@@ -154,6 +154,18 @@
+             _this.kill();
+         });
+     };
++    // Private PSC completion bridge: bypass output-readiness deferral on cancel.
++    // Completion attests owned helper exit and existing close dispatch, not native
++    // handle/ConPTY absence; the designated Windows runtime owner qualifies those.
++    WindowsTerminal.prototype.shutdownAsync = function () {
++        var _this = this;
++        if (!this._shutdownPromise) {
++            this._shutdownPromise = this._agent.kill().then(function () {
++                _this._close();
++            });
++        }
++        return this._shutdownPromise;
++    };
+     WindowsTerminal.prototype.kill = function (signal) {
+         var _this = this;
+         this._deferNoArgs(function () {

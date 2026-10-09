@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "target": "win32-x64",
+  "pscSource": "6175e8504b8dbf955bd1b9be42b3657ab6f40ab5",
+  "archives": [
+    {
+      "package": "@lydell/node-pty",
+      "version": "1.2.0-beta.15",
+      "integrity": "sha512-Br8wBxzbxFwdWgk9uQ+rdzE0xfoxOK4QuGH54swhRwc5IxP6H9Y1/bcyazRGvNUs6XkB5qNVkezuKSRxUwZe7A==",
+      "url": "https://registry.npmjs.org/@lydell/node-pty/-/node-pty-1.2.0-beta.15.tgz",
+      "archiveSha256": "c28df2b8de694493420c9f090c53f1cc9d087b64ba7b6b59e262588198688ef5",
+      "files": [
+        {
+          "path": "LICENSE",
+          "sha256": "f8884a291249e0e14ed46e94c96665767a5133159778e355770f4899c45cf5e9"
+        },
+        {
+          "path": "index.js",
+          "sha256": "4d9d98052d80c995aff7e064fe2c54ca88b3c1911abca89ba159a60b087fcedb"
+        },
+        {
+          "path": "package.json",
+          "sha256": "c5bed9a4877885f271b49ca3b4ae014004e2d1aca3631a01da7a8bb2a6912acc"
+        },
+        {
+          "path": "README.md",
+          "sha256": "797a47f2ae5758a7f950f0d76704e947de7b42808f024a7e91d25d75d0183635"
+        },
+        {
+          "path": "node-pty.d.ts",
+          "sha256": "8609af75d5c53fb1dfc11ba52e31024981a43c23c4bed83cecebf208d9423a9c"
+        }
+      ],
+      "asset": "node-pty-1.2.0-beta.15.tgz"
+    },
+    {
+      "package": "@lydell/node-pty-win32-x64",
+      "version": "1.2.0-beta.15",
+      "integrity": "sha512-2f8twEmDVxZ7drchAXjtevpmSPhFok0avAnzXro4t5gmz0xsPNKkoZvymwtuIS3xo7PzQqZOPQ/YzwEMb7oIzQ==",
+      "url": "https://registry.npmjs.org/@lydell/node-pty-win32-x64/-/node-pty-win32-x64-1.2.0-beta.15.tgz",
+      "archiveSha256": "57c2713368cf50dab4e311436439dd2a221a734674b5b17f9284e13420a6412a",
+      "files": [
+        {
+          "path": "LICENSE",
+          "sha256": "a3d60eaf32d2fb09c9d82ef39f14bd6e2c0f3ca7de30daa827486c0d6f8b6e9f"
+        },
+        {
+          "path": "prebuilds/win32-x64/conpty/conpty.dll",
+          "sha256": "3319b484b80bb53d1f4d0a9eb0ea60fd0f61da69db7280ca43b84215f19245ff"
+        },
+        {
+          "path": "prebuilds/win32-x64/conpty/OpenConsole.exe",
+          "sha256": "7f68c840226505004215c0b82d4e502c24b5bc3f4b93c4baaaa19bd679c0def8"
+        },
+        {
+          "path": "lib/shared/conout.js",
+          "sha256": "1573129ede3b54a32a4dc3be122566eae0b1979b4513d31329bbd115a4a0e85f"
+        },
+        {
+          "path": "lib/worker/conoutSocketWorker.js",
+          "sha256": "241ff80c89ab6aaf01a7f98b9ae5d865cd3f76850b1eb5ba8a0aa30fbbe5ab2d"
+        },
+        {
+          "path": "lib/conpty_console_list_agent.js",
+          "sha256": "6fc8e611a9f547e03c24ffd25a18ea82010fbadbf3921e6324c69bc0356d900d"
+        },
+        {
+          "path": "lib/eventEmitter2.js",
+          "sha256": "f1c14613aa90c10def4ca7238329270871997eb26f919f7074dc25533e3e75dd"
+        },
+        {
+          "path": "lib/index.js",
+          "sha256": "17e79806518ab350cd7d729dcc94154c5d770ea03e38e53684c5a8618065f99c"
+        },
+        {
+          "path": "lib/interfaces.js",
+          "sha256": "56e4173f09aad26173f9d4c79800fda0b808c34424f987ef8d671cc931119a0a"
+        },
+        {
+          "path": "lib/terminal.js",
+          "sha256": "771f5388103c3eb7bc698b589f41c08f06044d96de609eec45c9a79e4ee4fc00"
+        },
+        {
+          "path": "lib/types.js",
+          "sha256": "408bf8287717b6322cc380ea66caf1b5e366dcf697707ae2f3cc454e08f3b151"
+        },
+        {
+          "path": "lib/utils.js",
+          "sha256": "807bc62c8b702377d591136862309718ba48fb2b9eca54f4b25fbe43838c8fc6"
+        },
+        {
+          "path": "lib/windowsConoutConnection.js",
+          "sha256": "c87159520fc74cb0745f273260cc701cdb9e4c01ab0bae12cb4bd8d7f6e2f7c9"
+        },
+        {
+          "path": "lib/windowsPtyAgent.js",
+          "sha256": "4f503c377b11cbd113e1f32b3932fdc35e8132b0e647f4c6b70dc84224127c53"
+        },
+        {
+          "path": "lib/windowsTerminal.js",
+          "sha256": "b05d53d49cf9f422c2836029676ac2829f59cc14f5bbbbfaafa08382ff044267"
+        },
+        {
+          "path": "package.json",
+          "sha256": "45d385c850259029c52ac5675b317e987f6556296f8e83758e89551935b27013"
+        },
+        {
+          "path": "README.md",
+          "sha256": "0f4b423b7e21f64625c83bc8974eff996678b7187f5de8b3cf96ab9c89386c14"
+        },
+        {
+          "path": "prebuilds/win32-x64/conpty_console_list.node",
+          "sha256": "d46800643f90fc56b9fd67398f04a04a871521de0e825211c8382d187859d3ed"
+        },
+        {
+          "path": "prebuilds/win32-x64/conpty.node",
+          "sha256": "ec2fd8545c30e051ee3fa17d26127f7e615919814879c7f746cf4c80845226e0"
+        },
+        {
+          "path": "prebuilds/win32-x64/conpty_console_list.pdb",
+          "sha256": "eedbd0fb50293fff4532465ac6e7d765c0d543923ae11e6b1a05b5ae55fe3476"
+        },
+        {
+          "path": "prebuilds/win32-x64/conpty.pdb",
+          "sha256": "9275fecdca50f646579134e44604ba0ce81b184cea8edfc7c9fa53e59b475013"
+        }
+      ],
+      "asset": "node-pty-win32-x64-1.2.0-beta.15.tgz"
+    }
+  ],
+  "patches": [
+    {
+      "path": "lib/windowsPtyAgent.js",
+      "originalSha256": "4f503c377b11cbd113e1f32b3932fdc35e8132b0e647f4c6b70dc84224127c53",
+      "patchedSha256": "87f349a7ee8fd2903b97727bec4e1281ecb115653a58ca3b5a9b6f26e31c9769",
+      "payload": "windowsPtyAgent.js",
+      "diff": "windowsPtyAgent.js.patch",
+      "diffSha256": "4e320a21f7b6cfb26d01ef2c150ff17a9ed358ffd1312a146fd3c172cdf652e6"
+    },
+    {
+      "path": "lib/windowsTerminal.js",
+      "originalSha256": "b05d53d49cf9f422c2836029676ac2829f59cc14f5bbbbfaafa08382ff044267",
+      "patchedSha256": "af35f5cdb3e82704ed7ededd650757895af3c7ca936b2de5ac96a8ef952112a9",
+      "payload": "windowsTerminal.js",
+      "diff": "windowsTerminal.js.patch",
+      "diffSha256": "6b598eba197eab4ecba0bf5f22a0db945ceca53a0bb866bea32dc3f6ff7ba6a9"
+    }
+  ],
+  "producerSource": {
+    "producerCommit": "e1212da80b2b1e7f9b03efb97addb97ecf27a2d4",
+    "upstreamTag": "v1.2.0-beta.15",
+    "upstreamCommit": "8f218f6c194be81d98b1eeea344b150e83445824",
+    "files": [
+      {
+        "url": "https://raw.githubusercontent.com/microsoft/node-pty/8f218f6c194be81d98b1eeea344b150e83445824/src/win/conpty.cc",
+        "path": "upstream-source/src/win/conpty.cc",
+        "sha256": "800d10d36e888ade40cdb63382a87ae05df208620717d237407ff622d5aaa9d4"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/microsoft/node-pty/8f218f6c194be81d98b1eeea344b150e83445824/src/win/conpty_console_list.cc",
+        "path": "upstream-source/src/win/conpty_console_list.cc",
+        "sha256": "9eb316fb370652d9141027a43172508287de322dbfb9bad1c8262f80d9721e17"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/microsoft/node-pty/8f218f6c194be81d98b1eeea344b150e83445824/src/windowsPtyAgent.ts",
+        "path": "upstream-source/src/windowsPtyAgent.ts",
+        "sha256": "2bdfad2b11e89629b9bf4866ea5b549c6427a3b796776e46a75c3f9db5a3e010"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/microsoft/node-pty/8f218f6c194be81d98b1eeea344b150e83445824/src/windowsTerminal.ts",
+        "path": "upstream-source/src/windowsTerminal.ts",
+        "sha256": "ec5ae87e01027f3d6c3cacb7e526db54d7d16ba8695209bdc480d806d9caee11"
+      }
+    ],
+    "binarySourceAttestation": "recipe/version binding only; no reproducible binary comparison against independently acquired upstream archive permitted in this scope"
+  },
+  "integrityStatement": "Upstream SRI applies only to the immutable original registry archives. Replaced JS bytes are private PocketShell overlays and do not retain the upstream archive integrity. All other files including native PE/PDB bytes must match the original archive inventory."
+}

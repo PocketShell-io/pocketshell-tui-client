@@ -33,6 +33,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { credentialsFile, sharedConfigDir } from '../paths.js';
+import { callNative, nativeRead, nativeWrite } from '../platform/windows.js';
 import { SESSION_TOKEN_RE } from './broker.js';
 import { AccountError, CredentialsUnsafe, LOGIN_HINT, NotLoggedIn } from './errors.js';
 import { isObject, loadsStrict } from './json.js';
@@ -110,6 +111,11 @@ function checkDirForRead(directory: string): void {
 export function load(options: { allowSharedMode?: boolean } = {}): Credentials {
   const directory = sharedConfigDir();
   const path = credentialsFile();
+  if (process.platform === 'win32') {
+    const raw = nativeRead(directory, 'credentials');
+    if (raw === null) throw notLoggedIn();
+    return parse(raw, path);
+  }
   checkDirForRead(directory);
   let fd: number;
   try {
@@ -232,6 +238,7 @@ export function save(creds: Credentials): string {
   const directory = sharedConfigDir();
   const path = credentialsFile();
   const payload = Buffer.from(serialize(creds), 'utf8');
+  if (process.platform === 'win32') { nativeWrite(directory, 'credentials', payload); return path; }
   const dfd = openDirForWrite(directory);
   let tmp: string | null = join(directory, `.${FILE_NAME}.${randomBytes(8).toString('hex')}.tmp`);
   try {
@@ -263,7 +270,12 @@ export function save(creds: Credentials): string {
 }
 
 /** Whether anything (file, symlink, ...) sits at the credentials path. */
+export function preflightStorage(): void {
+  if (process.platform === 'win32') callNative({op:'preflight',root:sharedConfigDir()});
+}
+
 export function exists(): boolean {
+  if (process.platform === 'win32') return callNative({op:'exists',root:sharedConfigDir(),kind:'credentials'}).present === true;
   try {
     lstatSync(credentialsFile());
     return true;
@@ -274,6 +286,7 @@ export function exists(): boolean {
 
 /** Remove the credentials entry (unlink never follows a symlink). True if removed. */
 export function remove(): boolean {
+  if (process.platform === 'win32') return callNative({op:'remove',root:sharedConfigDir(),kind:'credentials'}).present === true;
   const path = credentialsFile();
   try {
     unlinkSync(path);

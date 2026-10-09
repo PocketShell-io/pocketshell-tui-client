@@ -1,0 +1,4 @@
+# Preserve source/output and review receipt bytes on every checkout platform.
+* text=auto eol=lf
+# Custody assets are hash-bound original archives or approved private payloads.
+vendor/windows-pty-overlay/** -text

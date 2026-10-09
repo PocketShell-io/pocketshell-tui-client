@@ -19,7 +19,7 @@ import {
   validateDestination,
 } from './openssh.js';
 import { runInteractive } from './process.js';
-import { ConnectionError, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
+import { ConnectionError, type AttachOptions, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
 
 export interface SshArgvInput {
   config: SshHostConfig;
@@ -99,8 +99,8 @@ export class OpenSshConnection implements Connection {
     return outcome;
   }
 
-  attachInteractive(command: string): Promise<number | null> {
-    return runInteractive(this.sshPath, this.argv('attach', command));
+  attachInteractive(command: string, options: AttachOptions = {}): Promise<number | null> {
+    return runInteractive(this.sshPath, this.argv('attach', command), process.env, options);
   }
 
   async close(): Promise<void> {

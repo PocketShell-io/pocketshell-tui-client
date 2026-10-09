@@ -1,0 +1,80 @@
+# Maintained Windows x64 PSC release
+
+This normal-repository successor retains the accepted PSC6175 transport, local PTY relay and cleanup logic, reconciled with current main naming. Current source differs from the previously qualified output; that output is not a qualification of the new source head. The two dependency overlays are now tracked release inputs. They are not edits to an installed cache and are not published as official `@lydell` bytes.
+
+`vendor/windows-pty-overlay/manifest.json` binds the exact locked wrapper and Windows x64 archive URLs, original SHA512 SRI and SHA256, complete original inventories, producer/upstream source correspondence, and the reviewed replacement/diff hashes. The source/recipe binding is not a reproducible native-binary attestation. All native PE/PDB files stay byte-identical. The agent replacement includes the accepted `windowsHide:true` and owned console-list cleanup; the terminal replacement includes the awaited completion bridge. They must produce exactly `87f349a7...` and `af35f5cd...`. Modified package files do not retain upstream archive SRI.
+
+The two original registry archives are shipped as immutable SRI-bound release inputs and portable test fixtures. The installer revalidates their SHA512 SRI and SHA256 before inspecting or changing installed package files. The packaging tests extract only their exact regular-file inventories after verifying SRI, without external tools, native execution or custody-directory dependencies.
+
+The checked installer validates the full five-file wrapper and 21-file platform inventory before writes. Only wholly original or wholly reviewed states are accepted. Unknown bytes, unexpected files, links, version mismatch and partial application fail before patching. Replacement payloads and review diffs are hash-checked. Direct overlay verification/application retains package-root containment. The Windows install hook handles npm hoisting automatically: it validates the shipped original archives and provisions their exact five-file wrapper and21-file Windows platform inventory into the client package’s own node_modules/@lydell. It never patches a hoisted sibling or shared dependency. Existing private directories must be canonical/unlinked and their contents must already match the original or reviewed inventory; unknown nested bytes refuse rather than being replaced. Other platforms remain untouched. Each write is atomic; an ordinary commit failure rolls back committed files. A rollback failure is explicit and requires discarding the fresh staging directory. `--verify` accepts only the completed reviewed state. The script only resolves package entry paths; it never loads the Windows addon or executes a foreign PE.
+
+## Source and normal release integration
+
+1. Review this minimal packaging successor stacked on accepted6175 and integrate it through the project's normal source PR. No transport, credentials, pins, host records, native helper source or dist emitter changes are included.
+2. Run normal CI and packaging controls on the exact integrated source head. The historical 88-file isolated6175 output and9c4 archive retain their own acceptance and identities. Fresh renamed @pocketshell/tui-client output needs a new emit manifest and exact Core source/output binding; its runtime acceptance does not transfer from6175. Retain the earlier Gateway lifecycle, quiet-process and owned-child absence receipts with that historical scope. The renamed normal package requires its own packed-consumer installation and Windows runtime qualification before promotion. The unchanged official native closure needs no addon rebuild.
+3. Use an ordinary version/tag chosen by the release owner after checking publication state. This candidate remains version0.1.0 and is not published. A version bump must also update the product VERSION source and its emitted module under the normal reviewed release process; it is not performed in this packaging task.
+4. The package includes the maintained script, manifest, exact2 JS payloads/diffs, and these instructions. Bundle freshly emitted Core from the exact source pin recorded in the new release manifest, so a consumer does not need the sibling `file:../pocketshell-core` checkout. Do not substitute the historical Core artifact. Commander12.1.0, ws8.22.0 and wrapper1.2.0-beta.15 match the retained lock. The seven node-pty lock nodes and all non-root lock records remain unchanged.
+5. Normal npm installation runs the maintained postinstall hook for Windows x64, automatically creating the private nested closure from its shipped original archives even when npm hoists dependencies. No install-strategy discovery or manual hoisting repair is required; other platforms are untouched. The protected Windows promotion below deliberately disables lifecycle hooks and invokes the same verified script directly with trusted Node, because npm's default Windows lifecycle shell is not the qualified quiet launcher.
+6. For offline Windows fleet release material, stage all fresh88 client outputs and the freshly built pinned Core with their new source/output manifests. Add the locked commander/ws and exact wrapper5/platform21 closure, current package metadata, maintained script and vendor inputs. Generate a complete file inventory and release archive from that staging tree. Bind the existing security helper to its unchanged source/module lineage. The new archive has its own integrity and remains pending normal-package runtime qualification; it is not the9c4 archive. Upstream SRI denotes only the original unmodified dependency archives.
+
+## Root-reviewed quiet Windows install/promotion
+
+These are future owner actions; this packet performs no Windows installation or cutover.
+
+The runtime owner first binds the current protected prefix, accepted Node and Microsoft SSH absolute paths/digests, helper dfac34251d1ff23fca8d4b77465c4674a611fd1fef733123747a21e5d0fa0da7, public version2 bindings and existing closed environment from the accepted public custody receipt. Do not invent paths from a login shell, PATH or a different host. Keep the account/config/runtime roots, DPAPI state, default host, pins, enrollment, gateway endpoint and per-device CLI/Bash policies unchanged.
+
+Create a new owner-protected version directory beside the current package; retain the previous version for rollback. Verify the root-reviewed complete release archive/manifest before extraction. Extract only its regular inventory into that fresh directory with the owner's existing trusted native extractor, directly and hidden. Never patch the active installed package or a shared/global npm cache. For a normal npm tar installation, invoke the trusted Node executable with the absolute reviewed npm CLI JavaScript and `install --offline --ignore-scripts --no-audit --no-fund --prefix <fresh-protected-prefix> <reviewed-package.tgz>`, using only the already locked/custodied packages in an owned cache (including the two original archives carried in vendor/windows-pty-overlay); no acquisition is authorized by this recipe. A complete portable fleet package needs no npm dependency resolution.
+
+Invoke the maintained installed package script directly with the same trusted Node using an argv array. The package path is the fixed normal npm location under the fresh prefix (node_modules/@pocketshell/tui-client), or the root of the reviewed complete portable package:
+
+```
+[trustedNode, freshClientPackage/scripts/apply-windows-pty-overlay.mjs]
+[trustedNode, freshClientPackage/scripts/apply-windows-pty-overlay.mjs, "--verify"]
+```
+
+On Windows x64 the first command automatically provisions the private nested upstream closure and applies the reviewed overlays; the second is read-only verification. Do not use a parent prefix as packageRoot, do not change containment to admit hoisted siblings, and do not manually repair dependency placement. Non-Windows execution skips target installation; Linux packaging controls explicitly call the production Windows selector against an actual npm consumer tree without loading any foreign addon.
+
+Use the existing native launcher contract: absolute `FileName`, explicit argument list, `UseShellExecute=false`, `CreateNoWindow=true`, redirected stdout/stderr, bounded completion and checked natural exit. No cmd.exe, powershell.exe, npm.cmd, shell wrappers or profile aliases. The script output must be `state:verified`, and the complete manifest must match the approved release including unchanged native files and all88 dist files.
+
+Version2 `windows-bindings.json` is runtime-owner provisioned under the new package's dist directory. Carry the exact existing helper/SSH/Node/systemRoot/systemDrive/programData values and digests unchanged. Only bind `entry` to the new protected absolute dist/cli.js and its reviewed hash; the helper's existing ACL/executable/realpath checks still apply. Do not copy or regenerate credentials, keys, account state, enrollment or host records. Do not relax foreign-file/ancestor ACL policy to make staging pass.
+
+After root reviews the artifact and public cutover receipt, change only the owner's approved launcher/package selection to the new protected entry and matching public binding. The runtime invocation remains `[trustedNode, approvedEntry, ...supportedPSCArgs]` with the same verified closed environment. Keep endpoint/controller/guardian processes running. The historical full Gateway lifecycle and quiet/owned-birth absence receipts remain evidence for their exact isolated6175 runtime bytes. They do not qualify freshly renamed client output or its new Core binding. Require an actual packed consumer of the normal package name and separately authorized Windows runtime qualification, including quiet lifecycle and owned-child absence, before promotion. New behavioral checks belong to the runtime owner.
+
+Rollback selects the retained prior protected entry/binding; it does not revert account/profile state, kill a remote persistent session or restart an endpoint. A failed staging/check is never promotion success. The existing synchronous native ClosePseudoConsole limitation remains: the PSC eight-second asynchronous guard cannot preempt a blocking native close. Do not replace empirical owned-child absence evidence with that timer.
+
+## Packed consumer control boundary
+
+Release packaging must retain an actual offline npm consumer install control, not just generated overlay fixtures. The prior packed0.1.0 consumer used ordinary hoisted siblings and its original Windows selector refused outside the package root. The successor must keep those sibling hashes identical while its production Windows selector creates/verifies the private closure automatically. Capture the packed archive, npm argv/PID/natural exit, visible lifecycle output, consumer layout and pre/post hashes. On Linux the npm lifecycle hook reports not-targeted; a separate call to installOverlayForPlatform(packageRoot, 'win32', 'x64') exercises the real install implementation on that actual tree, not Windows native runtime. A Linux-only --force may admit official foreign package OS metadata in this filesystem test; it is not a supported Windows install flag or authority bypass in the promotion recipe. No native addon is loaded. Existing linked/unknown nested content and outside-root direct apply must still refuse.
+
+The actual consumer control also primes the original hoisted Node resolution before provisioning. The installer resolves newly created private entries by absolute paths, so a cached earlier sibling resolution cannot redirect verification/application outside the package. The first corrected consumer control exposed this cached-resolution failure; its receipt is preserved.
+
+## Normal repository integration and qualification boundary
+
+The normal origin is PocketShell-io/pocketshell-tui-client, package
+@pocketshell/tui-client, command pocketshell-tui-client (psc remains the alias).
+The isolated reviewed9c4 portable archive retains its original package and88dist
+bytes; it is not silently renamed or relabelled as this source's emitted output.
+Main8e28dde's normal POSIX host/runtime naming is preserved. Existing qualified
+Windows hosts, account DPAPI and explicit runtime locations keep their protected
+pocketshell-client/pocketshell-client-account identity; no config or credential
+migration, fallback, automatic login, or new enrollment is added.
+
+Normal PR CI checks this exact client head against Core
+07174896ce7041370bcbf4f791ec513870b9535f, the actual current published source
+main at integration intake, not an unversioned default checkout or old UI lineage.
+Its API source pair passes the recorded local no-emit check. CI seals freshly
+emitted source/output inventories; neither CI nor this PR authorizes installation
+or qualifies a live route. The maintained normal package/lock bin identity and
+installer root check are consistent. An npm consumer of the new package name
+must be qualified independently; the previous9c4 consumer receipt is retained
+as evidence for its exact prior bytes, not new install acceptance.
+
+The exact ROOT AGENT runtime review is retained at
+docs/root-qualified-windows-lifecycle-6175.json (7413bytes,
+SHA2561a2ee68b3d006376f04efd1d92bc97f3034c319e4df8adec313eb6fa26c5d8b2).
+It accepts the isolated6175 Windows-to-EC2-to-Hetzner lifecycle only. It is not
+human acceptance, normal installation acceptance, Win35 acceptance, or a
+qualification of this newly reconciled client/Core pair. Existing protected
+account/bindings/enrollment/defaults/Node/SSH/helper and live endpoint selection
+remain under the runtime owner's authority. No registry publish, release tag,
+installed edit, or service restart is part of this draft source integration.

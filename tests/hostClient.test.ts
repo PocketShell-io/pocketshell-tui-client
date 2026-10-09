@@ -1,5 +1,5 @@
 /** hostClient.ts: session selection, exec quoting, systemd noise, the one-shot probe. */
-import type { SessionRow } from '@pocketshell/core';
+import { pathAwareCommand, type SessionRow } from '@pocketshell/core';
 import { describe, expect, it } from 'vitest';
 import {
   execCommandLine,
@@ -152,5 +152,12 @@ describe('HostClient binary', () => {
   it('refuses a binary with shell syntax', () => {
     expect(() => new HostClient(fakeConnection(async () => okOutcome()), 'ps; echo pwned')).toThrow(/invalid --binary/);
     expect(() => new HostClient(fakeConnection(async () => okOutcome()), '~/.local/bin/pocketshell')).not.toThrow();
+  });
+  it('retains POSIX UUID attachment and legacy kill name despite optional row UUID', async () => {
+    const seen: string[] = [];
+    const client = new HostClient(fakeConnection(async (command) => { seen.push(command); return okOutcome(); }));
+    expect(client.attachCommand(row('project:main', 'aplexer-fixture-id'))).toBe(pathAwareCommand("exec a attach 'aplexer-fixture-id'"));
+    await client.killSession('project:main', 'aplexer-fixture-id');
+    expect(seen).toEqual([pathAwareCommand("pocketshell sessions kill -- 'project:main'")]);
   });
 });
