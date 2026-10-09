@@ -122,7 +122,7 @@ export async function request(
   }
   const headers: Record<string, string> = {
     Accept: 'application/json',
-    'User-Agent': `pocketshell-client/${VERSION}`,
+    'User-Agent': `pocketshell-tui-client/${VERSION}`,
   };
   let payload: string | undefined;
   if (method === 'POST') {

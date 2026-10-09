@@ -75,7 +75,7 @@ describe('buildGatewaySshArgv', () => {
     endpoint: prod,
     pinFile: '/home/u/.config/pocketshell/gateway_known_hosts',
     alias: hostKeyAlias('Home-Lab'),
-    statusDir: '/run/user/1/pocketshell-client',
+    statusDir: '/run/user/1/pocketshell-tui-client',
     invocation: ['/usr/bin/node', '/opt/psc/dist/cli.js'],
   };
 
@@ -301,7 +301,7 @@ describe.skipIf(!e2e)('end to end through a fake gateway to the local sshd', () 
 
   it('status: a token-mint failure inside the proxy (broker 401) is NOT_LOGGED_IN, exit 3', async () => {
     addPin('nologin-mux', parseHostKey(wrongKey));
-    process.env.PSC_TEST_GATEWAY_TOKEN_ERROR = 'Your PocketShell login is no longer valid; run `pocketshell-client login`.';
+    process.env.PSC_TEST_GATEWAY_TOKEN_ERROR = 'Your PocketShell login is no longer valid; run `pocketshell-tui-client login`.';
     const before = connections;
     try {
       await expect(withStatus('nologin-mux').exec('true', { timeoutMs: 30_000 })).rejects.toMatchObject({

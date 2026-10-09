@@ -1,4 +1,4 @@
-# pocketshell-client
+# pocketshell-tui-client
 
 PocketShell in the terminal. It's the same client as the desktop, web and
 Android apps (hosts → workspaces → agent sessions), for machines and moments
@@ -16,7 +16,7 @@ the other clients run.
 
 ```bash
 npm install && npm run build
-npm link                   # puts `pocketshell-client` and `psc` on PATH
+npm link                   # puts `pocketshell-tui-client` and `psc` on PATH
 psc                        # interactive UI
 psc sessions list --json   # the same data, for scripts and agents
 ```
@@ -163,10 +163,10 @@ psc -H box sessions list --json                # agentState: working / waiting /
 
 | Path | What |
 | --- | --- |
-| `~/.config/pocketshell-client/hosts.json` | saved hosts |
+| `~/.config/pocketshell-tui-client/hosts.json` | saved hosts |
 | `~/.config/pocketshell/credentials.json` | login session, shared with the `pocketshell` CLI |
 | `~/.config/pocketshell/gateway_known_hosts` | gateway host-key pins, shared with the `pocketshell` CLI |
-| `$XDG_RUNTIME_DIR/pocketshell-client/` | OpenSSH control sockets |
+| `$XDG_RUNTIME_DIR/pocketshell-tui-client/` | OpenSSH control sockets |
 
 ## Development
 

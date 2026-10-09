@@ -42,11 +42,11 @@ export const CONTROL_PERSIST_SECONDS = 60;
 
 /**
  * Marker the gateway proxy prints on stderr for a classified failure:
- * `pocketshell-client-proxy: <CODE>: <message>`. ssh relays the
+ * `pocketshell-tui-client-proxy: <CODE>: <message>`. ssh relays the
  * ProxyCommand's stderr, so the client can tell "not logged in" from
  * "host offline" even though ssh itself only says 255.
  */
-export const PROXY_MARKER = 'pocketshell-client-proxy';
+export const PROXY_MARKER = 'pocketshell-tui-client-proxy';
 
 const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
 /** After ssh exits (and stdout ended), how long to wait for stragglers holding its stderr pipe. */
@@ -515,7 +515,7 @@ export function classifySshFailure(
 export async function masterRunning(sshPath: string, controlPath: string): Promise<boolean> {
   const probe = await runSshCaptured(
     sshPath,
-    ['-F', 'none', '-o', `ControlPath=${controlPath}`, '-O', 'check', 'pocketshell-client-check'],
+    ['-F', 'none', '-o', `ControlPath=${controlPath}`, '-O', 'check', 'pocketshell-tui-client-check'],
     { timeoutMs: 3_000 },
   );
   return probe.exitCode === 0;

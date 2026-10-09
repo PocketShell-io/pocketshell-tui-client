@@ -1,5 +1,5 @@
 /**
- * The client's saved hosts: `~/.config/pocketshell-client/hosts.json`.
+ * The client's saved hosts: `~/.config/pocketshell-tui-client/hosts.json`.
  *
  * One entry per host, each with exactly one connection mode. The built-in
  * `local` host (this machine, local mode) always exists and is never

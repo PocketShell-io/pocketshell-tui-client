@@ -1,7 +1,7 @@
 /**
  * The PocketShell account API (device-flow login, the shared credentials
  * file, the broker client). Port of the Python CLI's `pocketshell.account`;
- * `pocketshell login` and `pocketshell-client login` are one login (same
+ * `pocketshell login` and `pocketshell-tui-client login` are one login (same
  * `~/.config/pocketshell/credentials.json`).
  *
  * Consumers:
@@ -147,8 +147,8 @@ export async function login(options: LoginOptions): Promise<Credentials> {
   }
   if (previous !== null && !isExpired(previous) && !options.force) {
     throw new AccountError(
-      `Already logged in as ${cleanText(previous.email)}. Run \`pocketshell-client logout\` first, ` +
-        'or `pocketshell-client login --force` to replace this login.',
+      `Already logged in as ${cleanText(previous.email)}. Run \`pocketshell-tui-client logout\` first, ` +
+        'or `pocketshell-tui-client login --force` to replace this login.',
       { code: 'ALREADY_LOGGED_IN' },
     );
   }
@@ -237,7 +237,7 @@ export async function logout(options: { fetch?: typeof fetch } = {}): Promise<Lo
       throw new BrokerRateLimited(
         'Could not revoke the session: the PocketShell broker is rate limiting requests from this ' +
           'network (HTTP 429). Your login was kept so it can still be revoked; run ' +
-          '`pocketshell-client logout` again shortly.',
+          '`pocketshell-tui-client logout` again shortly.',
       );
     }
     throw error;

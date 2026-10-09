@@ -544,7 +544,7 @@ export async function runTui(options: { host?: string }): Promise<number> {
   const app = new App(host, input, output);
   const crash = (error: unknown) => {
     app.emergencyRestore();
-    process.stderr.write(`pocketshell-client: TUI crashed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    process.stderr.write(`pocketshell-tui-client: TUI crashed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     process.exit(1);
   };
   const onSignal = (signal: NodeJS.Signals) => {

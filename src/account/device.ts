@@ -24,7 +24,7 @@ export const MAX_LABEL = 80;
 const SLOW_DOWN_STEP = 5;
 const MAX_INTERVAL = 60;
 const MAX_TRANSIENT_FAILURES = 5;
-const AGAIN = 'Run `pocketshell-client login` again.';
+const AGAIN = 'Run `pocketshell-tui-client login` again.';
 
 /** Crockford-like alphabet without vowels or ambiguous characters. */
 export const USER_CODE_RE = /^[BCDFGHJKLMNPQRSTVWXZ2-9]{4}-[BCDFGHJKLMNPQRSTVWXZ2-9]{4}$/;
@@ -67,7 +67,7 @@ export function defaultLabel(): string {
       user = 'user';
     }
   }
-  return cleanText(`${user}@${hostname()}`, MAX_LABEL) || 'pocketshell-client';
+  return cleanText(`${user}@${hostname()}`, MAX_LABEL) || 'pocketshell-tui-client';
 }
 
 /** Validate a `--label`: 1-80 printable characters, no control/format characters. */

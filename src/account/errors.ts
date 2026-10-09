@@ -7,7 +7,7 @@
  */
 import { cleanText } from './sanitize.js';
 
-export const LOGIN_HINT = 'run `pocketshell-client login`';
+export const LOGIN_HINT = 'run `pocketshell-tui-client login`';
 
 /** A login/account failure whose message is safe to show (exit 1). */
 export class AccountError extends Error {

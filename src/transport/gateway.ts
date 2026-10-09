@@ -4,7 +4,7 @@
  * Mirrors the Python CLI's `pocketshell gateway ssh` (docs/gateway.md §9.4):
  * OpenSSH does user auth, encryption and — the point — host-key
  * verification against the client's own pin file; the gateway is only the
- * ProxyCommand transport (`pocketshell-client gateway proxy <id>`) and is
+ * ProxyCommand transport (`pocketshell-tui-client gateway proxy <id>`) and is
  * never trusted with the session. The argv is fully explicit: `-F none`
  * (the user's ~/.ssh/config is not read), every hardening `-o` first (for
  * ssh the first value wins), the destination after `--`.
@@ -139,7 +139,7 @@ export function cliInvocation(): string[] {
       continue;
     }
   }
-  throw new ConnectionError('cannot locate the pocketshell-client entry point for the gateway ProxyCommand', 'INTERNAL', 1);
+  throw new ConnectionError('cannot locate the pocketshell-tui-client entry point for the gateway ProxyCommand', 'INTERNAL', 1);
 }
 
 /**
@@ -224,11 +224,11 @@ export function sshEnvironment(): NodeJS.ProcessEnv {
 }
 
 const HINTS: Partial<Record<string, string>> = {
-  NOT_LOGGED_IN: 'run `pocketshell-client login`',
+  NOT_LOGGED_IN: 'run `pocketshell-tui-client login`',
   HOST_OFFLINE: 'is `pocketshell gateway run` active on the host?',
-  DEVICE_NOT_FOUND: 'check the id with `pocketshell-client gateway devices`',
+  DEVICE_NOT_FOUND: 'check the id with `pocketshell-tui-client gateway devices`',
   HOST_KEY_FAILED:
-    'the host key does not match your pin; verify with `pocketshell gateway show --host-key` on the host, then `pocketshell-client gateway pin <id> --replace`',
+    'the host key does not match your pin; verify with `pocketshell gateway show --host-key` on the host, then `pocketshell-tui-client gateway pin <id> --replace`',
   AUTH_FAILED: 'the host did not accept your SSH key (-i / the default ~/.ssh/id_* files; agent-only keys are not offered)',
 };
 

@@ -1,12 +1,12 @@
 {
-  "name": "@pocketshell/client",
+  "name": "@pocketshell/tui-client",
   "version": "0.1.0",
   "description": "PocketShell in the terminal: a TUI and agent-friendly CLI client for PocketShell hosts over local, SSH, and gateway connections.",
   "license": "MIT",
   "author": "Alexey Grigorev <alexey.s.grigoriev@gmail.com>",
   "type": "module",
   "bin": {
-    "pocketshell-client": "./dist/cli.js",
+    "pocketshell-tui-client": "./dist/cli.js",
     "psc": "./dist/cli.js"
   },
   "files": [

@@ -271,7 +271,7 @@ describe('actions → effects', () => {
 
   it('describes connection errors with their hints', () => {
     const err = Object.assign(new Error('no session'), { code: 'NOT_LOGGED_IN' });
-    expect(describeError(err)).toContain('pocketshell-client login');
+    expect(describeError(err)).toContain('pocketshell-tui-client login');
     expect(describeError(new Error('line one\nline two'))).toBe('line one · line two');
   });
 });

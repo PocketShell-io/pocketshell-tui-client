@@ -106,7 +106,7 @@ export function sessionBrokerUrl(stored: string, requested?: string): string {
   if (target === null) {
     throw new NotLoggedIn(
       'The broker URL stored with your login is not allowed by the current settings; ' +
-        'run `pocketshell-client login`.',
+        'run `pocketshell-tui-client login`.',
     );
   }
   let source: string;
@@ -120,7 +120,7 @@ export function sessionBrokerUrl(stored: string, requested?: string): string {
     throw new NotLoggedIn(
       `${source} (${cleanText(requested, 120)}) differs from the broker you logged in to ` +
         `(${cleanText(target, 120)}); refusing to send your session to it. Unset it, or run ` +
-        '`pocketshell-client login --force` for that broker.',
+        '`pocketshell-tui-client login --force` for that broker.',
     );
   }
   return target;

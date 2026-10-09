@@ -97,7 +97,7 @@ describe('the pin file', () => {
     } catch (error) {
       expect((error as PinError).code).toBe('NOT_PINNED');
       expect((error as Error).message).toContain('pocketshell gateway show --host-key');
-      expect((error as Error).message).toContain('pocketshell-client gateway pin home-lab');
+      expect((error as Error).message).toContain('pocketshell-tui-client gateway pin home-lab');
     }
   });
 

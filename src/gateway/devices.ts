@@ -72,7 +72,7 @@ export function parseDevices(body: Buffer): DeviceInfo[] {
 }
 
 const STATUS_REASON: Record<number, string> = {
-  401: 'the gateway rejected the token (try `pocketshell-client login` again)',
+  401: 'the gateway rejected the token (try `pocketshell-tui-client login` again)',
   403: 'the gateway refused the request',
   404: 'this gateway does not serve the device listing',
   429: 'the gateway is rate limiting requests; retry later',
@@ -100,7 +100,7 @@ export function fetchDevices(endpoint: GatewayEndpoint, token: string, timeoutMs
         method: 'GET',
         agent,
         rejectUnauthorized: true,
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'pocketshell-client' },
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'pocketshell-tui-client' },
       },
       (res) => {
         const status = res.statusCode ?? 0;
