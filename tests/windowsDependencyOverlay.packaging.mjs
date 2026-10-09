@@ -139,9 +139,9 @@ test('changed original SRI archive refuses before dependency writes', () => {
 test('Windows install entry privately provisions actual upstream archives without modifying hoisted siblings', () => {
   const f = fixture();
   try {
-    const packageRoot = join(f.root, 'node_modules/@pocketshell/client');
+    const packageRoot = join(f.root, 'node_modules/@pocketshell/tui-client');
     fs.mkdirSync(packageRoot, { recursive: true });
-    fs.writeFileSync(join(packageRoot, 'package.json'), '{"name":"@pocketshell/client","version":"0.1.0"}');
+    fs.writeFileSync(join(packageRoot, 'package.json'), '{"name":"@pocketshell/tui-client","version":"0.1.0"}');
     const before = census(f);
     assert.throws(() => applyOverlay(packageRoot), /outside private/);
     assert.deepEqual(installOverlayForPlatform(packageRoot, 'win32', 'x64'), { target: 'win32-x64', state: 'verified', modified: 2 });
@@ -155,7 +155,7 @@ test('private provisioning refuses linked dependency ancestor without touching i
   const f = fixture();
   try {
     const root = join(f.root, 'client'); fs.mkdirSync(root);
-    fs.writeFileSync(join(root, 'package.json'), '{"name":"@pocketshell/client"}');
+    fs.writeFileSync(join(root, 'package.json'), '{"name":"@pocketshell/tui-client"}');
     fs.symlinkSync(join(f.root, 'node_modules'), join(root, 'node_modules'), 'dir');
     const before = census(f);
     assert.throws(() => installOverlayForPlatform(root, 'win32', 'x64'), /linked or invalid/);
@@ -166,7 +166,7 @@ test('private provisioning refuses linked dependency ancestor without touching i
 test('private provisioning refuses unknown existing nested dependency before overlay writes', () => {
   const f = fixture();
   try {
-    fs.writeFileSync(join(f.root, 'package.json'), '{"name":"@pocketshell/client"}');
+    fs.writeFileSync(join(f.root, 'package.json'), '{"name":"@pocketshell/tui-client"}');
     fs.appendFileSync(join(f.platform, 'lib/windowsTerminal.js'), 'foreign');
     const before = census(f);
     assert.throws(() => installOverlayForPlatform(f.root, 'win32', 'x64'), /unknown bytes/);

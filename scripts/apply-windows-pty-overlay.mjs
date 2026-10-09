@@ -82,7 +82,7 @@ export function provisionPrivateWindowsDependencies(packageRoot) {
   const entries = validateArchives(), root = resolve(packageRoot);
   if (!samePath(fs.realpathSync(root), root)) fail('private install root is not canonical');
   const pkg = JSON.parse(fs.readFileSync(join(root, 'package.json'), 'utf8'));
-  if (pkg.name !== '@pocketshell/client') fail('private install root is not the client package');
+  if (pkg.name !== '@pocketshell/tui-client') fail('private install root is not the client package');
   for (const path of [join(root, 'node_modules'), join(root, 'node_modules/@lydell')]) {
     if (!fs.existsSync(path)) fs.mkdirSync(path, { mode: 0o700 });
     const stat = fs.lstatSync(path);

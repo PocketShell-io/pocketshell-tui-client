@@ -25,7 +25,7 @@ The runtime owner first binds the current protected prefix, accepted Node and Mi
 
 Create a new owner-protected version directory beside the current package; retain the previous version for rollback. Verify the root-reviewed complete release archive/manifest before extraction. Extract only its regular inventory into that fresh directory with the owner's existing trusted native extractor, directly and hidden. Never patch the active installed package or a shared/global npm cache. For a normal npm tar installation, invoke the trusted Node executable with the absolute reviewed npm CLI JavaScript and `install --offline --ignore-scripts --no-audit --no-fund --prefix <fresh-protected-prefix> <reviewed-package.tgz>`, using only the already locked/custodied packages in an owned cache (including the two original archives carried in vendor/windows-pty-overlay); no acquisition is authorized by this recipe. A complete portable fleet package needs no npm dependency resolution.
 
-Invoke the maintained installed package script directly with the same trusted Node using an argv array. The package path is the fixed normal npm location under the fresh prefix (node_modules/@pocketshell/client), or the root of the reviewed complete portable package:
+Invoke the maintained installed package script directly with the same trusted Node using an argv array. The package path is the fixed normal npm location under the fresh prefix (node_modules/@pocketshell/tui-client), or the root of the reviewed complete portable package:
 
 ```
 [trustedNode, freshClientPackage/scripts/apply-windows-pty-overlay.mjs]

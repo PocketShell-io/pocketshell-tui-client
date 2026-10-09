@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
 const prefix = resolve(process.argv[2]);
-const root = join(prefix, 'node_modules/@pocketshell/client');
+const root = join(prefix, 'node_modules/@pocketshell/tui-client');
 const manifest = JSON.parse(fs.readFileSync(join(root, 'vendor/windows-pty-overlay/manifest.json')));
 const sha = p => createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const census = base => manifest.archives.flatMap(a => a.files.map(f => ({ path: a.package+'/'+f.path, sha256: sha(join(base, 'node_modules', a.package, f.path)) })));
