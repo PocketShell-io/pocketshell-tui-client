@@ -1,0 +1,123 @@
+--- original/lib/windowsPtyAgent.js
++++ patched/lib/windowsPtyAgent.js
+@@ -183,52 +183,78 @@
+     };
+     WindowsPtyAgent.prototype.kill = function () {
+         var _this = this;
+-        // Prevent deferred connection from completing after kill
+-        this._clearConnectionTimeout();
+-        this._pendingPtyInfo = undefined;
+-        // Tell the agent to kill the pty, this releases handles to the process
+-        if (!this._useConptyDll) {
+-            this._inSocket.readable = false;
+-            this._outSocket.readable = false;
+-            this._getConsoleProcessList().then(function (consoleProcessList) {
+-                consoleProcessList.forEach(function (pid) {
+-                    try {
+-                        process.kill(pid);
+-                    }
+-                    catch (e) {
+-                        // Ignore if process cannot be found (kill ESRCH error)
+-                    }
+-                });
+-            });
+-            this._ptyNative.kill(this._pty, this._useConptyDll);
+-            this._conoutSocketWorker.dispose();
+-        }
+-        else {
+-            // Close the input write handle to signal the end of session.
+-            this._inSocket.destroy();
+-            this._ptyNative.kill(this._pty, this._useConptyDll);
+-            this._outSocket.on('data', function () {
+-                _this._conoutSocketWorker.dispose();
+-            });
+-        }
++        if (this._cleanupPromise) return this._cleanupPromise;
++        this._cleanupPromise = Promise.resolve().then(function () {
++            _this._clearConnectionTimeout();
++            _this._pendingPtyInfo = undefined;
++            // Only a still-live owned shell needs an advisory console-list helper.
++            var helper = _this._exitCode === undefined
++                ? _this._getConsoleProcessList() : Promise.resolve([]);
++            var closeError;
++            try {
++                if (!_this._useConptyDll) {
++                    _this._inSocket.readable = false;
++                    _this._outSocket.readable = false;
++                    _this._ptyNative.kill(_this._pty, _this._useConptyDll);
++                    _this._conoutSocketWorker.dispose();
++                } else {
++                    _this._inSocket.destroy();
++                    _this._ptyNative.kill(_this._pty, _this._useConptyDll);
++                    _this._outSocket.on('data', function () { _this._conoutSocketWorker.dispose(); });
++                }
++            } catch (error) { closeError = error; }
++            return helper.then(function () { if (closeError) throw closeError; });
++        });
++        // Existing fire-and-forget kill callers must not cause unhandled rejection.
++        // Awaiting callers still receive the same rejected completion promise.
++        this._cleanupPromise.catch(function () {});
++        return this._cleanupPromise;
+     };
+     WindowsPtyAgent.prototype._getConsoleProcessList = function () {
+         var _this = this;
+-        if (this._innerPid <= 0) {
+-            return Promise.resolve([]);
+-        }
+-        return new Promise(function (resolve) {
+-            var agent = (0, child_process_1.fork)(path.join(__dirname, 'conpty_console_list_agent'), [_this._innerPid.toString()]);
+-            agent.on('message', function (message) {
++        if (this._consoleListPromise) return this._consoleListPromise;
++        if (this._innerPid <= 0) return Promise.resolve([]);
++        this._consoleListPromise = new Promise(function (resolve, reject) {
++            var agent = (0, child_process_1.fork)(path.join(__dirname, 'conpty_console_list_agent'),
++                [_this._innerPid.toString()], { windowsHide: true });
++            var receipt, failure, stopping = false;
++            var cleanup = function () {
+                 clearTimeout(timeout);
+-                resolve(message.consoleProcessList);
+-            });
+-            var timeout = setTimeout(function () {
+-                // Something went wrong, just send back the shell PID
+-                agent.kill();
+-                resolve([_this._innerPid]);
+-            }, 5000);
+-        });
++                agent.removeListener('message', onMessage);
++                agent.removeListener('error', onError);
++                agent.removeListener('exit', onExit);
++            };
++            var stop = function (error) {
++                failure = failure || error;
++                if (!stopping) {
++                    stopping = true;
++                    clearTimeout(timeout);
++                    try { agent.kill(); } catch (killError) { failure = failure || killError; }
++                }
++                // Never settle until the actual owned ChildProcess has exited.
++            };
++            var onMessage = function (message) {
++                if (receipt !== undefined) return stop(new Error('Duplicate console-list receipt.'));
++                if (!message || !Array.isArray(message.consoleProcessList)
++                    || !message.consoleProcessList.every(function (pid) { return Number.isSafeInteger(pid) && pid > 0; })) {
++                    return stop(new Error('Malformed console-list receipt.'));
++                }
++                receipt = message.consoleProcessList;
++            };
++            var onError = function (error) { stop(error); };
++            var onExit = function (code, signal) {
++                cleanup();
++                if (failure) return reject(failure);
++                if (receipt === undefined) return reject(new Error('Console-list helper exited without a receipt.'));
++                if (code !== 0 || signal) return reject(new Error('Console-list helper did not exit successfully.'));
++                resolve(receipt); // Advisory only: never terminate bare PIDs.
++            };
++            agent.on('message', onMessage);
++            agent.on('error', onError);
++            agent.once('exit', onExit);
++            var timeout = setTimeout(function () { stop(new Error('Console-list helper timed out.')); }, 1000);
++        });
++        return this._consoleListPromise;
+     };
+     Object.defineProperty(WindowsPtyAgent.prototype, "exitCode", {
+         get: function () {

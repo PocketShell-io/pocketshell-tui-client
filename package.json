@@ -10,7 +10,10 @@
     "psc": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts/apply-windows-pty-overlay.mjs",
+    "vendor/windows-pty-overlay",
+    "docs/windows-release.md"
   ],
   "engines": {
     "node": ">=20"
@@ -19,12 +22,15 @@
     "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "dev": "node --import tsx src/cli.ts"
+    "dev": "node --import tsx src/cli.ts",
+    "postinstall": "node scripts/apply-windows-pty-overlay.mjs",
+    "verify:windows-dependency": "node scripts/apply-windows-pty-overlay.mjs --verify",
+    "test:packaging": "node --test tests/windowsDependencyOverlay.packaging.mjs"
   },
   "dependencies": {
     "@pocketshell/core": "file:../pocketshell-core",
-    "commander": "^12.1.0",
-    "ws": "^8.18.0",
+    "commander": "12.1.0",
+    "ws": "8.22.0",
     "@lydell/node-pty": "1.2.0-beta.15"
   },
   "devDependencies": {
@@ -33,5 +39,8 @@
     "tsx": "^4.19.2",
     "typescript": "5.7.2",
     "vitest": "2.1.8"
-  }
+  },
+  "bundleDependencies": [
+    "@pocketshell/core"
+  ]
 }
