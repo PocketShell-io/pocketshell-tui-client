@@ -12,7 +12,7 @@ import { request as httpRequest, Agent as HttpAgent } from 'node:http';
 import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
 import { DEVICE_ID_RE, devicesUrl, type GatewayEndpoint } from './endpoint.js';
 import { parseHostKey, type HostKey } from './pins.js';
-import { isPlainObject, parseStrictJson, sanitizeRemoteText } from './text.js';
+import { isPlainObject, parseStrictJson, sanitizeRemoteText, type StrictJson } from './text.js';
 
 export const HTTP_TIMEOUT_MS = 15_000;
 export const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -27,6 +27,13 @@ export class DevicesError extends Error {
   }
 }
 
+export interface DevicePresence {
+  online: boolean;
+  observed_at: string | null;
+  connected_since: string | null;
+  session_generation: number | null;
+}
+
 export interface DeviceInfo {
   /** Raw from the gateway; print `displayId`. */
   id: string;
@@ -34,6 +41,20 @@ export interface DeviceInfo {
   displayId: string;
   revoked: boolean;
   advertisedKey: HostKey | null;
+  presence: DevicePresence | null;
+}
+
+function parsePresence(raw: StrictJson | undefined): DevicePresence | null {
+  if (raw === undefined || !isPlainObject(raw) || typeof raw.online !== 'boolean') return null;
+  const observedAt = typeof raw.observed_at === 'string' ? sanitizeRemoteText(raw.observed_at, 64) : null;
+  const connectedSince = typeof raw.connected_since === 'string' ? sanitizeRemoteText(raw.connected_since, 64) : null;
+  const sessionGeneration = typeof raw.session_generation === 'number' ? raw.session_generation : null;
+  return {
+    online: raw.online,
+    observed_at: observedAt,
+    connected_since: connectedSince,
+    session_generation: sessionGeneration,
+  };
 }
 
 export function parseDevices(body: Buffer): DeviceInfo[] {
@@ -67,7 +88,15 @@ export function parseDevices(body: Buffer): DeviceInfo[] {
     } catch {
       advertisedKey = null;
     }
-    return { id, idValid, displayId: idValid ? id : sanitizeRemoteText(id, 64), revoked: item.revoked as boolean, advertisedKey };
+    const presence = parsePresence(item.presence);
+    return {
+      id,
+      idValid,
+      displayId: idValid ? id : sanitizeRemoteText(id, 64),
+      revoked: item.revoked as boolean,
+      advertisedKey,
+      presence,
+    };
   });
 }
 

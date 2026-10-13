@@ -1,3 +1,7 @@
 node_modules/
 dist/
 .fixture-*/
+dist-bundle/
+.tmp/
+*.log
+*.tgz

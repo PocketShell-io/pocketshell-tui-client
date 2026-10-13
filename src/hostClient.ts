@@ -8,9 +8,14 @@
  * `capture` — which agents need to drive a session without attaching.
  */
 import {
+  BP_END,
+  BP_START,
+  frameForPaste,
   HostCliCore,
+  needsBracketedPaste,
   pathAwareCommand,
   shellQuote,
+  SUBMIT_KEY,
   type CreatedSession,
   type HostEngineInfo,
   type HostProfileInfo,
@@ -23,6 +28,33 @@ import { HostStoreError, validateBinary, validateHostEntry, type HostEntry } fro
 import { NativeWindowsHost } from './nativeWindowsHost.js';
 import type { Connection, ExecOutcome } from './transport/types.js';
 
+export { BP_END, BP_START, frameForPaste, needsBracketedPaste, SUBMIT_KEY };
+
+export interface EncodedSendPayload {
+  /** The text framed for the PTY (wrapped in ESC[200~ … ESC[201~ when multi-line). */
+  framed: string;
+  /** The full byte stream including trailing CR when `enter` is true. */
+  bytes: string;
+  /** True when the input contained a line break and was wrapped in bracketed paste. */
+  bracketed: boolean;
+  /** True when Enter (CR) is sent after the text. */
+  enter: boolean;
+}
+
+/**
+ * Encode a message for PTY delivery: multi-line text is wrapped in bracketed
+ * paste (`ESC[200~ … ESC[201~`) so an agent REPL ingests it as one message
+ * rather than submitting every line; `enter` appends CR (`\r`) after `ESC[201~`.
+ */
+export function encodeSendPayload(text: string, options: { enter?: boolean } = {}): EncodedSendPayload {
+  const enter = Boolean(options.enter);
+  const bracketed = needsBracketedPaste(text);
+  const framed = frameForPaste(text);
+  const bytes = enter ? `${framed}${SUBMIT_KEY}` : framed;
+  return { framed, bytes, bracketed, enter };
+}
+
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
@@ -31,7 +63,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * `Running scope as unit: …`). It is noise, never the answer: drop such
  * lines from the start of host text.
  */
-const SYSTEMD_NOISE = /^\s*Running (?:scope )?as unit:? .*$/;
+const SYSTEMD_NOISE = /^\s*(?:Running (?:scope )?as unit:? .*|(?:in)?vocation ID: [0-9a-f]{16,64})\s*$/;
 
 export function stripSystemdNoise(text: string): string {
   const lines = text.split('\n');
@@ -143,7 +175,12 @@ export class HostClient {
     }
     this.cli = new HostCliCore(
       {
-        exec: (command, timeoutMs) => this.run(command, timeoutMs),
+        exec: (command, timeoutMs) => {
+          const expanded = command
+            .replace(/--cwd '~'/, '--cwd "$HOME"')
+            .replace(/--cwd '~\//, '--cwd "$HOME"/\'');
+          return this.run(expanded, timeoutMs);
+        },
       },
       binary,
     );
@@ -282,11 +319,21 @@ export class HostClient {
     return this.cli.removeWorkspace(this.connection.hostName, path);
   }
 
-  /** Type into a session without attaching: `a send <id> --stdin [--enter]`. */
+  /**
+   * Type into a session without attaching: `a send <id> --stdin [--enter]`.
+   * Multi-line payloads are wrapped in bracketed paste (`ESC[200~ … ESC[201~`)
+   * and when `enter` is true, CR is sent after a brief pause so TUI agents
+   * (Claude, Codex) ingest the paste before submitting.
+   */
   async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<void> {
     if (this.native) this.native.unsupported('session send (not advertised by the reviewed native CLI)');
     const target = shellQuote(session.id ?? session.name);
-    await this.runChecked(`a send ${target} --stdin${options.enter ? ' --enter' : ''}`, DEFAULT_TIMEOUT_MS, text);
+    const encoded = encodeSendPayload(text, options);
+    if (encoded.bracketed && encoded.enter) {
+      await this.runChecked(`a send ${target} --stdin && sleep 0.15 && a send ${target} --hex 0d`, DEFAULT_TIMEOUT_MS, encoded.framed);
+      return;
+    }
+    await this.runChecked(`a send ${target} --stdin${encoded.enter ? ' --enter' : ''}`, DEFAULT_TIMEOUT_MS, encoded.framed);
   }
 
   /** What the session shows right now (`--screen --plain`) or its recent raw output. */

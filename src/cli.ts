@@ -6,6 +6,7 @@
  * as a subcommand with `--json`, so agents and scripts get the same reach.
  */
 import { Command, CommanderError } from 'commander';
+import { dispatchA, registerA } from './commands/a.js';
 import { registerAccount } from './commands/account.js';
 import { registerGateway } from './commands/gateway.js';
 import { registerHosts } from './commands/hosts.js';
@@ -13,6 +14,13 @@ import { registerCatalog, registerExec, registerSessions, registerWorkspaces } f
 import { fail, setJsonMode, usageError } from './output.js';
 import { runTui } from './tui/index.js';
 import { VERSION } from './version.js';
+
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EPIPE') return;
+    throw error;
+  });
+}
 
 const program = new Command();
 program
@@ -40,6 +48,7 @@ program
     process.exitCode = await runTui(opts);
   });
 
+registerA(program);
 registerHosts(program);
 registerSessions(program);
 registerWorkspaces(program);
@@ -80,6 +89,11 @@ async function main(): Promise<void> {
     program.outputHelp();
     return;
   }
+  if (args[0] === 'a' || (args[0] === '--json' && args[1] === 'a')) {
+    const aIndex = args.indexOf('a');
+    await dispatchA(args.slice(aIndex + 1));
+    return;
+  }
   await program.parseAsync(process.argv);
 }
 
@@ -98,3 +112,4 @@ main().catch((error: unknown) => {
   }
   process.exitCode = fail(error);
 });
+

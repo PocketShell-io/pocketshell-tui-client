@@ -13,13 +13,15 @@
     "dist",
     "scripts/apply-windows-pty-overlay.mjs",
     "vendor/windows-pty-overlay",
-    "docs/windows-release.md"
+    "docs/windows-release.md",
+    "dist-bundle"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "bundle": "node scripts/bundle.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "dev": "node --import tsx src/cli.ts",
@@ -36,6 +38,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.13",
+    "esbuild": "^0.28.2",
     "tsx": "^4.19.2",
     "typescript": "5.7.2",
     "vitest": "2.1.8"

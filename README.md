@@ -44,7 +44,8 @@ and `--json`.
 
 ```text
 psc                                   interactive UI (same as `psc tui`)
-psc hosts list|add|remove|default|check
+psc a ...                             remote aplexer command family (see below)
+psc hosts list|add|alias|sync|remove|default|check
 psc sessions list                     sessions on the host
 psc sessions create NAME [-C DIR] [-e ENGINE] [--profile P] [--attach]
 psc sessions send SESSION [TEXT] [--enter]   type into a session (stdin when TEXT is - or omitted)
@@ -58,6 +59,50 @@ psc exec [-t SECONDS] -- COMMAND...   run a command on the host
 psc login | logout | whoami           PocketShell account (device flow)
 psc gateway devices|pin|unpin         gateway hosts and their pinned keys
 ```
+
+## Remote aplexer (`psc a`)
+
+`psc a` is a short, predictable command family for non-interactively driving
+agent sessions across your hosts (plain text by default, `--json` everywhere,
+same exit-code contract):
+
+```text
+psc a hosts [--check]                 saved hosts (presence online/offline; --check pings each in parallel)
+psc a <host> ls                       sessions on <host> (name, engine, state, workspace) — plain table
+psc a <host> start <tag> [-C DIR] [-e ENGINE] [--profile P] [--prompt TEXT | --prompt -] [--ready-timeout S]
+psc a <host> send <session> [TEXT|-] [--no-enter]
+psc a <host> capture <session> [--lines N] [--wait-for RE] [--timeout S] [--raw]
+psc a <host> wait <session> [--idle S] [--timeout S]
+psc a <host> stop <session> [--if-exists]
+psc a <host> status <session>
+```
+
+`<host>` accepts an exact saved host name (or `local`), an enrolled gateway
+device id (`hetzner-rmthz`, `host-laptop-…`), or a unique case-insensitive
+prefix/substring (`hetzner`, `laptop`, `desktop`). Ambiguous selectors fail with
+`HOST_AMBIGUOUS` (exit 2) and list the matching candidates.
+
+```bash
+# Populate saved gateway hosts from enrolled account devices (and optionally TOFU-pin keys):
+psc hosts sync --user alexey --trust-advertised
+psc hosts alias win35 desktop
+
+# Inspect hosts (online/offline from broker presence, or --check for full SSH + version probes):
+psc a hosts
+psc a hosts --check
+
+# Start or reuse a session, wait for readiness, and submit an initial prompt:
+psc a hetzner start e2e-test -C '~/git/project' -e claude --prompt 'reply with just the word PONG'
+psc a hetzner wait e2e-test --timeout 60
+psc a hetzner capture e2e-test --wait-for PONG --lines 15
+
+# Send a multi-line prompt as one bracketed-paste message and submit (Enter is default):
+printf 'line1\nline2: reply LINES-OK\n' | psc a hetzner send e2e-test
+psc a hetzner capture e2e-test --wait-for LINES-OK --lines 20
+psc a hetzner status e2e-test
+psc a hetzner stop e2e-test --if-exists
+```
+
 
 ### Sessions: names and selectors
 
@@ -172,6 +217,7 @@ psc -H box sessions list --json                # agentState: working / waiting /
 
 ```bash
 npm run build       # dist/
+npm run bundle      # dist-bundle/psc.mjs (standalone single-file bundle + npm pack tarball)
 npm run typecheck
 npm test            # vitest
 ```

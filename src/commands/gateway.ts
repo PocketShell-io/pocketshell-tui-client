@@ -105,22 +105,25 @@ export function registerGateway(program: Command): void {
         id: dev.idValid ? dev.id : dev.displayId,
         id_valid: dev.idValid,
         revoked: dev.revoked,
+        online: dev.presence ? dev.presence.online : null,
+        presence: dev.presence,
         advertised_fingerprint: dev.advertisedKey ? fingerprint(dev.advertisedKey) : null,
         pinned_fingerprint: pinState(dev).fp,
         pin_state: pinState(dev).state,
       }));
       emit({ ok: true, gateway: endpoint.host, devices: rows }, () => {
         if (!listed.length) return 'no devices enrolled under this account';
-        const table: string[][] = [['DEVICE', 'STATE', 'ADVERTISED HOST KEY (UNTRUSTED)', 'LOCAL PIN']];
+        const table: string[][] = [['DEVICE', 'STATE', 'PRESENCE', 'ADVERTISED HOST KEY (UNTRUSTED)', 'LOCAL PIN']];
         listed.forEach((dev, i) => {
           const advertised = dev.advertisedKey ? `${fingerprint(dev.advertisedKey)} (${keyLabel(dev.advertisedKey)})` : '-';
           let state = dev.revoked ? 'revoked' : 'active';
           if (!dev.idValid) state += ', invalid id';
-          table.push([dev.displayId, state, advertised, rows[i]!.pin_state]);
+          const presence = dev.presence === null ? '-' : dev.presence.online ? 'online' : 'offline';
+          table.push([dev.displayId, state, presence, advertised, rows[i]!.pin_state]);
         });
-        const widths = [0, 1, 2].map((c) => Math.max(...table.map((r) => r[c]!.length)));
+        const widths = [0, 1, 2, 3].map((c) => Math.max(...table.map((r) => r[c]!.length)));
         return [
-          ...table.map((r) => `${[0, 1, 2].map((c) => r[c]!.padEnd(widths[c]!)).join('  ')}  ${r[3]}`),
+          ...table.map((r) => `${[0, 1, 2, 3].map((c) => r[c]!.padEnd(widths[c]!)).join('  ')}  ${r[4]}`),
           '',
           'Advertised keys come from the gateway and are never trusted. Pin the key printed by',
           '`pocketshell gateway show --host-key` on the host: `pocketshell-tui-client gateway pin <id>`.',

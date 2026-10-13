@@ -1,21 +1,27 @@
 /** `hosts list|add|remove|default|check`: the saved host inventory. */
 import { InvalidArgumentError, type Command } from 'commander';
+import { mintGatewayToken } from '../account/index.js';
+import { fetchDevices } from '../gateway/devices.js';
+import { DEFAULT_SERVER, resolveEndpoint } from '../gateway/endpoint.js';
+import { addPin, fingerprint, loadPins, type HostKey } from '../gateway/pins.js';
 import { HostClient } from '../hostClient.js';
 import {
   addHost,
   defaultHostName,
+  friendlyHostName,
   getHost,
   listHosts,
+  pickHost,
   removeHost,
   setDefaultHost,
   type HostEntry,
 } from '../hosts/store.js';
-import { emit, EXIT, setJsonMode, usageError } from '../output.js';
+import { emit, EXIT, note, setJsonMode, usageError } from '../output.js';
 import { safeLine } from '../sanitize.js';
 import { openConnection } from '../transport/index.js';
 import { action, jsonOption } from './common.js';
 
-function describe(host: HostEntry): string {
+export function describeHost(host: HostEntry): string {
   switch (host.mode) {
     case 'local':
       return 'this machine';
@@ -48,7 +54,7 @@ export function registerHosts(program: Command): void {
       const def = defaultHostName();
       const rows = listHosts().map((host) => ({ ...host, default: host.name === (def ?? 'local') }));
       emit({ ok: true, hosts: rows }, () =>
-        rows.map((row) => `${row.default ? '*' : ' '} ${row.name.padEnd(20)} ${describe(row)}`).join('\n'),
+        rows.map((row) => `${row.default ? '*' : ' '} ${row.name.padEnd(20)} ${describeHost(row)}`).join('\n'),
       );
     }),
   );
@@ -132,7 +138,130 @@ export function registerHosts(program: Command): void {
         }
         addHost(entry, { replace: opts.replace });
         if (opts.default) setDefaultHost(name);
-        emit({ ok: true, host: entry }, () => `saved ${name}: ${describe(entry)}`);
+        emit({ ok: true, host: entry }, () => `saved ${name}: ${describeHost(entry)}`);
+      },
+    ),
+  );
+
+  jsonOption(
+    hosts
+      .command('alias <alias> <host>')
+      .description('save <alias> pointing to the same target as <host> (e.g. `psc hosts alias win35 desktop`)')
+      .option('--replace', 'overwrite an existing host of the same name'),
+  ).action(
+    action(async (alias: string, targetSelector: string, opts: { replace?: boolean; json?: boolean }) => {
+      if (opts.json) setJsonMode(true);
+      const target = pickHost(listHosts(), targetSelector);
+      const entry: HostEntry = {
+        ...target,
+        name: alias,
+        ...(target.ssh ? { ssh: { ...target.ssh } } : {}),
+        ...(target.gateway ? { gateway: { ...target.gateway } } : {}),
+      };
+      addHost(entry, { replace: opts.replace });
+      emit({ ok: true, host: entry, target: target.name }, () => `saved ${alias} -> ${target.name} (${describeHost(entry)})`);
+    }),
+  );
+
+  jsonOption(
+    hosts
+      .command('sync')
+      .description('add saved gateway hosts for enrolled account devices (`hetzner-rmthz` → `hetzner`, `host-laptop-…` → `laptop`)')
+      .option(
+        '--trust-advertised',
+        'pin the broker-advertised SSH host key for unpinned devices (TOFU through the broker; otherwise use `gateway pin` with `pocketshell gateway show --host-key`)',
+      )
+      .option('-l, --user <user>', 'SSH login name to set on newly added gateway hosts')
+      .option('--server <origin>', `gateway origin, wss://host[:port] (default: ${DEFAULT_SERVER})`)
+      .option('--insecure-dev', 'DEV ONLY: allow plain ws:// to a loopback or single-label docker host')
+      .addHelpText(
+        'after',
+        '\nNote on --trust-advertised: pins the full SSH host key advertised through the broker\n' +
+          '(Trust On First Use via the broker). Without --trust-advertised, unpinned devices are\n' +
+          'listed so you can verify and pin them out of band with `psc gateway pin <device-id>`.',
+      ),
+  ).action(
+    action(
+      async (opts: {
+        trustAdvertised?: boolean;
+        user?: string;
+        server?: string;
+        insecureDev?: boolean;
+        json?: boolean;
+      }) => {
+        if (opts.json) setJsonMode(true);
+        const endpoint = resolveEndpoint(opts.server, Boolean(opts.insecureDev));
+        if (endpoint.warning) process.stderr.write(`${endpoint.warning}\n`);
+        const token = await mintGatewayToken();
+        const devices = await fetchDevices(endpoint, token);
+        let pins = new Map<string, HostKey>();
+        try {
+          pins = loadPins();
+        } catch (error) {
+          note(`warning: ignoring pin file: ${(error as Error).message}`);
+        }
+        const current = listHosts();
+        const takenNames = new Set(current.map((h) => h.name));
+        const byDeviceId = new Map<string, HostEntry>();
+        for (const h of current) {
+          if (h.mode === 'gateway' && h.gateway?.deviceId && !byDeviceId.has(h.gateway.deviceId)) {
+            byDeviceId.set(h.gateway.deviceId, h);
+          }
+        }
+        const added: HostEntry[] = [];
+        const existing: HostEntry[] = [];
+        const pinned: Array<{ deviceId: string; fingerprint: string }> = [];
+        const unpinned: Array<{ deviceId: string; host: string; advertisedFingerprint: string | null }> = [];
+
+        for (const dev of devices) {
+          if (!dev.idValid || dev.revoked) continue;
+          let hostEntry = byDeviceId.get(dev.id);
+          if (hostEntry) {
+            existing.push(hostEntry);
+          } else {
+            const name = friendlyHostName(dev.id, takenNames);
+            takenNames.add(name);
+            hostEntry = addHost({
+              name,
+              mode: 'gateway',
+              gateway: {
+                deviceId: dev.id,
+                ...(opts.user ? { user: opts.user } : {}),
+                ...(opts.server ? { server: opts.server } : {}),
+              },
+            });
+            byDeviceId.set(dev.id, hostEntry);
+            added.push(hostEntry);
+          }
+          const hasPin = pins.has(dev.id);
+          if (!hasPin) {
+            if (opts.trustAdvertised && dev.advertisedKey) {
+              addPin(dev.id, dev.advertisedKey);
+              pins.set(dev.id, dev.advertisedKey);
+              pinned.push({ deviceId: dev.id, fingerprint: fingerprint(dev.advertisedKey) });
+            } else {
+              unpinned.push({
+                deviceId: dev.id,
+                host: hostEntry.name,
+                advertisedFingerprint: dev.advertisedKey ? fingerprint(dev.advertisedKey) : null,
+              });
+            }
+          }
+        }
+
+        emit({ ok: true, added, existing, pinned, unpinned }, () => {
+          const lines: string[] = [];
+          for (const h of added) lines.push(`added ${h.name} (${describeHost(h)})`);
+          for (const h of existing) lines.push(`kept  ${h.name} (${describeHost(h)})`);
+          for (const p of pinned) lines.push(`pinned (TOFU) ${p.deviceId}: ${p.fingerprint}`);
+          if (unpinned.length > 0) {
+            lines.push(
+              `unpinned devices (run \`psc gateway pin <device-id>\` or \`psc hosts sync --trust-advertised\`): ` +
+                unpinned.map((u) => `${u.host} (${u.deviceId})`).join(', '),
+            );
+          }
+          return lines.length > 0 ? lines.join('\n') : 'no active gateway devices found';
+        });
       },
     ),
   );
@@ -187,7 +316,7 @@ export function registerHosts(program: Command): void {
         };
         emit(result, () =>
           [
-            `${name} (${describe(host)}) reachable in ${ms} ms`,
+            `${name} (${describeHost(host)}) reachable in ${ms} ms`,
             `pocketshell: ${versions.pocketshell === null ? 'MISSING — install with `uv tool install pocketshell`' : safeLine(versions.pocketshell)}`,
             `aplexer:     ${versions.aplexer === null ? 'missing' : safeLine(versions.aplexer)}`,
           ].join('\n'),
@@ -199,3 +328,4 @@ export function registerHosts(program: Command): void {
     }),
   );
 }
+

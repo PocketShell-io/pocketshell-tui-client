@@ -21,7 +21,8 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { requireLogin } from '../account/index.js';
+import { mintGatewayToken, requireLogin } from '../account/index.js';
+import { fetchDevices } from '../gateway/devices.js';
 import { DEFAULT_SERVER, EndpointError, hostKeyAlias, legacyHostKeyAlias, resolveEndpoint, validateDeviceId, type GatewayEndpoint } from '../gateway/endpoint.js';
 import { PinError, pinFilePath, requirePinEntry } from '../gateway/pins.js';
 import type { GatewayHostConfig } from '../hosts/store.js';
@@ -105,8 +106,9 @@ function checkProxyElement(value: string): string {
 
 /**
  * How to start this very CLI again: `[node, (--import tsx-loader,) cli]`.
- * Built: dist/transport/gateway.js → dist/cli.js. Dev (tsx): src/transport/
- * gateway.ts → src/cli.ts, run through tsx's loader by absolute path.
+ * Built: dist/transport/gateway.js → dist/cli.js. Bundle: dist-bundle/psc.mjs.
+ * Dev (tsx): src/transport/gateway.ts → src/cli.ts, run through tsx's loader
+ * by absolute path.
  */
 export function cliInvocation(): string[] {
   if(process.platform==='win32') { const b=bindings();
@@ -117,6 +119,7 @@ export function cliInvocation(): string[] {
   const candidates: string[] = [];
   try {
     const here = fileURLToPath(import.meta.url);
+    candidates.push(here);
     const root = dirname(dirname(here));
     candidates.push(join(root, 'cli.js'), join(root, 'cli.ts'));
   } catch {
@@ -130,8 +133,8 @@ export function cliInvocation(): string[] {
     }
   }
   for (const script of candidates) {
-    if (!/\/cli\.(js|ts)$/.test(script) || !existsSync(script)) continue;
-    if (script.endsWith('.js')) return [node, script];
+    if (!/\/(cli\.(js|ts)|psc\.mjs)$/.test(script) || !existsSync(script)) continue;
+    if (script.endsWith('.js') || script.endsWith('.mjs')) return [node, script];
     try {
       const loader = createRequire(script).resolve('tsx');
       return [node, '--import', loader, script];
@@ -232,6 +235,33 @@ const HINTS: Partial<Record<string, string>> = {
   AUTH_FAILED: 'the host did not accept your SSH key (-i / the default ~/.ssh/id_* files; agent-only keys are not offered)',
 };
 
+export function hostOfflineDetail(presenceOnline: boolean): string {
+  return presenceOnline
+    ? 'host agent is connected but could not reach its local sshd (start OpenSSH Server / sshd on the host)'
+    : 'host agent not connected (pocketshell gateway run / pocketshell-link not running on the host)';
+}
+
+export async function enrichHostOffline(
+  failure: ConnectionError,
+  hostName: string,
+  deviceId: string,
+  endpoint: GatewayEndpoint,
+): Promise<ConnectionError> {
+  if (failure.code !== 'HOST_OFFLINE') return failure;
+  try {
+    const token = await mintGatewayToken();
+    const devices = await fetchDevices(endpoint, token, 5_000);
+    const dev = devices.find((d) => d.id === deviceId);
+    if (dev?.presence) {
+      const detail = hostOfflineDetail(dev.presence.online);
+      return new ConnectionError(`${hostName}: ${detail}`, 'HOST_OFFLINE', failure.exitCode, { detail });
+    }
+  } catch {
+    /* keep the base HOST_OFFLINE message when presence cannot be queried */
+  }
+  return failure;
+}
+
 export class GatewayConnection implements Connection {
   readonly mode = 'gateway' as const;
 
@@ -270,7 +300,9 @@ export class GatewayConnection implements Connection {
       controlPath: null,
       statusFile,
     });
-    if (failure) throw failure;
+    if (failure) {
+      throw await enrichHostOffline(failure, this.hostName, this.argvInput.deviceId, this.argvInput.endpoint);
+    }
     return outcome;
   }
 
@@ -285,7 +317,14 @@ export class GatewayConnection implements Connection {
     const statusFile = this.statusFile();
     const code = await runInteractive(this.sshPath, this.argv('attach', command, statusFile), sshEnvironment(), options);
     const status = readStatusFile(statusFile);
-    if (code === SSH_FAILURE_EXIT && status) throw proxyFailure(status, this.context());
+    if (code === SSH_FAILURE_EXIT && status) {
+      throw await enrichHostOffline(
+        proxyFailure(status, this.context()),
+        this.hostName,
+        this.argvInput.deviceId,
+        this.argvInput.endpoint,
+      );
+    }
     return code;
   }
 

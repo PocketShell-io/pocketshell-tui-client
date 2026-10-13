@@ -106,13 +106,25 @@ function detailsOf(error: unknown): Record<string, unknown> | undefined {
 /** A core HostCliFailed message whose detail is systemd-run's banner gets the real stderr line instead. */
 function hostCliMessage(error: HostCliError): string {
   if (!(error instanceof HostCliFailed) || !/Running (?:scope )?as unit/.test(error.message)) return error.message;
-  const detail = stripSystemdNoise(error.stderr).split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-  return `\`${error.command}\` failed on the host (exit ${error.exitCode})${detail ? `: ${detail.slice(0, 200)}` : '.'}`;
+  const fromStderr = stripSystemdNoise(error.stderr).split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  if (fromStderr) {
+    return `\`${error.command}\` failed on the host (exit ${error.exitCode}): ${fromStderr.slice(0, 200)}`;
+  }
+  const cleanedMsg = error.message
+    .split('\n')
+    .filter((line) => !/Running (?:scope )?as unit:? /.test(line))
+    .join('\n')
+    .replace(/Running (?:scope )?as unit:? [^\n]*\n?/, '')
+    .trim();
+  return cleanedMsg || `\`${error.command}\` failed on the host (exit ${error.exitCode}).`;
 }
 
 function classifyOne(error: unknown): Classified | null {
   const message = error instanceof Error ? error.message : String(error);
-  if (error instanceof ConnectionError) return { code: error.code, message, exit: error.exitCode };
+  if (error instanceof ConnectionError) {
+    const details = detailsOf(error);
+    return { code: error.code, message, exit: error.exitCode, ...(details ? { details } : {}) };
+  }
   if (error instanceof HostStoreError) return { code: 'HOST_STORE', message, exit: EXIT.USAGE };
   if (error instanceof HostCliError) {
     if (error instanceof HostCliFailed && error.timedOut) {
@@ -126,6 +138,7 @@ function classifyOne(error: unknown): Classified | null {
   const fixed: Record<string, number> = {
     SESSION_NOT_FOUND: EXIT.NOT_FOUND,
     SESSION_AMBIGUOUS: EXIT.NOT_FOUND,
+    HOST_AMBIGUOUS: EXIT.USAGE,
     NOT_LOGGED_IN: EXIT.NOT_LOGGED_IN,
     USAGE: EXIT.USAGE,
     TIMEOUT: EXIT.TIMEOUT,

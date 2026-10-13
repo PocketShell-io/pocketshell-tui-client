@@ -53,8 +53,10 @@ export class ConnectionError extends Error {
     readonly code: string,
     /** Suggested process exit status for the CLI. */
     readonly exitCode = 4,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'ConnectionError';
   }
 }
+

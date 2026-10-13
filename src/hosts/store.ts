@@ -210,3 +210,120 @@ export function setDefaultHost(name: string | null): void {
   else data.default = name;
   write(data);
 }
+
+/** A host selector matched more than one host; `details.candidates` lists them. */
+export class HostAmbiguous extends Error {
+  readonly code = 'HOST_AMBIGUOUS';
+  readonly exitCode = 2;
+  readonly details: { candidates: Array<{ name: string; id: string | null; deviceId: string | null }> };
+  constructor(selector: string, rows: readonly HostEntry[]) {
+    const candidates = rows.map((row) => {
+      const deviceId = row.gateway?.deviceId ?? null;
+      return { name: row.name, id: deviceId, deviceId };
+    });
+    super(
+      `${JSON.stringify(selector)} matches ${candidates.length} hosts: ` +
+        `${candidates.map((c) => (c.deviceId && c.deviceId !== c.name ? `${c.name} (${c.deviceId})` : c.name)).join(', ')} — use the full name or device id`,
+    );
+    this.name = 'HostAmbiguous';
+    this.details = { candidates };
+  }
+}
+
+/**
+ * Derive a short friendly host name from an enrolled gateway device id:
+ * `hetzner-rmthz` → `hetzner`, `host-laptop-pha6tcnc-75fu` → `laptop`,
+ * `host-desktop-fp4op26-venv` → `desktop`. Falls back to `deviceId` when
+ * the derived name is reserved (`local`), invalid, or already in `takenNames`.
+ */
+export function friendlyHostName(deviceId: string, takenNames: ReadonlySet<string> = new Set()): string {
+  let base = deviceId;
+  const hadHostPrefix = /^host-/i.test(base);
+  if (hadHostPrefix && base.length > 5) {
+    base = base.slice(5);
+  }
+  if (hadHostPrefix) {
+    const twoSuffix = /^(.+)-[A-Za-z0-9]{3,12}-[A-Za-z0-9]{3,12}$/.exec(base);
+    if (twoSuffix?.[1]) base = twoSuffix[1];
+    else {
+      const oneSuffix = /^(.+)-[A-Za-z0-9]{3,12}$/.exec(base);
+      if (oneSuffix?.[1]) base = oneSuffix[1];
+    }
+  } else {
+    const oneSuffix = /^(.+)-[A-Za-z0-9]{3,12}$/.exec(base);
+    if (oneSuffix?.[1]) base = oneSuffix[1];
+  }
+  const candidate = base.toLowerCase();
+  if (candidate === LOCAL_HOST_NAME || !NAME_RE.test(candidate) || takenNames.has(candidate)) {
+    return deviceId;
+  }
+  return candidate;
+}
+
+function dedupeHostsByTarget(rows: readonly HostEntry[], matchedByName: (h: HostEntry) => boolean): HostEntry[] {
+  const out: HostEntry[] = [];
+  const seenKeys = new Set<string>();
+  for (const row of rows) {
+    const key = matchedByName(row)
+      ? `name:${row.name}`
+      : row.mode === 'gateway' && row.gateway?.deviceId
+        ? `gw:${row.gateway.deviceId}`
+        : row.mode === 'ssh' && row.ssh?.destination
+          ? `ssh:${row.ssh.user ?? ''}@${row.ssh.destination}:${row.ssh.port ?? ''}`
+          : `name:${row.name}`;
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      out.push(row);
+    }
+  }
+  return out;
+}
+
+/**
+ * Resolve a `<host>` argument:
+ * 1. exact saved host name (including `local`);
+ * 2. exact gateway device id;
+ * 3. case-insensitive exact saved host name or gateway device id;
+ * 4. unique case-insensitive prefix of saved host name or gateway device id;
+ * 5. unique case-insensitive substring of saved host name or gateway device id.
+ */
+export function pickHost(hosts: readonly HostEntry[], selector: string): HostEntry {
+  const trimmed = selector.trim();
+  if (!trimmed) throw new HostStoreError('host name must not be empty');
+
+  const exactName = hosts.find((h) => h.name === trimmed);
+  if (exactName) return exactName;
+
+  const exactDevice = dedupeHostsByTarget(
+    hosts.filter((h) => h.gateway?.deviceId === trimmed),
+    () => false,
+  );
+  if (exactDevice.length === 1) return exactDevice[0]!;
+  if (exactDevice.length > 1) throw new HostAmbiguous(trimmed, exactDevice);
+
+  const lower = trimmed.toLowerCase();
+
+  const ciExact = dedupeHostsByTarget(
+    hosts.filter((h) => h.name.toLowerCase() === lower || h.gateway?.deviceId.toLowerCase() === lower),
+    (h) => h.name.toLowerCase() === lower,
+  );
+  if (ciExact.length === 1) return ciExact[0]!;
+  if (ciExact.length > 1) throw new HostAmbiguous(trimmed, ciExact);
+
+  const prefix = dedupeHostsByTarget(
+    hosts.filter((h) => h.name.toLowerCase().startsWith(lower) || (h.gateway?.deviceId.toLowerCase().startsWith(lower) ?? false)),
+    (h) => h.name.toLowerCase().startsWith(lower),
+  );
+  if (prefix.length === 1) return prefix[0]!;
+  if (prefix.length > 1) throw new HostAmbiguous(trimmed, prefix);
+
+  const substring = dedupeHostsByTarget(
+    hosts.filter((h) => h.name.toLowerCase().includes(lower) || (h.gateway?.deviceId.toLowerCase().includes(lower) ?? false)),
+    (h) => h.name.toLowerCase().includes(lower),
+  );
+  if (substring.length === 1) return substring[0]!;
+  if (substring.length > 1) throw new HostAmbiguous(trimmed, substring);
+
+  throw new HostStoreError(`no saved host matches ${JSON.stringify(trimmed)} (see \`hosts list\`)`);
+}
+
