@@ -277,14 +277,18 @@ export interface WaitIdleResult {
  *   `sessions list` JSON;
  * - otherwise falls back to waiting until the rendered screen is unchanged for
  *   `idleS` seconds (default 5).
+ * An idle/waiting agent state only counts once the agent has been seen
+ * working or `settleS` seconds (default 3) have passed, so `send` followed
+ * at once by `wait` does not return before the agent has picked the prompt up.
  * Throws CliError('TIMEOUT', ..., 124) on timeout.
  */
 export async function waitForSessionIdle(
   client: Pick<HostClient, 'resolveSession' | 'capture'>,
   selector: string,
-  options: { idleS?: number; timeoutS?: number; pollMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
+  options: { idleS?: number; settleS?: number; timeoutS?: number; pollMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
 ): Promise<WaitIdleResult> {
   const idleS = options.idleS ?? 5;
+  const settleS = options.settleS ?? 3;
   const timeoutS = options.timeoutS ?? 300;
   const pollMs = options.pollMs ?? 1000;
   const pause = options.sleepFn ?? sleep;
@@ -294,6 +298,7 @@ export async function waitForSessionIdle(
   let lastScreen: string | null = null;
   let unchangedSince = started;
   let lastRow: SessionRow | null = null;
+  let seenWorking = false;
 
   for (;;) {
     const row = await client.resolveSession(selector);
@@ -305,10 +310,12 @@ export async function waitForSessionIdle(
     }
 
     if (row.agentState !== null) {
-      if (row.agentState === 'idle' || row.agentState === 'waiting') {
+      const settled = seenWorking || now - started >= settleS * 1000;
+      if ((row.agentState === 'idle' || row.agentState === 'waiting') && settled) {
         return { row, state: row.agentState, reason: 'agent_state', elapsedMs: now - started };
       }
-      // agentState === 'working': reset screen idle timer and keep polling.
+      // working (or idle but not yet settled): reset the screen idle timer and keep polling.
+      if (row.agentState === 'working') seenWorking = true;
       lastScreen = null;
       unchangedSince = now;
     } else {
@@ -683,13 +690,15 @@ export function buildHostVerbProgram(hostSelector: string): Command {
       .command('wait <session>')
       .description("block until the session's agent is idle/waiting (exit 124 on timeout)")
       .option('--idle <seconds>', 'fallback screen-unchanged duration when agent state is not reported', parseSeconds, 5)
+      .option('--settle <seconds>', 'ignore an idle agent state until the agent was seen working or this long has passed', parseSeconds, 3)
       .option('--timeout <seconds>', 'give up after this many seconds (exit 124)', parseSeconds, 300),
   ).action(
-    action(async (selector: string, opts: { idle: number; timeout: number; json?: boolean }) => {
+    action(async (selector: string, opts: { idle: number; settle: number; timeout: number; json?: boolean }) => {
       if (opts.json) setJsonMode(true);
       await withResolvedHost(hostSelector, async (client, host) => {
         const result = await waitForSessionIdle(client, selector, {
           idleS: opts.idle,
+          settleS: opts.settle,
           timeoutS: opts.timeout,
         });
         emit(

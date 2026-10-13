@@ -320,6 +320,35 @@ describe('waitForAgentReady and waitForSessionIdle', () => {
     expect(idx).toBe(3);
   });
 
+  it('waitForSessionIdle ignores an idle state seen before the agent picked the prompt up', async () => {
+    const seq: Array<'idle' | 'working'> = ['idle', 'idle', 'working', 'idle'];
+    let idx = 0;
+    const res = await waitForSessionIdle(
+      {
+        resolveSession: async () => makeRow({ agentState: seq[Math.min(idx++, seq.length - 1)]! }),
+        capture: async () => 'screen',
+      },
+      'proj:work',
+      { timeoutS: 5, pollMs: 1, sleepFn: async () => {} },
+    );
+    expect(res).toMatchObject({ state: 'idle', reason: 'agent_state' });
+    expect(idx).toBe(4);
+  });
+
+  it('waitForSessionIdle accepts a steady idle state once the settle window has passed', async () => {
+    let idx = 0;
+    const res = await waitForSessionIdle(
+      {
+        resolveSession: async () => (idx++, makeRow({ agentState: 'idle' })),
+        capture: async () => 'screen',
+      },
+      'proj:work',
+      { settleS: 0, timeoutS: 5, pollMs: 1, sleepFn: async () => {} },
+    );
+    expect(res).toMatchObject({ state: 'idle', reason: 'agent_state' });
+    expect(idx).toBe(1);
+  });
+
   it('waitForSessionIdle falls back to screen stability when agentState is null, and exits 124 on timeout', async () => {
     await expect(
       waitForSessionIdle(
