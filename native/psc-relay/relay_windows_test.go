@@ -6,6 +6,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Microsoft/go-winio"
+	"golang.org/x/sys/windows"
 )
 
 func TestPipeEndpointIsStableAndNamespaced(t *testing.T) {
@@ -172,6 +174,85 @@ func TestListenDaemonYieldsToLivePipe(t *testing.T) {
 	}
 	stop()
 	<-done
+}
+
+// A squatter holding the pipe name with a DIFFERENT owner SID must be
+// refused BEFORE any secret byte is written to it: the verifier is
+// injected to answer with a foreign SID (the production check reads the
+// server process's token, which a same-user test cannot fake).
+func TestDialRefusesForeignPipeServerBeforeSecret(t *testing.T) {
+	os.Setenv("LOCALAPPDATA", t.TempDir())
+	defer os.Unsetenv("LOCALAPPDATA")
+	ep, e := resolvePipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	// A readable secret must exist, or dialing would fail before the check.
+	if _, e := createSecretExcl(ep.secret); e != nil {
+		t.Fatal(e)
+	}
+	// The squatter: a plain pipe server on OUR predictable name, recording
+	// every byte it receives.
+	squatter, e := winio.ListenPipe(ep.name, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer squatter.Close()
+	received := make(chan int, 4)
+	go func() {
+		for {
+			c, e := squatter.Accept()
+			if e != nil {
+				close(received)
+				return
+			}
+			c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var b [64]byte
+			n, _ := c.Read(b[:])
+			received <- n
+			c.Close()
+		}
+	}()
+	// Simulate a foreign server owner.
+	restore := pipeServerOwnerSID
+	pipeServerOwnerSID = func(windows.Handle) (string, error) { return "S-1-5-21-attacker", nil }
+	defer func() { pipeServerOwnerSID = restore }()
+	if _, e := daemonDial(ep.name, time.Second); !errors.Is(e, errForeignPipeServer) {
+		t.Fatalf("foreign pipe server accepted: %v", e)
+	}
+	// Exactly one connection was made and ZERO secret bytes reached it.
+	if n := <-received; n != 0 {
+		t.Fatalf("squatter received %d bytes before the owner check", n)
+	}
+	select {
+	case n := <-received:
+		t.Fatalf("unexpected second connection, %d bytes", n)
+	default:
+	}
+}
+
+// A pre-existing pipe of the same name must make OUR listener fail (the
+// go-winio first instance is FILE_CREATE, i.e. FILE_FLAG_FIRST_PIPE_INSTANCE):
+// the daemon never coexists with a squatter.
+func TestListenerRefusesToCoexistWithSquatter(t *testing.T) {
+	os.Setenv("LOCALAPPDATA", t.TempDir())
+	defer os.Unsetenv("LOCALAPPDATA")
+	ep, e := resolvePipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	squatter, e := winio.ListenPipe(ep.name, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer squatter.Close()
+	accept, _, cleanup, e := listenDaemon()
+	if e == nil {
+		if accept != nil && cleanup != nil {
+			cleanup()
+		}
+		t.Fatal("listener coexisted with a squatter on the same pipe name")
+	}
 }
 
 func TestSecretIsRandom(t *testing.T) {

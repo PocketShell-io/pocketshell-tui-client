@@ -167,7 +167,11 @@ credentials.
   named-pipe daemon (below).
 - Every daemon failure falls back transparently to the classic path: an
   unsafe or refused socket, a spawn failure, or a host helper without
-  `a rpc` (the request is then served `transport: legacy`).
+  `a rpc` (the request is then served `transport: legacy`). An unusable
+  runtime directory (unsafe ownership or modes) is detected before any
+  spawn and costs nothing; a serve child that dies without listening is
+  remembered for 60 s so later calls skip the attempt. Under `PSC_TRACE=1`
+  the one-line reason is reported.
 
 A resident channel outlives its routing token: the daemon's proxy opts into
 in-band reauth (`caps: ["reauth"]`), and when the gateway supports it, mints

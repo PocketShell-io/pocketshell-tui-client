@@ -133,6 +133,32 @@ func TestForeignUID(t *testing.T) {
 	}
 }
 
+func TestSpawnFailureMemo(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	assertClean := func() {
+		if spawnFailedRecently() {
+			t.Fatal("memo honored without a marker")
+		}
+	}
+	assertClean()
+	markSpawnFailed()
+	if !spawnFailedRecently() {
+		t.Fatal("memo not honored after a failed spawn")
+	}
+	st, e := os.Stat(spawnMarkerPath())
+	if e != nil || st.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("marker not private: %v %v", e, st.Mode())
+	}
+	clearSpawnMarker()
+	assertClean()
+	// A loosened marker file is ignored, not honored.
+	os.WriteFile(spawnMarkerPath(), []byte("x\n"), 0600)
+	os.Chmod(spawnMarkerPath(), 0o666)
+	assertClean()
+	os.Remove(spawnMarkerPath())
+}
+
 func TestClosedDaemonEnvironment(t *testing.T) {
 	t.Setenv("PSC_RPC_BINARY", "/fixture/dev-a")
 	t.Setenv("NODE_OPTIONS", "fixture-only-preload")

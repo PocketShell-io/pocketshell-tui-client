@@ -27,6 +27,7 @@ if (
 )
   throw Error('invalid mode/runs');
 const timeout = Number(opt('timeout-ms', '60000'));
+const idleWaitMs = mode === 'idle-expiry' ? Number(opt('idle-wait-ms', '610000')) : 0;
 const env = { ...process.env, ...(mode === 'legacy' ? { PSC_DAEMON: '0' } : {}) };
 function run(argv, input) {
   const start = process.hrtime.bigint();
@@ -156,7 +157,18 @@ try {
       }
       if (mode === 'idle-expiry') {
         run(['daemon', 'warm', host]);
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(opt('idle-wait-ms', '610000')));
+        // Idle-expiry measures CHANNEL survival past the token lifetime.
+        // The relay idle-exits after 10 min without client requests, so a
+        // channel-free `daemon status` keeps the relay (never the channel)
+        // alive through waits longer than that — otherwise the sample would
+        // time a full daemon respawn instead.
+        let remaining = idleWaitMs;
+        while (remaining > 0) {
+          const chunk = Math.min(remaining, 300_000);
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, chunk);
+          remaining -= chunk;
+          if (remaining > 0) run(['daemon', 'status']);
+        }
       }
       samples.push(run(argv));
     }

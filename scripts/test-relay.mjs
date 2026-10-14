@@ -122,6 +122,23 @@ try {
   const legacy = run(['-H', 'local', 'exec', '--', 'sh', '-c', 'printf parity; exit 7']);
   assert.equal(legacy.status, 7);
   assert.equal(legacy.stdout, 'parity');
+  // An unusable daemon runtime (a group-writable parent) must fall back to
+  // the classic path at once: correct answer, no multi-second timeout, no
+  // spawn, and daemon status stays a clean "not running".
+  const unsafe = mkdtempSync(join(tmpdir(), 'psc-unsafe-parent-'));
+  chmodSync(unsafe, 0o775);
+  const unsafeRuntime = { ...env, XDG_RUNTIME_DIR: join(unsafe, 'runtime') };
+  {
+    const started = process.hrtime.bigint();
+    const hosts = spawnSync(binary, ['hosts', '--json'], { env: unsafeRuntime, encoding: 'utf8', timeout: 7000 });
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.equal(hosts.status, 0, `unsafe runtime must fall back, not fail: ${hosts.stderr}`);
+    assert.equal(JSON.parse(hosts.stdout).ok, true);
+    assert.equal(ms < 1500, true, `unsafe runtime fallback took ${ms} ms`);
+    const daemonStatus = spawnSync(binary, ['daemon', 'status'], { env: unsafeRuntime, encoding: 'utf8', timeout: 7000 });
+    assert.equal(daemonStatus.status, 0);
+    assert.equal(JSON.parse(daemonStatus.stdout).running, false);
+  }
   const status = run(['definitely-not-saved', 'status', 'missing', '--json']);
   assert.notEqual(status.status, 0);
   assert.equal(

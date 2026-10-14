@@ -240,8 +240,24 @@ func relay(a []string) int {
 	}
 	addr, e := daemonAddr()
 	if e != nil {
-		relayFailure(a, "DAEMON_UNSAFE", "unsafe daemon runtime")
-		return 1
+		// An unusable daemon runtime (unsafe ownership or modes, an
+		// unwritable dir): the daemon can never live there. Serve the
+		// classic path at once — never a hard failure, never a spawn, and
+		// never a multi-second timeout.
+		trace("daemon_unsafe")
+		if len(a) > 1 && a[0] == "daemon" && (a[1] == "stop" || a[1] == "status") {
+			if a[1] == "status" {
+				fmt.Println("{\"running\":false}")
+			}
+			return 0
+		}
+		return legacy(a, nil, false)
+	}
+	if spawnFailedRecently() {
+		// The serve child recently died without listening; skip the spawn
+		// and its wait for the marker's lifetime.
+		trace("daemon_spawn_backoff")
+		return legacy(a, nil, false)
 	}
 	c, e := daemonDial(addr, 10*time.Millisecond)
 	if e != nil {
@@ -261,12 +277,27 @@ func relay(a []string) int {
 		if e = cmd.Start(); e != nil {
 			return legacy(a, nil, false)
 		}
-		go cmd.Wait()
+		waitErr := make(chan error, 1)
+		go func() { waitErr <- cmd.Wait() }()
 		end := time.Now().Add(5 * time.Second)
 		for time.Now().Before(end) {
 			c, e = daemonDial(addr, 100*time.Millisecond)
 			if e == nil {
 				break
+			}
+			select {
+			case we := <-waitErr:
+				if we != nil {
+					// The serve child exited without ever listening
+					// (unusable runtime, missing node): stop waiting out
+					// the clock and remember the verdict briefly so the
+					// next calls skip the spawn entirely. The reason is
+					// printed by the child under PSC_TRACE=1.
+					markSpawnFailed()
+					trace("daemon_spawn_failed")
+					return legacy(a, nil, false)
+				}
+			default:
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -274,6 +305,7 @@ func relay(a []string) int {
 			return legacy(a, nil, false)
 		}
 	}
+	clearSpawnMarker()
 	defer c.Close()
 	connected := daemonAlive(addr)
 	var input []byte
@@ -549,6 +581,46 @@ func daemonCore(accept func() (net.Conn, error), stopListener func()) error {
 	}
 }
 
+// --- spawn-failure memo -----------------------------------------------------
+//
+// When the serve child dies without ever listening, the verdict is written
+// to a per-OS marker file and honored for a short window, so a broken
+// daemon runtime costs at most one failed spawn instead of a spawn plus a
+// timeout on every call. A successful dial clears it.
+
+const spawnFailureMemo = 60 * time.Second
+
+// spawnMarkerPath is per-OS: the daemon's own private dir when one can
+// exist, else a private temp file.
+// markSpawnFailed/spawnFailedRecently/clearSpawnMarker never throw.
+
+func markSpawnFailed() {
+	path := spawnMarkerPath()
+	if path == "" {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(path), 0700)
+	_ = os.WriteFile(path, []byte(fmt.Sprintf("%d\n", time.Now().UnixMilli())), 0600)
+}
+
+func spawnFailedRecently() bool {
+	path := spawnMarkerPath()
+	if path == "" {
+		return false
+	}
+	st, e := os.Lstat(path)
+	if e != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
+		return false
+	}
+	return time.Since(st.ModTime()) < spawnFailureMemo
+}
+
+func clearSpawnMarker() {
+	if path := spawnMarkerPath(); path != "" {
+		_ = os.Remove(path)
+	}
+}
+
 func serve() error {
 	accept, stopListener, cleanup, e := listenDaemon()
 	if e != nil {
@@ -566,6 +638,11 @@ func main() {
 	}
 	if len(os.Args) == 2 && os.Args[1] == "--serve" {
 		if e := serve(); e != nil {
+			// The parent relay watches this exit; under PSC_TRACE the one
+			// line a human needs (why the daemon cannot start) is printed.
+			if os.Getenv("PSC_TRACE") == "1" {
+				fmt.Fprintln(os.Stderr, "psc: daemon start failed:", e)
+			}
 			os.Exit(1)
 		}
 		return

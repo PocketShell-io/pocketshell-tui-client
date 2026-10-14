@@ -244,3 +244,16 @@ func listenDaemon() (func() (net.Conn, error), func(), func(), error) {
 }
 
 func signalIgnoreSigpipe() { signal.Ignore(unix.SIGPIPE) }
+
+// spawnMarkerPath: inside the daemon's private runtime dir, which may or
+// may not be creatable — markSpawnFailed copes with either.
+func spawnMarkerPath() string {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" {
+		base = "/tmp"
+		if runtime.GOOS == "darwin" {
+			base = "/private/tmp"
+		}
+	}
+	return filepath.Join(base, fmt.Sprintf("psc-daemon-%d", os.Geteuid()), "serve.failed")
+}
