@@ -15,6 +15,7 @@
  * AccountError (ACCOUNT_ERROR / ALREADY_LOGGED_IN / USAGE). Messages never
  * contain a token.
  */
+import { trace } from '../trace.js';
 import * as broker from './broker.js';
 import { resolveBrokerUrl, sessionBrokerUrl, SESSIONS_URL } from './config.js';
 import * as store from './credentials.js';
@@ -101,6 +102,7 @@ export interface MintOptions {
 export async function mintGatewayTokenWithExpiry(options: MintOptions = {}): Promise<broker.GatewayToken> {
   const creds = store.requireSession();
   const target = sessionBrokerUrl(creds.brokerUrl, options.brokerUrl);
+  trace('auth_mint');
   return broker.mintGatewayToken(target, creds.accessToken, {
     fetch: options.fetch,
     signal: options.signal,

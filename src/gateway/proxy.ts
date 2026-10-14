@@ -22,6 +22,7 @@
  * only way the marker reaches the client. Gateway-supplied text is
  * sanitized first. The token never leaves memory except in the auth frame.
  */
+import { trace } from '../trace.js';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import type { Readable, Writable } from 'node:stream';
@@ -431,6 +432,7 @@ async function bridge(options: ProxyOptions): Promise<Outcome> {
       // frame.ssh_host_key is advisory and deliberately ignored: OpenSSH
       // verifies the host key against the client's own pin file.
       phase = 'ready';
+      trace('wss_ready');
       clearTimeout(deadline);
       stdout.on('error', onStdoutError);
       stdin.on('data', onStdinData);

@@ -13,6 +13,7 @@ import { registerHosts } from './commands/hosts.js';
 import { registerCatalog, registerExec, registerSessions, registerWorkspaces } from './commands/sessions.js';
 import { fail, setJsonMode, usageError } from './output.js';
 import { runTui } from './tui/index.js';
+import { trace } from './trace.js';
 import { VERSION } from './version.js';
 
 for (const stream of [process.stdout, process.stderr]) {
@@ -95,6 +96,7 @@ function wantsJson(args: readonly string[]): boolean {
 }
 
 async function main(): Promise<void> {
+  trace('client_entry');
   const args = process.argv.slice(2);
   if (wantsJson(args)) setJsonMode(true);
   if (args.length === 0) {
