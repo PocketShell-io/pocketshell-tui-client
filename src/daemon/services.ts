@@ -11,7 +11,7 @@ interface Slot {
 }
 const slots = new Map<string, Slot>();
 const unsupported = new Map<string, { generation: string; until: number }>();
-const backoff = new Map<string, { attempt: number; until: number }>();
+const backoff = new Map<string, { attempt: number; until: number; generation: string }>();
 export function closeChannels(): void {
   for (const s of slots.values()) s.channel.close();
   slots.clear();
@@ -32,7 +32,8 @@ async function channelFor(host: HostEntry): Promise<HostChannel> {
     return old.channel;
   }
   old?.channel.close();
-  const retry = backoff.get(host.name);
+  const previousRetry = backoff.get(host.name);
+  const retry = previousRetry?.generation === policy.generation ? previousRetry : undefined;
   if (retry && retry.until > Date.now())
     throw new RpcFailure('RECONNECT_BACKOFF', 'host helper reconnect backoff', true);
   const channel = requests.exit(
@@ -40,9 +41,9 @@ async function channelFor(host: HostEntry): Promise<HostChannel> {
       new HostChannel(
         host,
         policy.accountExpires,
-        (reason) => {
+        (reason, established) => {
           if (slots.get(host.name)?.channel === channel) slots.delete(host.name);
-          if (reason instanceof RpcFailure && reason.code === 'AUTH_LEASE_EXPIRED')
+          if (established && reason instanceof RpcFailure && reason.code === 'AUTH_LEASE_EXPIRED')
             void channelFor(host).catch(() => {});
         },
         () => {
@@ -59,6 +60,7 @@ async function channelFor(host: HostEntry): Promise<HostChannel> {
   } catch (error) {
     const attempt = Math.min(7, (retry?.attempt ?? 0) + 1);
     backoff.set(host.name, {
+      generation: policy.generation,
       attempt,
       until: Date.now() + Math.min(30_000, 250 * 2 ** (attempt - 1)) * (0.75 + Math.random() * 0.5),
     });

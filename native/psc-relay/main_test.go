@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -108,5 +109,22 @@ func TestForeignUID(t *testing.T) {
 	}
 	if !sameUser(uint32(os.Geteuid()), nil) {
 		t.Fatal("owner refused")
+	}
+}
+
+func TestClosedDaemonEnvironment(t *testing.T) {
+	t.Setenv("PSC_RPC_BINARY", "/fixture/dev-a")
+	t.Setenv("NODE_OPTIONS", "fixture-only-preload")
+	t.Setenv("OPENAI_API_KEY", "fixture-only-provider-key")
+	t.Setenv("NODE_TLS_REJECT_UNAUTHORIZED", "0")
+	for _, value := range daemonEnvironment() {
+		if strings.HasPrefix(value, "NODE_OPTIONS=") || strings.HasPrefix(value, "OPENAI_API_KEY=") || strings.HasPrefix(value, "NODE_TLS_REJECT_UNAUTHORIZED=") {
+			t.Fatal("ambient unsafe environment forwarded")
+		}
+	}
+	a := namespace()
+	t.Setenv("APLEXER_STATE_DIR", "/fixture/other-state")
+	if a == namespace() {
+		t.Fatal("local registry namespace leaked across environments")
 	}
 }

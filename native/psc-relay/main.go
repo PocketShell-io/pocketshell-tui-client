@@ -86,10 +86,30 @@ func writeFrame(w io.Writer, v any) error {
 	_, e = w.Write(b)
 	return e
 }
+
+// Only explicit client settings cross the resident process boundary. In particular,
+// ambient provider credentials, loader/preload options and TLS-disable flags do not.
+func daemonEnvironment() []string {
+	keys := []string{"HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_DATA_HOME", "APLEXER_RUNTIME_DIR", "APLEXER_STATE_DIR", "APLEXER_CONFIG", "POCKETSHELL_BROKER_URL", "NODE_EXTRA_CA_CERTS", "PSC_RPC_BINARY", "PSC_JSON", "PSC_HOST", "PSC_TRACE", "PSC_DAEMON_IDLE_MS"}
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if value, ok := os.LookupEnv(key); ok {
+			result = append(result, key+"="+value)
+		}
+	}
+	return result
+}
 func namespace() string {
-	h := sha256.Sum256([]byte(strings.Join([]string{os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("POCKETSHELL_BROKER_URL"), os.Getenv("PSC_RPC_BINARY"), os.Getenv("PSC_JSON"), os.Getenv("PSC_DAEMON_IDLE_MS"), os.Getenv("PSC_HOST")}, "\x00")))
+	scope := daemonEnvironment()
+	if cwd, err := os.Getwd(); err == nil {
+		if canonical, e := filepath.EvalSymlinks(cwd); e == nil {
+			scope = append(scope, "CWD="+canonical)
+		}
+	}
+	h := sha256.Sum256([]byte(strings.Join(scope, "\x00")))
 	return hex.EncodeToString(h[:8])
 }
+
 func checkComponents(path string) error {
 	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
@@ -275,6 +295,7 @@ func relay(a []string) int {
 		}
 		exe, _ := os.Executable()
 		cmd := exec.Command(exe, "--serve")
+		cmd.Env = daemonEnvironment()
 		cmd.Stdin = nil
 		cmd.Stdout = nil
 		cmd.Stderr = nil
@@ -451,7 +472,7 @@ func serve() error {
 		}
 	}()
 	cmd := exec.Command("node", entry("daemon.mjs"))
-	cmd.Env = append(os.Environ(), "PSC_DAEMON_NAMESPACE="+namespace())
+	cmd.Env = append(daemonEnvironment(), "PSC_DAEMON_NAMESPACE="+namespace())
 	in, e := cmd.StdinPipe()
 	if e != nil {
 		return e
