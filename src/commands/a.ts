@@ -189,7 +189,7 @@ async function withResolvedHost(
   const host = resolveAHost(selector);
   const client = requests.getStore()
     ? await (await import('../daemon/services.js')).daemonClient(host)
-    : new HostClient(await openConnection(host), host.binary);
+    : new HostClient(await openConnection(host), host.binary, host);
   try {
     await body(client, host);
   } finally {
@@ -528,7 +528,7 @@ async function runAHosts(opts: { check?: boolean; json?: boolean }): Promise<voi
     try {
       const client = requests.getStore()
         ? await (await import('../daemon/services.js')).daemonClient(host)
-        : new HostClient(await openConnection(host), host.binary);
+        : new HostClient(await openConnection(host), host.binary, host);
       connection = client.connection;
       const versions = await client.probe();
       const ms = Date.now() - started;
