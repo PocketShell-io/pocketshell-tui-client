@@ -59,6 +59,7 @@ def build(args):
         shutil.copytree(ROOT / "vendor/windows-pty-overlay", psc / "vendor/windows-pty-overlay")
         (psc / "scripts").mkdir()
         shutil.copyfile(ROOT / "scripts/apply-windows-pty-overlay.mjs", psc / "scripts/apply-windows-pty-overlay.mjs")
+        shutil.copyfile(ROOT / "scripts/windows/install-preflight.mjs", psc / "scripts/install-preflight.mjs")
         selector = "import {installOverlayForPlatform} from './scripts/apply-windows-pty-overlay.mjs'; console.log(JSON.stringify(installOverlayForPlatform(process.cwd(),'win32','x64')));"
         subprocess.run(["node", "--input-type=module", "-e", selector], cwd=psc, check=True)
         env = dict(os.environ, GOOS="windows", GOARCH="amd64", CGO_ENABLED="0")

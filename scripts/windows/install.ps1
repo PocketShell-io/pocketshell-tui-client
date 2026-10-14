@@ -40,33 +40,12 @@ function Protect-Item([string]$Path) {
 }
 
 function Invoke-Security([hashtable]$Request) {
-    # Feed exact UTF-8 JSON bytes. Windows PowerShell's native pipeline encoding
-    # differs from PowerShell 7 and must not define the helper protocol.
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = $helper
-    $start.WorkingDirectory = $dest
-    $start.UseShellExecute = $false
-    $start.CreateNoWindow = $true
-    $start.RedirectStandardInput = $true
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $start
-    try {
-        [void]$process.Start()
-        $output = $process.StandardOutput.ReadToEndAsync()
-        $errorOutput = $process.StandardError.ReadToEndAsync()
-        $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Request | ConvertTo-Json -Compress))
-        $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-        $process.StandardInput.BaseStream.Flush()
-        $process.StandardInput.Close()
-        if (!$process.WaitForExit(10000)) { $process.Kill(); throw 'PSC native helper timed out' }
-        $response = $output.GetAwaiter().GetResult()
-        if ($process.ExitCode -ne 0 -or $errorOutput.GetAwaiter().GetResult()) { throw 'PSC native security preflight refused' }
-        if (!(($response | ConvertFrom-Json).ok)) { throw 'PSC native security preflight refused' }
-    } finally {
-        $process.Dispose()
-    }
+    # Use the installed, bound Node authority for the exact native protocol.
+    # Base64 argv avoids PowerShell 5/7 native stdin encoding differences.
+    $json = $Request | ConvertTo-Json -Compress
+    $encoded = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($json))
+    & $node "$dest\psc\scripts\install-preflight.mjs" $encoded
+    if ($LASTEXITCODE -ne 0) { throw 'PSC native security preflight refused' }
 }
 
 $manifest = Get-Content -LiteralPath "$PSScriptRoot\package-manifest.json" -Raw | ConvertFrom-Json
