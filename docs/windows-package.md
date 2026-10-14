@@ -38,6 +38,9 @@ Installation requires Windows x64 and the Windows OpenSSH Client feature
 (`C:\Windows\System32\OpenSSH\ssh.exe`). If absent, the installer fails with
 an explicit prerequisite message. An already installed reviewed Win32
 OpenSSH may be selected with `install.ps1 -SshPath C:\plain\ssh.exe`.
+The installer copies this Microsoft-signed client into the protected version
+directory and verifies its Authenticode signature before binding it. This
+avoids the inbox executable's hardlink/ACL layout without weakening the helper.
 The installed executable paths and user profile must contain no spaces;
 redirected directories are refused. Profiles with spaces fail before copying.
 Do not use short-path aliases or relax the helper ACL policy to bypass this.

@@ -43,6 +43,8 @@ foreach ($p in @($env:USERPROFILE, $env:LOCALAPPDATA, $base, $dest, $bin, $SshPa
 if (!(Test-Path -LiteralPath $SshPath -PathType Leaf) -or (Split-Path -Leaf $SshPath) -ine 'ssh.exe') {
     throw 'Win32 OpenSSH ssh.exe is required; install the Windows OpenSSH Client feature first.'
 }
+$sshSource = $SshPath
+$SshPath = "$dest\ssh.exe"
 $fresh = !(Test-Path -LiteralPath $dest)
 # Verify the entire offline payload before publishing it.
 $expected = @($manifest.files.PSObject.Properties.Name) | Sort-Object
@@ -62,7 +64,7 @@ if ($fresh) {
     Protect-Item $dest
 } else {
     # Reinstalling the identical package is read-only for the version tree.
-    $installedNames = @($expected | Where-Object { $_ -ne 'install.ps1' }) + 'psc/dist/windows-bindings.json'
+    $installedNames = @($expected | Where-Object { $_ -ne 'install.ps1' }) + 'psc/dist/windows-bindings.json' + 'ssh.exe'
     $installedActual = @(Get-ChildItem -LiteralPath $dest -Recurse -File | ForEach-Object {
         $_.FullName.Substring($dest.Length + 1).Replace('\', '/')
     } | Where-Object { $_ -ne 'package-manifest.json' })
@@ -78,6 +80,14 @@ try {
     if ($fresh) {
     Copy-Item -LiteralPath "$PSScriptRoot\node.exe", "$PSScriptRoot\psc-security.exe", "$PSScriptRoot\psc.cmd", "$PSScriptRoot\NODE-LICENSE.txt", "$PSScriptRoot\package-manifest.json" -Destination $dest
     Copy-Item -LiteralPath "$PSScriptRoot\psc" -Destination $dest -Recurse
+    # Inbox Windows files can be hardlinked or carry ACLs rejected by the helper.
+    # Copy only the client, verify Microsoft's signature on the actual copy,
+    # then give it the same protected descriptor as the rest of this version.
+    Copy-Item -LiteralPath $sshSource -Destination $SshPath
+    $signature = Get-AuthenticodeSignature -LiteralPath $SshPath
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') {
+        throw 'PSC requires a valid Microsoft-signed Win32 OpenSSH client'
+    }
     Get-ChildItem -LiteralPath $dest -Recurse -Force | ForEach-Object { Protect-Item $_.FullName }
     }
     $helper = "$dest\psc-security.exe"
