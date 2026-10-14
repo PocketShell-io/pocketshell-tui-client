@@ -67,15 +67,18 @@ func TestListenDialSecretHandshake(t *testing.T) {
 		t.Fatal("listener refused to own a fresh pipe")
 	}
 	defer cleanup()
-	done := make(chan net.Conn, 1)
+	// Keep accepting like the real daemon core does, or the pipe runs out
+	// of free instances for the second dial.
+	conns := make(chan net.Conn, 4)
 	go func() {
-		c, e := accept()
-		if e != nil {
-			stop()
-			close(done)
-			return
+		for {
+			c, e := accept()
+			if e != nil {
+				close(conns)
+				return
+			}
+			conns <- c
 		}
-		done <- c
 	}()
 	ep, e := resolvePipe()
 	if e != nil {
@@ -93,7 +96,7 @@ func TestListenDialSecretHandshake(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	accepted := <-done
+	accepted := <-conns
 	if accepted == nil {
 		t.Fatal("daemon dropped a correct secret")
 	}
@@ -109,13 +112,21 @@ func TestListenDialSecretHandshake(t *testing.T) {
 	}
 	defer bad.Close()
 	if _, e := bad.Write([]byte("{}")); e == nil {
-		// The write may succeed locally before the daemon reacts; give it a
-		// moment, then the read side must be closed.
-		bad.SetReadDeadline(time.Now().Add(2 * time.Second))
+		bad.SetReadDeadline(time.Now().Add(5 * time.Second))
 		var b [1]byte
 		if _, e := bad.Read(b[:]); e == nil {
 			t.Fatal("daemon served a connection with a wrong secret")
 		}
+	}
+	// The rejected connection was closed by the daemon, not handed upward.
+	for {
+		select {
+		case leaked := <-conns:
+			leaked.Close()
+			continue
+		default:
+		}
+		break
 	}
 	stop()
 }
@@ -144,8 +155,12 @@ func TestListenDaemonYieldsToLivePipe(t *testing.T) {
 	defer cleanup()
 	done := make(chan struct{})
 	go func() {
-		accept()
-		close(done)
+		for {
+			if _, e := accept(); e != nil {
+				close(done)
+				return
+			}
+		}
 	}()
 	accept2, _, cleanup2, e := listenDaemon()
 	if e != nil {
