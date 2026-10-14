@@ -155,9 +155,9 @@ describe('HostClient binary', () => {
   });
   it('retains POSIX UUID attachment and legacy kill name despite optional row UUID', async () => {
     const seen: string[] = [];
-    const client = new HostClient(fakeConnection(async (command) => { seen.push(command); return okOutcome(); }));
+    const client = new HostClient(fakeConnection(async (command) => { seen.push(command); return { ...okOutcome(), stdout: JSON.stringify({ schema: 3, sessions: [], errors: [] }) }; }));
     expect(client.attachCommand(row('project:main', 'aplexer-fixture-id'))).toBe(pathAwareCommand("exec a attach 'aplexer-fixture-id'"));
     await client.killSession('project:main', 'aplexer-fixture-id');
-    expect(seen).toEqual([pathAwareCommand("pocketshell sessions kill -- 'project:main'")]);
+    expect(seen).toEqual([pathAwareCommand("pocketshell sessions list --json"), pathAwareCommand("pocketshell sessions kill -- 'project:main'")]);
   });
 });
