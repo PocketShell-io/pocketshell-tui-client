@@ -44,6 +44,10 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: client
         run: npm test
+      - name: Suite under an inherited proxy env (fail-closed transport)
+        if: runner.os == 'Linux'
+        working-directory: client
+        run: NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 npm test
       - uses: actions/setup-go@v5
         if: runner.os == 'Linux'
         with:

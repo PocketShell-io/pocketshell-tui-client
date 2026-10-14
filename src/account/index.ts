@@ -88,6 +88,10 @@ export interface MintOptions {
   signal?: AbortSignal;
   /** Test seams. */
   fetch?: typeof fetch;
+  /** Explicit transport-policy decision (test seam; bypasses env resolution). */
+  transport?: broker.BrokerTransport;
+  /** Extra CA (PEM) trusted for the broker TLS (test seam). */
+  ca?: string | Buffer;
   now?: number;
 }
 
@@ -105,6 +109,8 @@ export async function mintGatewayTokenWithExpiry(options: MintOptions = {}): Pro
   trace('auth_mint');
   return broker.mintGatewayToken(target, creds.accessToken, {
     fetch: options.fetch,
+    transport: options.transport,
+    ca: options.ca,
     signal: options.signal,
     now: options.now,
   });
@@ -130,6 +136,10 @@ export interface LoginOptions {
   sleep?: (seconds: number, signal?: AbortSignal) => Promise<void>;
   monotonic?: () => number;
   fetch?: typeof fetch;
+  /** Explicit transport-policy decision (test seam; bypasses env resolution). */
+  transport?: broker.BrokerTransport;
+  /** Extra CA (PEM) trusted for the broker TLS (test seam). */
+  ca?: string | Buffer;
 }
 
 /**
@@ -163,32 +173,44 @@ export async function login(options: LoginOptions): Promise<Credentials> {
     sleep: options.sleep,
     monotonic: options.monotonic,
     fetch: options.fetch,
+    transport: options.transport,
+    ca: options.ca,
   });
   if (previous !== null && previous.accessToken !== creds.accessToken) {
     // The old token only ever goes to the broker stored with it.
-    await revokeStored(previous, { fetch: options.fetch });
+    const problem = await revokeStored(previous, { fetch: options.fetch, transport: options.transport, ca: options.ca });
+    // Warning only: replacing the login already succeeded.
+    if (problem !== null) options.onWarning?.(`server-side revoke of the replaced session failed: ${problem.message}`);
   }
   return creds;
 }
 
 const RATE_LIMITED_SHORT = 'the broker is rate limiting requests from this network';
 
+/** Why a server-side revoke didn't happen (safe text, with a machine code). */
+export interface RevokeProblem {
+  code: string;
+  message: string;
+}
+
 /** Revoke at the STORED broker. null on success, else why not (safe text). */
 async function revokeStored(
   creds: Credentials,
-  options: { raiseRateLimited?: boolean; fetch?: typeof fetch } = {},
-): Promise<string | null> {
+  options: { raiseRateLimited?: boolean; fetch?: typeof fetch; transport?: broker.BrokerTransport; ca?: string | Buffer } = {},
+): Promise<RevokeProblem | null> {
   if (isExpired(creds)) return null;
   try {
     const target = sessionBrokerUrl(creds.brokerUrl);
-    if (await broker.logout(target, creds.accessToken, { fetch: options.fetch })) return null;
-    return 'the broker did not confirm the revocation';
+    if (await broker.logout(target, creds.accessToken, { fetch: options.fetch, transport: options.transport, ca: options.ca })) {
+      return null;
+    }
+    return { code: 'ACCOUNT_ERROR', message: 'the broker did not confirm the revocation' };
   } catch (error) {
     if (error instanceof BrokerRateLimited) {
       if (options.raiseRateLimited) throw error;
-      return RATE_LIMITED_SHORT;
+      return { code: error.code, message: RATE_LIMITED_SHORT };
     }
-    if (error instanceof AccountError) return error.message;
+    if (error instanceof AccountError) return { code: error.code, message: error.message };
     throw error;
   }
 }
@@ -204,6 +226,8 @@ export interface LogoutResult {
   revoked: boolean;
   /** Why the revocation didn't happen (safe text), when it should have. */
   warning: string | null;
+  /** Machine code/message for the failed server revoke (null when revoked). */
+  revokeError: RevokeProblem | null;
   /** Unix seconds the un-revoked session stays valid until (with `warning`). */
   expiresAt: number | null;
 }
@@ -211,29 +235,38 @@ export interface LogoutResult {
 /**
  * Revoke the session (best effort) and delete the credentials file. A 401
  * counts as logged out. On 429 the file is KEPT and BrokerRateLimited is
- * thrown (exit 1: run logout again shortly).
+ * thrown (exit 1: run logout again shortly). Any other revoke failure still
+ * deletes the file but is reported via `warning`/`revokeError` (the CLI
+ * exits non-zero: the session stays valid until `expiresAt`).
  */
-export async function logout(options: { fetch?: typeof fetch } = {}): Promise<LogoutResult> {
+export async function logout(
+  options: { fetch?: typeof fetch; transport?: broker.BrokerTransport; ca?: string | Buffer } = {},
+): Promise<LogoutResult> {
   let creds: Credentials;
   try {
     creds = store.load({ allowSharedMode: true });
   } catch (error) {
     if (error instanceof CredentialsUnsafe) {
       store.remove();
-      return { result: 'removed_unsafe', revoked: false, warning: null, expiresAt: null };
+      return { result: 'removed_unsafe', revoked: false, warning: null, revokeError: null, expiresAt: null };
     }
     if (error instanceof NotLoggedIn) {
       if (store.exists()) {
         store.remove();
-        return { result: 'removed_unreadable', revoked: false, warning: null, expiresAt: null };
+        return { result: 'removed_unreadable', revoked: false, warning: null, revokeError: null, expiresAt: null };
       }
-      return { result: 'not_logged_in', revoked: false, warning: null, expiresAt: null };
+      return { result: 'not_logged_in', revoked: false, warning: null, revokeError: null, expiresAt: null };
     }
     throw error;
   }
-  let problem: string | null;
+  let problem: RevokeProblem | null;
   try {
-    problem = await revokeStored(creds, { raiseRateLimited: true, fetch: options.fetch });
+    problem = await revokeStored(creds, {
+      raiseRateLimited: true,
+      fetch: options.fetch,
+      transport: options.transport,
+      ca: options.ca,
+    });
   } catch (error) {
     if (error instanceof BrokerRateLimited) {
       throw new BrokerRateLimited(
@@ -248,7 +281,8 @@ export async function logout(options: { fetch?: typeof fetch } = {}): Promise<Lo
   return {
     result: 'logged_out',
     revoked: problem === null && !isExpired(creds),
-    warning: problem,
+    warning: problem?.message ?? null,
+    revokeError: problem,
     expiresAt: problem === null ? null : creds.expiresAt,
   };
 }
@@ -271,7 +305,7 @@ export interface WhoamiInfo {
  * usable session or the broker answers 401.
  */
 export async function whoami(
-  options: { fetch?: typeof fetch; signal?: AbortSignal } = {},
+  options: { fetch?: typeof fetch; transport?: broker.BrokerTransport; ca?: string | Buffer; signal?: AbortSignal } = {},
 ): Promise<{ info: WhoamiInfo; warnings: string[]; sessionsUrl: string }> {
   const creds = store.requireSession();
   let { email, label, expiresAt } = creds;
@@ -289,6 +323,8 @@ export async function whoami(
       const session = await broker.getSession(target, creds.accessToken, {
         timeoutMs: 10_000,
         fetch: options.fetch,
+        transport: options.transport,
+        ca: options.ca,
         signal: options.signal,
       });
       verified = true;

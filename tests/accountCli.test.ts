@@ -194,6 +194,30 @@ describe('CLI', () => {
     expect(none.code).toBe(0);
     expect(none.stdout).toBe('Not logged in.\n');
   }, 30_000);
+
+  it('logout when the broker is unreachable: deletes, warns, exits 1 with revokeError', async () => {
+    const down = 'http://127.0.0.1:9';
+    process.env.POCKETSHELL_BROKER_URL = down;
+    const stored = { brokerUrl: down, accessToken: TOKEN, tokenId: 'tok_1', email: 'you@example.com', expiresAt: now() + 86400, label: 'me@box' };
+    save(stored);
+    const r = await cli(['logout', '--json']);
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.stdout)).toMatchObject({
+      ok: true,
+      loggedIn: false,
+      result: 'logged_out',
+      revoked: false,
+      revokeError: { code: 'BROKER_UNAVAILABLE' },
+    });
+    expect(existsSync(credPath())).toBe(false);
+
+    save(stored);
+    const human = await cli(['logout']);
+    expect(human.code).toBe(1);
+    expect(human.stdout).toBe('Logged out.\n');
+    expect(human.stderr).toMatch(/server-side revoke failed/);
+    expect(existsSync(credPath())).toBe(false);
+  }, 30_000);
 });
 
 // -- Python interop --------------------------------------------------------------

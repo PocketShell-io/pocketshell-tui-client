@@ -19,7 +19,6 @@ import { sameOrigin, webOrigin } from './config.js';
 import { save, preflightStorage, type Credentials } from './credentials.js';
 import { AccountError, BrokerUnavailable, LoginCancelled } from './errors.js';
 import { cleanText, httpsUrl } from './sanitize.js';
-
 export const MAX_LABEL = 80;
 const SLOW_DOWN_STEP = 5;
 const MAX_INTERVAL = 60;
@@ -55,6 +54,10 @@ export interface DeviceLoginOptions {
   sleep?: (seconds: number, signal?: AbortSignal) => Promise<void>;
   monotonic?: () => number;
   fetch?: typeof fetch;
+  /** Explicit transport-policy decision (test seam; bypasses env resolution). */
+  transport?: broker.BrokerTransport;
+  /** Extra CA (PEM) trusted for the broker TLS (test seam). */
+  ca?: string | Buffer;
 }
 
 /** `user@hostname`, cleaned and ≤ 80 chars (like Python's getpass.getuser()). */
@@ -104,7 +107,10 @@ export async function deviceLogin(options: DeviceLoginOptions): Promise<Credenti
   const { baseUrl, label, signal } = options;
   const sleep = options.sleep ?? defaultSleep;
   const monotonic = options.monotonic ?? defaultMonotonic;
-  const http = { fetch: options.fetch, signal };
+  const http = { fetch: options.fetch, transport: options.transport, ca: options.ca, signal };
+  // Fail before /auth/device/start when an environment proxy would carry the
+  // login (fail-closed): never send the user to the browser first.
+  if (http.fetch === undefined) broker.assertBrokerTransport(baseUrl, { transport: http.transport });
   try {
     const origin = webOrigin();
     const start = await broker.startDevice(baseUrl, label, http);
@@ -143,7 +149,19 @@ export async function deviceLogin(options: DeviceLoginOptions): Promise<Credenti
       save(creds);
       return creds;
     } catch (error) {
-      await revokeQuietly(baseUrl, token.accessToken, options.fetch);
+      // The cleanup revoke ignores any caller abort (a cancelled login must
+      // still revoke the issued-but-unsaved token).
+      const reason = await revokeQuietly(baseUrl, token.accessToken, {
+        fetch: options.fetch,
+        transport: options.transport,
+        ca: options.ca,
+      });
+      if (reason !== null) {
+        // Warning only: a failed cleanup revoke must never mask the original error.
+        options.onWarning?.(
+          `server-side revoke failed: ${reason}; the token stays valid until it expires`,
+        );
+      }
       throw error;
     }
   } catch (error) {
@@ -194,11 +212,23 @@ async function poll(
   }
 }
 
-/** Revoke a token best-effort (never throws; ignores any caller abort). */
-export async function revokeQuietly(baseUrl: string, accessToken: string, fetchImpl?: typeof fetch): Promise<void> {
+/**
+ * Revoke a token best-effort (never throws; ignores any caller abort).
+ * Returns null when the broker confirmed the revocation (or it was already
+ * gone), else the safe-to-print reason, so callers can warn instead of
+ * swallowing the failure.
+ */
+export async function revokeQuietly(
+  baseUrl: string,
+  accessToken: string,
+  options: Pick<broker.HttpOptions, 'fetch' | 'transport' | 'ca'> | typeof fetch = {},
+): Promise<string | null> {
+  const http: broker.HttpOptions = typeof options === 'function' ? { fetch: options } : options;
   try {
-    await broker.logout(baseUrl, accessToken, { fetch: fetchImpl });
-  } catch {
-    // best effort
+    if (await broker.logout(baseUrl, accessToken, http)) return null;
+    return 'the broker did not confirm the revocation';
+  } catch (error) {
+    if (error instanceof AccountError) return error.message;
+    throw error;
   }
 }
