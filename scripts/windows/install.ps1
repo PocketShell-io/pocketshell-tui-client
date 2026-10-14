@@ -39,6 +39,36 @@ function Protect-Item([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+function Invoke-Security([hashtable]$Request) {
+    # Feed exact UTF-8 JSON bytes. Windows PowerShell's native pipeline encoding
+    # differs from PowerShell 7 and must not define the helper protocol.
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $helper
+    $start.WorkingDirectory = $dest
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        [void]$process.Start()
+        $output = $process.StandardOutput.ReadToEndAsync()
+        $errorOutput = $process.StandardError.ReadToEndAsync()
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Request | ConvertTo-Json -Compress))
+        $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+        $process.StandardInput.BaseStream.Flush()
+        $process.StandardInput.Close()
+        if (!$process.WaitForExit(10000)) { $process.Kill(); throw 'PSC native helper timed out' }
+        $response = $output.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0 -or $errorOutput.GetAwaiter().GetResult()) { throw 'PSC native security preflight refused' }
+        if (!(($response | ConvertFrom-Json).ok)) { throw 'PSC native security preflight refused' }
+    } finally {
+        $process.Dispose()
+    }
+}
+
 $manifest = Get-Content -LiteralPath "$PSScriptRoot\package-manifest.json" -Raw | ConvertFrom-Json
 if ($manifest.version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid PSC package version' }
 $base = "$env:LOCALAPPDATA\PocketShell\psc"
@@ -119,12 +149,10 @@ try {
     }
     # Native preflight creates private state without changing existing state ACLs.
     foreach ($root in @("$env:LOCALAPPDATA\PocketShell\pocketshell-client", "$env:LOCALAPPDATA\PocketShell\pocketshell-client-account", "$env:LOCALAPPDATA\PocketShell\pocketshell-client-runtime")) {
-        $reply = @{version=1; op='preflight'; root=$root} | ConvertTo-Json -Compress | & $helper
-        if ($LASTEXITCODE -ne 0 -or !(($reply | ConvertFrom-Json).ok)) { throw "PSC protected state preflight refused: $root" }
+        Invoke-Security @{version=1; op='preflight'; root=$root}
     }
     foreach ($path in @($node, $entry, $SshPath)) {
-        $reply = @{version=1; op='check-executable'; root=$dest; path=$path} | ConvertTo-Json -Compress | & $helper
-        if ($LASTEXITCODE -ne 0 -or !(($reply | ConvertFrom-Json).ok)) { throw "PSC executable preflight refused: $path" }
+        Invoke-Security @{version=1; op='check-executable'; root=$dest; path=$path}
     }
     & $node $entry --version
     if ($LASTEXITCODE -ne 0) { throw 'PSC installed version check failed' }
