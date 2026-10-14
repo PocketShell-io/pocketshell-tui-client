@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { build } from 'esbuild';
-if (process.platform === 'win32') process.exit(0); // Windows distribution retains its current direct entry.
+if (process.platform === "win32") process.exit(0); // The Windows package builds its own relay (scripts/build-windows-package.py).
 const pkg = JSON.parse(readFileSync('dist-bundle/package.json', 'utf8'));
 await build({
   entryPoints: ['src/daemon/main.ts'],
