@@ -11,7 +11,7 @@ Run this in a regular, non-administrator PowerShell terminal after v0.3.2 is
 released (use the corresponding version for later releases):
 
 ```powershell
-$v='0.3.2'; $u="https://github.com/PocketShell-io/pocketshell-tui-client/releases/download/v$v"; $z="$env:TEMP\psc-windows-x64-$v.zip"; Invoke-WebRequest "$u/psc-windows-x64-$v.zip" -OutFile $z; Invoke-WebRequest "$u/psc-windows-x64-$v.zip.sha256" -OutFile "$z.sha256"; if ((Get-FileHash $z).Hash.ToLowerInvariant() -ne (Get-Content "$z.sha256").Split(' ')[0]) { throw 'PSC zip hash differs' }; $d="$env:TEMP\psc-install-$v"; Expand-Archive $z $d; & "$d\install.ps1"; & "$env:LOCALAPPDATA\PocketShell\psc\bin\psc.cmd" login; & "$env:LOCALAPPDATA\PocketShell\psc\bin\psc.cmd" hosts sync
+$v='0.3.2'; $u="https://github.com/PocketShell-io/pocketshell-tui-client/releases/download/v$v"; $z="$env:TEMP\psc-windows-x64-$v.zip"; Invoke-WebRequest "$u/psc-windows-x64-$v.zip" -OutFile $z; Invoke-WebRequest "$u/psc-windows-x64-$v.zip.sha256" -OutFile "$z.sha256"; if ((Get-FileHash $z).Hash.ToLowerInvariant() -ne (Get-Content "$z.sha256").Split(' ')[0]) { throw 'PSC zip hash differs' }; $d="$env:TEMP\psc-install-$v"; Expand-Archive $z $d; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$d\install.ps1"; if ($LASTEXITCODE -ne 0) { throw 'PSC installation failed' }; & "$env:LOCALAPPDATA\PocketShell\psc\bin\psc.cmd" login; & "$env:LOCALAPPDATA\PocketShell\psc\bin\psc.cmd" hosts sync
 ```
 
 Approve the device code using the URL printed by `psc login`. Windows stores
