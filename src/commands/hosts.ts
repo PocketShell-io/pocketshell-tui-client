@@ -306,7 +306,9 @@ export function registerHosts(program: Command): void {
       try {
         const versions = await client.probe();
         const ms = Date.now() - started;
-        const missing = versions.pocketshell === null;
+        // As in `hosts --check`: a present aplexer with no pocketshell beside
+        // it still serves (the resident path only needs the `a` helper).
+        const missing = versions.pocketshell === null && versions.aplexer === null;
         const result = {
           ok: !missing,
           host: name,

@@ -532,7 +532,10 @@ async function runAHosts(opts: { check?: boolean; json?: boolean }): Promise<voi
       connection = client.connection;
       const versions = await client.probe();
       const ms = Date.now() - started;
-      const missing = versions.pocketshell === null;
+      // The resident daemon path only needs the `a` RPC helper; its versions
+      // probe runs under the raw ssh PATH, so a present aplexer with no
+      // pocketshell beside it is online, not missing.
+      const missing = versions.pocketshell === null && versions.aplexer === null;
       return {
         ...host,
         default: isDefault,

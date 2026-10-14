@@ -1,5 +1,6 @@
 import { requests } from './context.js';
 import { HostClient } from '../hostClient.js';
+import { trace } from '../trace.js';
 import { parseHostSessionsList, type SessionRow, type SessionsListing } from '@pocketshell/core';
 import type { HostEntry } from '../hosts/store.js';
 import { openConnection } from '../transport/index.js';
@@ -12,11 +13,22 @@ interface Slot {
 const slots = new Map<string, Slot>();
 const unsupported = new Map<string, { generation: string; until: number }>();
 const backoff = new Map<string, { attempt: number; until: number; generation: string }>();
+/**
+ * Short-TTL negative cache for gateway refusals that prove the host side is
+ * gone (`HOST_OFFLINE`, `DEVICE_NOT_FOUND`): while cached the daemon fails
+ * fast with the original refusal instead of minting a token and dialling the
+ * gateway again. Auth failures and successes are never cached; the TTL is
+ * short so a host coming back online is picked up promptly.
+ */
+const OFFLINE_CODES = new Set(['HOST_OFFLINE', 'DEVICE_NOT_FOUND']);
+const OFFLINE_TTL_MS = 20_000;
+const offline = new Map<string, { generation: string; until: number; failure: RpcFailure }>();
 export function closeChannels(): void {
   for (const s of slots.values()) s.channel.close();
   slots.clear();
   unsupported.clear();
   backoff.clear();
+  offline.clear();
 }
 async function channelFor(host: HostEntry): Promise<HostChannel> {
   let policy;
@@ -32,6 +44,11 @@ async function channelFor(host: HostEntry): Promise<HostChannel> {
     return old.channel;
   }
   old?.channel.close();
+  const knownOffline = offline.get(host.name);
+  if (knownOffline?.generation === policy.generation && knownOffline.until > Date.now()) {
+    trace('offline_cache_hit');
+    throw knownOffline.failure;
+  }
   const previousRetry = backoff.get(host.name);
   const retry = previousRetry?.generation === policy.generation ? previousRetry : undefined;
   if (retry && retry.until > Date.now())
@@ -56,8 +73,16 @@ async function channelFor(host: HostEntry): Promise<HostChannel> {
   try {
     await channel.ready;
     backoff.delete(host.name);
+    offline.delete(host.name);
     return channel;
   } catch (error) {
+    if (error instanceof RpcFailure && OFFLINE_CODES.has(error.code)) {
+      offline.set(host.name, {
+        generation: policy.generation,
+        until: Date.now() + OFFLINE_TTL_MS,
+        failure: error,
+      });
+    }
     const attempt = Math.min(7, (retry?.attempt ?? 0) + 1);
     backoff.set(host.name, {
       generation: policy.generation,

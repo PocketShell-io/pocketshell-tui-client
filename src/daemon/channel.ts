@@ -9,6 +9,7 @@ import { ConnectionError } from '../transport/types.js';
 import { resolveEndpoint } from '../gateway/endpoint.js';
 import { pinFilePath, requirePinEntry } from '../gateway/pins.js';
 import { requests } from './context.js';
+import { USER_BIN_PATH } from '@pocketshell/core';
 import { frames, frame } from './framing.js';
 import type { HostEntry } from '../hosts/store.js';
 import { trace } from '../trace.js';
@@ -72,6 +73,21 @@ function expiryReceipt(path: string): number {
     } catch {}
   }
 }
+/** The remote shell command that serves the resident RPC helper. Pure for tests. */
+export function helperCommand(): string {
+  const helper = process.env.PSC_RPC_BINARY ?? 'a';
+  if (helper !== 'a' && (!helper.startsWith('/') || /[\x00-\x1f\x7f]/.test(helper)))
+    throw Error('development helper must be an absolute path');
+  // Resolve the helper exactly like the legacy transport does: a managed
+  // endpoint may export `a` as a shell function (bash inherits `BASH_FUNC_a%%`
+  // even into non-interactive ssh exec shells) pinning its own helper ahead
+  // of PATH, and the raw ssh PATH may not include the user bins at all. The
+  // prefix is a no-op where neither applies, and is skipped for an absolute
+  // development helper functions cannot shadow.
+  return helper === 'a'
+    ? `export PATH="${USER_BIN_PATH}:$PATH"; unset -f a; exec a rpc --stdio --protocol 1`
+    : `exec ${shQuote(helper)} rpc --stdio --protocol 1`;
+}
 /** One exec channel, retaining OpenSSH host-key verification and the existing private WSS proxy. */
 export class HostChannel {
   private child: ChildProcessWithoutNullStreams;
@@ -99,10 +115,7 @@ export class HostChannel {
     const invocation = process.argv[1]?.endsWith('/daemon.mjs')
       ? [process.execPath, join(dirname(fileURLToPath(import.meta.url)), 'psc.mjs')]
       : cliInvocation();
-    const helper = process.env.PSC_RPC_BINARY ?? 'a';
-    if (helper !== 'a' && (!helper.startsWith('/') || /[\x00-\x1f\x7f]/.test(helper)))
-      throw Error('development helper must be an absolute path');
-    const command = `exec ${shQuote(helper)} rpc --stdio --protocol 1`;
+    const command = helperCommand();
     const argv = buildGatewaySshArgv({
       deviceId: config.deviceId,
       endpoint: resolveEndpoint(config.server, config.server?.startsWith('ws://') ?? false),
