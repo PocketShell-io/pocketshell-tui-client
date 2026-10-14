@@ -1,6 +1,11 @@
 param([string]$SshPath = "$env:SystemRoot\System32\OpenSSH\ssh.exe")
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# A parent PowerShell 7 process can leave PSModulePath unsuitable for inbox
+# Windows PowerShell 5. Load only the engine's own modules by absolute path.
+foreach ($module in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Security')) {
+    Import-Module -Name "$PSHOME\Modules\$module\$module.psd1" -Force
+}
 
 function Assert-PlainPath([string]$Path) {
     if ($Path -notmatch '^[A-Za-z]:\\' -or $Path -match '[\s%"<>|?*]' -or $Path.Substring(2).Contains(':')) {
