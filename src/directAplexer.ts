@@ -1,3 +1,4 @@
+import { posix, win32 } from 'node:path';
 import type { SessionRow, SessionsListing } from '@pocketshell/core';
 
 const string = (value: unknown): string | null => typeof value === 'string' && value ? value : null;
@@ -17,7 +18,11 @@ export function directSessions(payload: unknown, now = Date.now()): SessionsList
     const workspace = string(r.workspace) ?? string(r.cwd);
     const tag = string(r.tag);
     const id = string(r.id)?.trim() || null;
-    const base = workspace?.replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop();
+    const windowsPath = workspace !== null && (/^[A-Za-z]:/.test(workspace) || workspace.startsWith('\\\\'));
+    const path = windowsPath ? win32 : posix;
+    const base = workspace === null ? ''
+      : windowsPath && workspace.replace(/[\\/]+$/, '') === path.parse(workspace).root.replace(/[\\/]+$/, '')
+        ? '' : path.basename(workspace);
     const name = base && tag?.trim() ? `${base}:${tag.trim()}` : tag?.trim() || id;
     const key = id ?? name;
     if (!name || !key || seen.has(key)) continue;
