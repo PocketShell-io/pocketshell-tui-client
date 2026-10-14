@@ -30,7 +30,8 @@ let jsonMode = process.env.PSC_JSON === '1';
 
 export function setJsonMode(value: boolean): void {
   const context = requests.getStore();
-  if (context) context.json ||= value; else jsonMode ||= value;
+  if (context) context.json ||= value;
+  else jsonMode ||= value;
 }
 
 export function isJsonMode(): boolean {
@@ -60,9 +61,21 @@ export function usageError(message: string): CliError {
 
 /** Emit a successful result: `data` as JSON, or `human()` as text. */
 export function emit(data: unknown, human?: () => string): void {
+  const context = requests.getStore();
   if (isJsonMode()) {
-    writeOutput('stdout', `${JSON.stringify(data)}\n`);
+    const document =
+      data && typeof data === 'object' && !Array.isArray(data)
+        ? {
+            ...data,
+            ...(context?.freshness ? { freshness: context.freshness } : {}),
+            ...(context?.transportPath ? { transportPath: context.transportPath } : {}),
+          }
+        : data;
+    writeOutput('stdout', `${JSON.stringify(document)}\n`);
   } else if (human) {
+    if (context?.freshness)
+      writeOutput('stderr', `snapshot ${context.freshness.generation}: ${context.freshness.ageMs}ms old\n`);
+    if (context?.transportPath === 'legacy') writeOutput('stderr', 'transport: legacy\n');
     const text = human();
     if (text) writeOutput('stdout', text.endsWith('\n') ? text : `${text}\n`);
   } else {
@@ -102,13 +115,20 @@ function codeOf(error: unknown): string | null {
 
 function detailsOf(error: unknown): Record<string, unknown> | undefined {
   const details = (error as { details?: unknown } | null)?.details;
-  return details && typeof details === 'object' && !Array.isArray(details) ? (details as Record<string, unknown>) : undefined;
+  return details && typeof details === 'object' && !Array.isArray(details)
+    ? (details as Record<string, unknown>)
+    : undefined;
 }
 
 /** A core HostCliFailed message whose detail is systemd-run's banner gets the real stderr line instead. */
 function hostCliMessage(error: HostCliError): string {
-  if (!(error instanceof HostCliFailed) || !/Running (?:scope )?as unit/.test(error.message)) return error.message;
-  const fromStderr = stripSystemdNoise(error.stderr).split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  if (!(error instanceof HostCliFailed) || !/Running (?:scope )?as unit/.test(error.message))
+    return error.message;
+  const fromStderr =
+    stripSystemdNoise(error.stderr)
+      .split('\n')
+      .map((l) => l.trim())
+      .find(Boolean) ?? '';
   if (fromStderr) {
     return `\`${error.command}\` failed on the host (exit ${error.exitCode}): ${fromStderr.slice(0, 200)}`;
   }
@@ -130,9 +150,17 @@ function classifyOne(error: unknown): Classified | null {
   if (error instanceof HostStoreError) return { code: 'HOST_STORE', message, exit: EXIT.USAGE };
   if (error instanceof HostCliError) {
     if (error instanceof HostCliFailed && error.timedOut) {
-      return { code: 'TIMEOUT', message: `${message} It may still complete on the host.`, exit: EXIT.TIMEOUT };
+      return {
+        code: 'TIMEOUT',
+        message: `${message} It may still complete on the host.`,
+        exit: EXIT.TIMEOUT,
+      };
     }
-    return { code: `HOST_CLI_${error.kind.toUpperCase()}`, message: hostCliMessage(error), exit: EXIT.HOST_CLI };
+    return {
+      code: `HOST_CLI_${error.kind.toUpperCase()}`,
+      message: hostCliMessage(error),
+      exit: EXIT.HOST_CLI,
+    };
   }
   const code = codeOf(error);
   if (code === null) return null;
@@ -165,7 +193,11 @@ export function classify(error: unknown): Classified {
     }
   }
   return (
-    classifyOne(error) ?? { code: 'ERROR', message: error instanceof Error ? error.message : String(error), exit: EXIT.ERROR }
+    classifyOne(error) ?? {
+      code: 'ERROR',
+      message: error instanceof Error ? error.message : String(error),
+      exit: EXIT.ERROR,
+    }
   );
 }
 

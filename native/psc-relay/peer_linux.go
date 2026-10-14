@@ -5,6 +5,7 @@ package main
 import (
 	"golang.org/x/sys/unix"
 	"net"
+	"os"
 )
 
 func peerUID(c *net.UnixConn) (uint32, error) {
@@ -25,4 +26,9 @@ func peerUID(c *net.UnixConn) (uint32, error) {
 		return 0, e
 	}
 	return uid, err
+}
+
+func stdinIsTTY() bool {
+	_, err := unix.IoctlGetTermios(int(os.Stdin.Fd()), unix.TCGETS)
+	return err == nil
 }

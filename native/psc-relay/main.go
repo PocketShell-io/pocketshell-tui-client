@@ -16,11 +16,23 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+var version = "dev"
+var traceStart = time.Now()
+
+func trace(stage string) {
+	if os.Getenv("PSC_TRACE") == "1" {
+		b, _ := json.Marshal(map[string]any{"psc_trace": 1, "stage": stage, "elapsedMs": float64(time.Since(traceStart).Microseconds()) / 1000})
+		fmt.Fprintln(os.Stderr, string(b))
+	}
+}
 
 const maxFrame = 2 << 20
 const maxInput = 1 << 20
@@ -75,7 +87,7 @@ func writeFrame(w io.Writer, v any) error {
 	return e
 }
 func namespace() string {
-	h := sha256.Sum256([]byte(strings.Join([]string{os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("POCKETSHELL_BROKER_URL"), os.Getenv("PSC_RPC_BINARY"), os.Getenv("PSC_JSON")}, "\x00")))
+	h := sha256.Sum256([]byte(strings.Join([]string{os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("POCKETSHELL_BROKER_URL"), os.Getenv("PSC_RPC_BINARY"), os.Getenv("PSC_JSON"), os.Getenv("PSC_DAEMON_IDLE_MS"), os.Getenv("PSC_HOST")}, "\x00")))
 	return hex.EncodeToString(h[:8])
 }
 func checkComponents(path string) error {
@@ -108,6 +120,9 @@ func runtimePath() (string, error) {
 	base := os.Getenv("XDG_RUNTIME_DIR")
 	if base == "" {
 		base = "/tmp"
+		if runtime.GOOS == "darwin" {
+			base = "/private/tmp"
+		}
 	}
 	if e := checkComponents(base); e != nil {
 		return "", e
@@ -126,6 +141,7 @@ func runtimePath() (string, error) {
 	}
 	return filepath.Join(p, namespace()+".sock"), nil
 }
+func sameUser(uid uint32, err error) bool { return err == nil && int(uid) == os.Geteuid() }
 func connect(path string) (*net.UnixConn, error) {
 	st, e := os.Lstat(path)
 	if e != nil {
@@ -134,12 +150,16 @@ func connect(path string) (*net.UnixConn, error) {
 	if st.Mode()&os.ModeSocket == 0 || st.Mode().Perm() != 0600 || int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
 		return nil, errors.New("unsafe socket")
 	}
-	c, e := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
+	raw, e := (&net.Dialer{Timeout: 10 * time.Millisecond}).Dial("unix", path)
+	var c *net.UnixConn
+	if e == nil {
+		c = raw.(*net.UnixConn)
+	}
 	if e != nil {
 		return nil, e
 	}
 	uid, e := peerUID(c)
-	if e != nil || int(uid) != os.Geteuid() {
+	if !sameUser(uid, e) {
 		c.Close()
 		return nil, errors.New("foreign daemon peer")
 	}
@@ -153,8 +173,16 @@ func eligible(a []string) bool {
 		return true
 	}
 	for _, s := range a {
-		if s == "--help" || s == "-h" {
+		if s == "--help" || s == "-h" || s == "--wait-for" {
 			return false
+		}
+	}
+	for i, w := range a {
+		if w == "--bytes" && i+1 < len(a) {
+			n, e := strconv.Atoi(a[i+1])
+			if e == nil && n > 1<<20 {
+				return false
+			}
 		}
 	}
 	b := a
@@ -207,18 +235,39 @@ func legacy(a []string, input []byte, consumed bool) int {
 	fmt.Fprintln(os.Stderr, "psc: legacy entry unavailable")
 	return 1
 }
+func relayFailure(a []string, code, message string) {
+	wantJSON := os.Getenv("PSC_JSON") == "1"
+	for _, word := range a {
+		if word == "--" {
+			break
+		}
+		if word == "--json" {
+			wantJSON = true
+		}
+	}
+	if wantJSON {
+		b, _ := json.Marshal(map[string]any{"ok": false, "error": map[string]string{"code": code, "message": message}})
+		fmt.Fprintln(os.Stdout, string(b))
+	} else {
+		fmt.Fprintln(os.Stderr, "psc: "+message)
+	}
+}
 func relay(a []string) int {
+	if len(a) == 1 && (a[0] == "--version" || a[0] == "-V") {
+		fmt.Println(version)
+		return 0
+	}
 	if os.Getenv("PSC_DAEMON") != "1" && !(len(a) > 0 && a[0] == "daemon") || !eligible(a) {
 		return legacy(a, nil, false)
 	}
 	path, e := runtimePath()
 	if e != nil {
-		fmt.Fprintln(os.Stderr, "psc: unsafe daemon runtime")
+		relayFailure(a, "DAEMON_UNSAFE", "unsafe daemon runtime")
 		return 1
 	}
 	c, e := connect(path)
 	if e != nil {
-		if len(a) > 1 && (a[1] == "stop" || a[1] == "status") {
+		if len(a) > 1 && a[0] == "daemon" && (a[1] == "stop" || a[1] == "status") {
 			if a[1] == "status" {
 				fmt.Println("{\"running\":false}")
 			}
@@ -247,12 +296,10 @@ func relay(a []string) int {
 		}
 	}
 	defer c.Close()
+	connectedSocket, _ := os.Lstat(path)
 	var input []byte
 	consumed := false
-	tty := false
-	if st, e := os.Stdin.Stat(); e == nil {
-		tty = st.Mode()&os.ModeCharDevice != 0
-	}
+	tty := stdinIsTTY()
 	for i, v := range a {
 		tail := []string{}
 		if v == "send" && i+2 <= len(a) {
@@ -266,18 +313,21 @@ func relay(a []string) int {
 			consumed = true
 			input, e = io.ReadAll(io.LimitReader(os.Stdin, maxInput+1))
 			if e != nil || len(input) > maxInput {
-				fmt.Fprintln(os.Stderr, "psc: stdin exceeds 1 MiB")
+				relayFailure(a, "USAGE", "stdin exceeds 1 MiB")
 				return 2
 			}
 		}
 	}
 	idBytes := make([]byte, 16)
-	rand.Read(idBytes)
+	if _, e = rand.Read(idBytes); e != nil {
+		relayFailure(a, "INTERNAL", "request identifier unavailable")
+		return 1
+	}
 	id := hex.EncodeToString(idBytes)
 	req := request{1, id, namespace(), a, input, tty, time.Now().Add(60 * time.Second).UnixMilli(), false}
 	c.SetDeadline(time.Now().Add(65 * time.Second))
 	if e = writeFrame(c, req); e != nil {
-		fmt.Fprintln(os.Stderr, "psc: request outcome unknown; not retried")
+		relayFailure(a, "OUTCOME_UNKNOWN", "request outcome unknown; not retried")
 		return 4
 	}
 	sigs := make(chan os.Signal, 1)
@@ -296,12 +346,12 @@ func relay(a []string) int {
 	for {
 		b, e := readFrame(c)
 		if e != nil {
-			fmt.Fprintln(os.Stderr, "psc: request outcome unknown; not retried")
+			relayFailure(a, "OUTCOME_UNKNOWN", "request outcome unknown; not retried")
 			return 4
 		}
 		var r response
 		if json.Unmarshal(b, &r) != nil || r.Protocol != 1 || r.ID != id {
-			fmt.Fprintln(os.Stderr, "psc: invalid daemon reply")
+			relayFailure(a, "OUTCOME_UNKNOWN", "invalid daemon reply; request not retried")
 			return 4
 		}
 		total += len(r.Data)
@@ -309,6 +359,8 @@ func relay(a []string) int {
 			return 4
 		}
 		switch r.Kind {
+		case "ack":
+			trace("ipc")
 		case "stdout":
 			if _, e = os.Stdout.WriteString(r.Data); e != nil {
 				return 0
@@ -318,6 +370,18 @@ func relay(a []string) int {
 				return 0
 			}
 		case "status":
+			if len(a) > 1 && a[0] == "daemon" && a[1] == "stop" && r.Status == 0 {
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					current, err := os.Lstat(path)
+					if os.IsNotExist(err) || err == nil && connectedSocket != nil && !os.SameFile(current, connectedSocket) {
+						return 0
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				relayFailure(a, "DAEMON_STOP_TIMEOUT", "daemon shutdown did not finish")
+				return 4
+			}
 			if r.Fallback {
 				return legacy(a, input, consumed)
 			}
@@ -350,9 +414,15 @@ func serve() error {
 		return nil
 	}
 	if st, e := os.Lstat(path); e == nil {
-		if live, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"}); err == nil {
+		if live, err := (&net.Dialer{Timeout: 100 * time.Millisecond}).Dial("unix", path); err == nil {
 			live.Close()
 			return errors.New("refusing live socket")
+		} else if !errors.Is(err, unix.ECONNREFUSED) && !errors.Is(err, os.ErrNotExist) {
+			return errors.New("socket liveness unknown")
+		}
+		current, err := os.Lstat(path)
+		if err != nil || !os.SameFile(current, st) {
+			return errors.New("socket changed while checking")
 		}
 		if st.Mode()&os.ModeSocket == 0 || int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
 			return errors.New("unsafe stale socket")
@@ -370,7 +440,16 @@ func serve() error {
 	if e = os.Chmod(path, 0600); e != nil {
 		return e
 	}
-	defer os.Remove(path)
+	boundSocket, e := os.Lstat(path)
+	if e != nil {
+		return e
+	}
+	defer func() {
+		current, err := os.Lstat(path)
+		if err == nil && os.SameFile(current, boundSocket) {
+			os.Remove(path)
+		}
+	}()
 	cmd := exec.Command("node", entry("daemon.mjs"))
 	cmd.Env = append(os.Environ(), "PSC_DAEMON_NAMESPACE="+namespace())
 	in, e := cmd.StdinPipe()
@@ -385,7 +464,18 @@ func serve() error {
 	if e = cmd.Start(); e != nil {
 		return e
 	}
-	defer func() { in.Close(); cmd.Process.Kill(); cmd.Wait() }()
+	defer func() {
+		in.Close()
+		cmd.Process.Signal(unix.SIGTERM)
+		done := make(chan struct{})
+		go func() { cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			cmd.Process.Kill()
+			<-done
+		}
+	}()
 	var mu sync.Mutex
 	var writeMu sync.Mutex
 	pending := map[string]chan response{}
@@ -416,6 +506,14 @@ func serve() error {
 			}
 		}
 	}()
+	idleAfter := 10 * time.Minute
+	if value := os.Getenv("PSC_DAEMON_IDLE_MS"); value != "" {
+		ms, err := strconv.Atoi(value)
+		if err != nil || ms < 100 || ms > 600000 {
+			return errors.New("invalid idle interval")
+		}
+		idleAfter = time.Duration(ms) * time.Millisecond
+	}
 	last := time.Now()
 	active := 0
 	go func() {
@@ -427,7 +525,7 @@ func serve() error {
 				return
 			case <-t.C:
 				mu.Lock()
-				idle := active == 0 && time.Since(last) > 10*time.Minute
+				idle := active == 0 && time.Since(last) > idleAfter
 				mu.Unlock()
 				if idle {
 					stop()
@@ -461,7 +559,7 @@ func serve() error {
 				mu.Unlock()
 			}()
 			uid, e := peerUID(c)
-			if e != nil || int(uid) != os.Geteuid() {
+			if !sameUser(uid, e) {
 				return
 			}
 			c.SetDeadline(time.Now().Add(65 * time.Second))
@@ -470,12 +568,18 @@ func serve() error {
 				return
 			}
 			var r request
-			if json.Unmarshal(b, &r) != nil || r.Protocol != 1 || r.Namespace != namespace() || len(r.ID) != 32 || len(r.Args) > 256 || len(r.Input) > maxInput || r.Deadline <= time.Now().UnixMilli() || r.Deadline > time.Now().Add(61*time.Second).UnixMilli() {
+			if json.Unmarshal(b, &r) != nil || r.Cancel || r.Protocol != 1 || r.Namespace != namespace() || len(r.ID) != 32 || len(r.Args) > 256 || len(r.Input) > maxInput || r.Deadline <= time.Now().UnixMilli() || r.Deadline > time.Now().Add(61*time.Second).UnixMilli() {
+				return
+			}
+			if _, err := hex.DecodeString(r.ID); err != nil {
 				return
 			}
 			if len(r.Args) > 1 && r.Args[0] == "daemon" && r.Args[1] == "stop" {
 				writeFrame(c, response{Protocol: 1, ID: r.ID, Kind: "status"})
 				stop()
+				return
+			}
+			if writeFrame(c, response{Protocol: 1, ID: r.ID, Kind: "ack"}) != nil {
 				return
 			}
 			ch := make(chan response, 8)
@@ -526,11 +630,18 @@ func serve() error {
 	}
 }
 func main() {
+	if os.Getuid() != os.Geteuid() {
+		os.Exit(1)
+	}
+	signal.Ignore(unix.SIGPIPE)
 	if len(os.Args) == 2 && os.Args[1] == "--serve" {
 		if e := serve(); e != nil {
 			os.Exit(1)
 		}
 		return
 	}
-	os.Exit(relay(os.Args[1:]))
+	trace("client_entry")
+	code := relay(os.Args[1:])
+	trace("output_exit")
+	os.Exit(code)
 }

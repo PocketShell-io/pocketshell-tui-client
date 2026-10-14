@@ -1,3 +1,4 @@
+import { requests } from './daemon/context.js';
 /**
  * Everything the client asks of a PocketShell host, over any Connection.
  *
@@ -189,7 +190,7 @@ export class HostClient {
   /** Run a raw command under the user's full PATH. */
   run(command: string, timeoutMs = DEFAULT_TIMEOUT_MS, stdin?: string | Uint8Array): Promise<ExecOutcome> {
     if (this.native) return this.native.run(command, timeoutMs, stdin);
-    return this.connection.exec(pathAwareCommand(command), { timeoutMs, stdin });
+    return this.connection.exec(pathAwareCommand(command), { timeoutMs, stdin, signal: requests.getStore()?.signal });
   }
 
   /** Like `run`, but a non-zero exit (or a timeout) is an error. */
@@ -256,6 +257,18 @@ export class HostClient {
       if (exact.length === 1) return exact[0]!;
     }
     return pickSession(sessions, selector);
+  }
+
+  /** Resolve and execute atomically when the transport supports a resident helper. */
+  async sendSelected(selector: string, text: string, options: { enter: boolean }): Promise<SessionRow> {
+    const row = await this.resolveSession(selector);
+    await this.send(row, text, options);
+    return row;
+  }
+
+  async captureSelected(selector: string, options: { mode: 'screen' | 'raw'; bytes?: number }): Promise<{ row: SessionRow; text: string }> {
+    const row = await this.resolveSession(selector);
+    return { row, text: await this.capture(row, options) };
   }
 
   createSession(

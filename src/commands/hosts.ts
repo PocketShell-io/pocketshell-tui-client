@@ -1,3 +1,4 @@
+import { requests, setExitCode } from '../daemon/context.js';
 /** `hosts list|add|remove|default|check`: the saved host inventory. */
 import { InvalidArgumentError, type Command } from 'commander';
 import { mintGatewayToken } from '../account/index.js';
@@ -299,9 +300,11 @@ export function registerHosts(program: Command): void {
       if (opts.json) setJsonMode(true);
       const host = getHost(name);
       const started = Date.now();
-      const connection = await openConnection(host);
+      const client = requests.getStore()
+        ? await (await import('../daemon/services.js')).daemonClient(host)
+        : new HostClient(await openConnection(host), host.binary, host);
       try {
-        const versions = await new HostClient(connection, host.binary, host).probe();
+        const versions = await client.probe();
         const ms = Date.now() - started;
         const missing = versions.pocketshell === null;
         const result = {
@@ -321,9 +324,9 @@ export function registerHosts(program: Command): void {
             `aplexer:     ${versions.aplexer === null ? 'missing' : safeLine(versions.aplexer)}`,
           ].join('\n'),
         );
-        if (missing) process.exitCode = EXIT.HOST_CLI;
+        if (missing) setExitCode(EXIT.HOST_CLI);
       } finally {
-        await connection.close();
+        await client.connection.close();
       }
     }),
   );
