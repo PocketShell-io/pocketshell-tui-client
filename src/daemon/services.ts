@@ -1,15 +1,43 @@
-import { requests } from './context.js';
-import { HostClient } from '../hostClient.js';
+import { requests, type RequestContext } from './context.js';
+import { HostClient, pickSession } from '../hostClient.js';
 import { noteResidentCapability } from '../hostCapability.js';
 import { trace } from '../trace.js';
 import { parseHostSessionsList, type SessionRow, type SessionsListing } from '@pocketshell/core';
 import type { HostEntry } from '../hosts/store.js';
 import { openConnection } from '../transport/index.js';
-import { HostChannel, RpcFailure } from './channel.js';
+import { HostChannel, RpcFailure, type EventFrame } from './channel.js';
 import { gatewayPolicy } from './policy.js';
+
+/** A replica answer is served only while the last push frame is this fresh. */
+export const REPLICA_LIVE_WINDOW_MS = 6_000;
+/** A screen mirror nobody captured for this long is unsubscribed. */
+const MIRROR_IDLE_MS = 10 * 60_000;
+/** Client-side screen-mirror cap (the helper allows 16; keep headroom). */
+const MAX_SCREENS = 8;
+
+interface Replica {
+  listing: SessionsListing;
+  seq: number;
+  generation: string;
+  receivedAt: number;
+}
+
+interface ScreenMirror {
+  subscription: string;
+  uuid: string;
+  row: SessionRow;
+  text: string;
+  seq: number;
+  receivedAt: number;
+  lastCapturedAt: number;
+}
+
 interface Slot {
   generation: string;
   channel: HostChannel;
+  replica?: Replica;
+  sessionsSubscription?: string;
+  screens: Map<string, ScreenMirror>;
 }
 const slots = new Map<string, Slot>();
 const unsupported = new Map<string, { generation: string; until: number }>();
@@ -30,6 +58,86 @@ export function closeChannels(): void {
   unsupported.clear();
   backoff.clear();
   offline.clear();
+}
+
+/** Route one protocol-2 push frame into the host's replica state. */
+function routeEvent(hostName: string, channel: HostChannel, frame: EventFrame): void {
+  const slot = slots.get(hostName);
+  if (!slot || slot.channel !== channel) return;
+  try {
+    if (frame.topic === 'sessions') {
+      if (frame.subscription !== slot.sessionsSubscription) return;
+      if (frame.event === 'snapshot') {
+        // Full state, gap or not: replace, never merge.
+        slot.replica = {
+          listing: parseHostSessionsList(JSON.stringify(frame.data)),
+          seq: frame.seq,
+          generation: frame.generation ?? slot.replica?.generation ?? '',
+          receivedAt: Date.now(),
+        };
+      } else if (frame.event === 'heartbeat' && slot.replica) {
+        if (frame.generation && slot.replica.generation && frame.generation !== slot.replica.generation) {
+          slot.replica = undefined; // a different helper generation: retire the replica
+          return;
+        }
+        slot.replica.receivedAt = Date.now();
+        slot.replica.seq = frame.seq;
+      }
+      return;
+    }
+    if (frame.topic.startsWith('screen:')) {
+      const mirror = slot.screens.get(frame.topic.slice('screen:'.length));
+      if (!mirror || mirror.subscription !== frame.subscription) return;
+      if (frame.event === 'ended') {
+        slot.screens.delete(mirror.uuid);
+        return;
+      }
+      // snapshot frames are full state: replace (gap or not).
+      if (frame.event === 'screen') {
+        const data = frame.data as { text?: unknown } | undefined;
+        if (!data || typeof data.text !== 'string') return;
+        mirror.text = data.text;
+        try {
+          mirror.row = selected(data);
+        } catch {
+          /* keep the last known row */
+        }
+        mirror.seq = frame.seq;
+      }
+      mirror.receivedAt = Date.now();
+    }
+  } catch {
+    /* a malformed frame never tears the channel down */
+  }
+}
+
+/** Subscribe the sessions push stream once a protocol-2 channel is ready. */
+async function primeReplica(hostName: string, channel: HostChannel): Promise<void> {
+  if (channel.negotiated.protocol !== 2) return;
+  try {
+    const { subscription } = await channel.subscribe(['sessions'], { format: 'psc' });
+    const slot = slots.get(hostName);
+    if (slot?.channel === channel) slot.sessionsSubscription = subscription;
+  } catch {
+    /* no push stream: reads simply stay request/response */
+  }
+}
+
+/** Retire screen mirrors nobody captured recently. */
+let sweeper: NodeJS.Timeout | undefined;
+function ensureSweeper(): void {
+  if (sweeper) return;
+  sweeper = setInterval(() => {
+    for (const slot of slots.values()) {
+      for (const [uuid, mirror] of slot.screens) {
+        if (Date.now() - mirror.lastCapturedAt > MIRROR_IDLE_MS) {
+          slot.screens.delete(uuid);
+          void slot.channel.unsubscribe(mirror.subscription).catch(() => {});
+        }
+      }
+    }
+  }, 60_000);
+  sweeper.unref();
 }
 async function channelFor(host: HostEntry): Promise<HostChannel> {
   let policy;
@@ -70,11 +178,13 @@ async function channelFor(host: HostEntry): Promise<HostChannel> {
         },
       ),
   );
-  slots.set(host.name, { generation: policy.generation, channel });
+  channel.onEvent = (frame) => routeEvent(host.name, channel, frame);
+  slots.set(host.name, { generation: policy.generation, channel, screens: new Map() });
   try {
     await channel.ready;
     backoff.delete(host.name);
     offline.delete(host.name);
+    void primeReplica(host.name, channel);
     return channel;
   } catch (error) {
     if (error instanceof RpcFailure && OFFLINE_CODES.has(error.code)) {
@@ -133,6 +243,33 @@ class RpcHostClient extends HostClient {
       host,
     );
   }
+
+  /** The established slot for this host, when its channel is still usable. */
+  private async liveSlot(): Promise<Slot | undefined> {
+    const slot = slots.get(this.host!.name);
+    if (!slot) return undefined;
+    try {
+      await slot.channel.ready;
+      return slot;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private static replicaLive(slot: Slot): boolean {
+    return Boolean(slot.replica && Date.now() - slot.replica.receivedAt <= REPLICA_LIVE_WINDOW_MS);
+  }
+
+  private static mirrorLive(slot: Slot, uuid: string): boolean {
+    const mirror = slot.screens.get(uuid);
+    return Boolean(mirror && Date.now() - mirror.receivedAt <= REPLICA_LIVE_WINDOW_MS);
+  }
+
+  /** Record the source of the answer for the command's JSON meta. */
+  private static noteRead(context: RequestContext | undefined, meta: RequestContext['replicaMeta']): void {
+    if (context) context.replicaMeta = meta;
+  }
+
   override async probe(): Promise<{ pocketshell: string | null; aplexer: string | null }> {
     await request(this.host!, 'ping', {});
     const channel = await channelFor(this.host!);
@@ -143,12 +280,38 @@ class RpcHostClient extends HostClient {
       aplexer: typeof versions?.aplexer === 'string' ? versions.aplexer : null,
     };
   }
-  override async listSessions(): Promise<SessionsListing> {
+
+  override async listSessions(options: { fresh?: boolean } = {}): Promise<SessionsListing> {
+    const context = requests.getStore();
+    const slot = await this.liveSlot();
+    if (!options.fresh && slot && RpcHostClient.replicaLive(slot) && slot.replica) {
+      RpcHostClient.noteRead(context, {
+        source: 'replica',
+        seq: slot.replica.seq,
+        ageMs: Date.now() - slot.replica.receivedAt,
+      });
+      return slot.replica.listing;
+    }
+    RpcHostClient.noteRead(context, { source: 'live' });
     return listing(await request(this.host!, 'list', { format: 'psc' }));
   }
-  override async resolveSession(selector: string): Promise<SessionRow> {
+
+  override async resolveSession(selector: string, options: { fresh?: boolean } = {}): Promise<SessionRow> {
+    const context = requests.getStore();
+    const slot = await this.liveSlot();
+    if (!options.fresh && slot && RpcHostClient.replicaLive(slot) && slot.replica) {
+      const row = pickSession(slot.replica.listing.sessions, selector);
+      RpcHostClient.noteRead(context, {
+        source: 'replica',
+        seq: slot.replica.seq,
+        ageMs: Date.now() - slot.replica.receivedAt,
+      });
+      return row;
+    }
+    RpcHostClient.noteRead(context, { source: 'live' });
     return selected(await request(this.host!, 'status', { selector, selectorMode: 'psc' }));
   }
+
   override async sendSelected(
     selector: string,
     text: string,
@@ -163,10 +326,27 @@ class RpcHostClient extends HostClient {
       ),
     );
   }
+
   override async captureSelected(
     selector: string,
-    options: { mode: 'screen' | 'raw'; bytes?: number },
+    options: { mode: 'screen' | 'raw'; bytes?: number; fresh?: boolean },
   ): Promise<{ row: SessionRow; text: string }> {
+    const context = requests.getStore();
+    const slot = await this.liveSlot();
+    // The mirror carries rendered screens only; raw history always round-trips.
+    if (!options.fresh && options.mode === 'screen' && slot && RpcHostClient.replicaLive(slot) && slot.replica) {
+      const resolved = pickSession(slot.replica.listing.sessions, selector);
+      if (resolved.id && RpcHostClient.mirrorLive(slot, resolved.id)) {
+        const mirror = slot.screens.get(resolved.id)!;
+        mirror.lastCapturedAt = Date.now();
+        RpcHostClient.noteRead(context, {
+          source: 'replica',
+          seq: mirror.seq,
+          ageMs: Date.now() - mirror.receivedAt,
+        });
+        return { row: mirror.row, text: mirror.text };
+      }
+    }
     const value = await request(this.host!, 'capture', {
       selector,
       selectorMode: 'psc',
@@ -181,8 +361,53 @@ class RpcHostClient extends HostClient {
           ? Buffer.from(result.data, 'base64').toString('utf8')
           : null;
     if (text === null) throw new RpcFailure('RPC_PROTOCOL', 'capture text missing');
-    return { row: selected(value), text };
+    const captured = selected(value);
+    RpcHostClient.noteRead(context, { source: 'live' });
+    if (options.mode === 'screen' && captured.id && slot)
+      await RpcHostClient.ensureMirror(slot, captured.id, { row: captured, text });
+    return { row: captured, text };
   }
+
+  /** Subscribe (or refresh) the screen mirror for a just-captured session. */
+  private static async ensureMirror(
+    slot: Slot,
+    uuid: string,
+    initial: { row: SessionRow; text: string },
+  ): Promise<void> {
+    ensureSweeper();
+    const existing = slot.screens.get(uuid);
+    if (existing) {
+      existing.lastCapturedAt = Date.now();
+      return;
+    }
+    if (slot.channel.negotiated.protocol !== 2) return;
+    if (slot.screens.size >= MAX_SCREENS) {
+      // Evict the least recently captured mirror to stay inside the budget.
+      let oldest: string | undefined;
+      for (const [key, mirror] of slot.screens)
+        if (oldest === undefined || mirror.lastCapturedAt < slot.screens.get(oldest)!.lastCapturedAt) oldest = key;
+      if (oldest !== undefined) {
+        const evicted = slot.screens.get(oldest)!;
+        slot.screens.delete(oldest);
+        void slot.channel.unsubscribe(evicted.subscription).catch(() => {});
+      }
+    }
+    try {
+      const { subscription } = await slot.channel.subscribe([`screen:${uuid}`], { selectorMode: 'psc' });
+      slot.screens.set(uuid, {
+        subscription,
+        uuid,
+        row: initial.row,
+        text: initial.text,
+        seq: 0,
+        receivedAt: Date.now(),
+        lastCapturedAt: Date.now(),
+      });
+    } catch {
+      /* mirror unavailable: later captures keep round-tripping */
+    }
+  }
+
   override async capture(
     row: SessionRow,
     options: { mode: 'screen' | 'raw'; bytes?: number },

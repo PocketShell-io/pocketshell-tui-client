@@ -21,6 +21,12 @@ import { table } from './sessions.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The read-source meta of the last operation, when a resident transport served it. */
+function replicaMeta(): { meta?: { source: 'replica' | 'live'; seq?: number; ageMs?: number } } {
+  const meta = requests.getStore()?.replicaMeta;
+  return meta ? { meta } : {};
+}
+
 export const A_HELP = `Usage: psc [options] <host> <command>
        psc hosts [--check]
 
@@ -619,13 +625,14 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     hostCmd
       .command('ls')
       .alias('list')
-      .description('sessions on <host> (name, engine, state, workspace) — plain table'),
+      .description('sessions on <host> (name, engine, state, workspace) — plain table')
+      .option('--fresh', 'force a live round trip instead of the local replica (when live)'),
   ).action(
-    action(async (opts: { json?: boolean }) => {
+    action(async (opts: { json?: boolean; fresh?: boolean }) => {
       if (opts.json) setJsonMode(true);
       await withResolvedHost(hostSelector, async (client, host) => {
-        const listing = await client.listSessions();
-        emit({ ok: true, host: host.name, ...listing }, () => {
+        const listing = await client.listSessions({ fresh: opts.fresh });
+        emit({ ok: true, host: host.name, ...listing, ...replicaMeta() }, () => {
           const lines: string[] = [];
           if (listing.sessions.length === 0) {
             lines.push(`no sessions on ${host.name}`);
@@ -752,7 +759,8 @@ export function buildHostVerbProgram(hostSelector: string): Command {
       .option('--wait-for <regex>', 'poll (~every 500 ms) until the capture matches this regex (multiline)')
       .option('--timeout <seconds>', 'with --wait-for: give up after this long (exit 124)', parseSeconds, 30)
       .option('--raw', 'recent raw output bytes instead of the rendered screen')
-      .option('--bytes <n>', 'with --raw: how many history bytes', parsePositiveInt),
+      .option('--bytes <n>', 'with --raw: how many history bytes', parsePositiveInt)
+      .option('--fresh', 'force a live round trip instead of the screen mirror (when live)'),
   ).action(
     action(
       async (
@@ -764,6 +772,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
           raw?: boolean;
           bytes?: number;
           json?: boolean;
+          fresh?: boolean;
         },
       ) => {
         if (opts.json) setJsonMode(true);
@@ -771,7 +780,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
         const pattern = opts.waitFor === undefined ? null : compileRegex(opts.waitFor);
         await withResolvedHost(hostSelector, async (client, host) => {
           const mode = opts.raw ? 'raw' : 'screen';
-          const captureOptions = { mode, bytes: opts.bytes } as const;
+          const captureOptions = { mode, bytes: opts.bytes, fresh: opts.fresh } as const;
           const row = pattern ? await client.resolveSession(selector) : null;
           if (pattern && row) {
             const deadline = Date.now() + opts.timeout * 1000;
@@ -790,6 +799,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
                     ...(opts.lines !== undefined ? { lines: opts.lines } : {}),
                     matched: true,
                     match: match[0],
+                    ...replicaMeta(),
                   },
                   () => text,
                 );
@@ -818,6 +828,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
               mode,
               text,
               ...(opts.lines !== undefined ? { lines: opts.lines } : {}),
+              ...replicaMeta(),
             },
             () => text,
           );
@@ -935,14 +946,15 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     hostCmd
       .command('status <session>')
       .alias('show')
-      .description("one session's row (state, agent state, engine, created)"),
+      .description("one session's row (state, agent state, engine, created)")
+      .option('--fresh', 'force a live round trip instead of the local replica (when live)'),
   ).action(
-    action(async (selector: string, opts: { json?: boolean }) => {
+    action(async (selector: string, opts: { json?: boolean; fresh?: boolean }) => {
       if (opts.json) setJsonMode(true);
       await withResolvedHost(hostSelector, async (client, host) => {
-        const row = await client.resolveSession(selector);
+        const row = await client.resolveSession(selector, { fresh: opts.fresh });
         const createdIso = row.createdEpoch ? new Date(row.createdEpoch * 1000).toISOString() : '-';
-        emit({ ok: true, host: host.name, session: row }, () =>
+        emit({ ok: true, host: host.name, session: row, ...replicaMeta() }, () =>
           table(
             ['NAME', 'STATE', 'AGENT STATE', 'ENGINE', 'CREATED', 'WORKSPACE'],
             [

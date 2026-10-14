@@ -41,6 +41,8 @@ vi.mock('../src/daemon/channel.js', async (original) => {
   return {
     ...actual,
     HostChannel: class {
+      negotiated = { protocol: 1 };
+      onEvent: unknown = undefined;
       ready: Promise<unknown>;
       constructor(_host: any, _expiry: any, retire: (e: unknown, established: boolean) => void) {
         state.constructions++;
@@ -99,13 +101,13 @@ beforeEach(() => {
 describe('resident helper command', () => {
   it('resolves the helper like the legacy transport: user bins first, no shadowing function', () => {
     expect(helperCommand()).toBe(
-      `export PATH="${USER_BIN_PATH}:$PATH"; unset -f a; exec a rpc --stdio --protocol 1`,
+      `export PATH="${USER_BIN_PATH}:$PATH"; unset -f a; exec a rpc --stdio --protocol 2`,
     );
   });
 
   it('keeps an absolute development helper untouched', () => {
     process.env.PSC_RPC_BINARY = '/opt/aplexer-test/a';
-    expect(helperCommand()).toBe('exec /opt/aplexer-test/a rpc --stdio --protocol 1');
+    expect(helperCommand()).toBe('exec /opt/aplexer-test/a rpc --stdio --protocol 2');
   });
 
   it('refuses a non-absolute development helper', () => {

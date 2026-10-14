@@ -508,7 +508,9 @@ export class HostClient {
     return this.backend ? (await this.backend).direct : null;
   }
 
-  async listSessions(): Promise<SessionsListing> {
+  /** `fresh` forces a live round trip where a transport supports a local replica; ignored here. */
+  async listSessions(options: { fresh?: boolean } = {}): Promise<SessionsListing> {
+    void options;
     if (this.native) return this.native.listSessions();
     const first = await this.sessionsBackend();
     if (first.listing) return first.listing;
@@ -526,7 +528,8 @@ export class HostClient {
    * {@link pickSession} for the ranking). Throws SessionNotFound or
    * SessionAmbiguous.
    */
-  async resolveSession(selector: string): Promise<SessionRow> {
+  async resolveSession(selector: string, options: { fresh?: boolean } = {}): Promise<SessionRow> {
+    void options;
     const { sessions } = await this.listSessions();
     if (this.native) {
       const exact = uniqueRows(sessions.filter((row) => row.id === selector || row.name === selector
@@ -544,7 +547,8 @@ export class HostClient {
     return row;
   }
 
-  async captureSelected(selector: string, options: { mode: 'screen' | 'raw'; bytes?: number }): Promise<{ row: SessionRow; text: string }> {
+  async captureSelected(selector: string, options: { mode: 'screen' | 'raw'; bytes?: number; fresh?: boolean }): Promise<{ row: SessionRow; text: string }> {
+    void options.fresh;
     const row = await this.resolveSession(selector);
     return { row, text: await this.capture(row, options) };
   }

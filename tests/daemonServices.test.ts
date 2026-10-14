@@ -39,6 +39,8 @@ vi.mock('../src/daemon/channel.js', async (original) => {
   return {
     ...actual,
     HostChannel: class {
+      negotiated = { protocol: 1 };
+      onEvent: unknown = undefined;
       ready = Promise.resolve({
         pscSchema: state.capable ? 3 : null,
         selectorModes: ['psc'],
