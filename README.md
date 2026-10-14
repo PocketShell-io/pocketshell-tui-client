@@ -60,6 +60,22 @@ psc login | logout | whoami           PocketShell account (device flow)
 psc gateway devices|pin|unpin         gateway hosts and their pinned keys
 ```
 
+## Credentials
+
+`psc login` is an [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)-style
+device login: it prints a short code and a URL, you approve the code in a
+browser on a machine you trust, and the CLI polls until you confirm. The device
+flow is the only issuance path: an existing token cannot be imported (there is
+no `--token-stdin`, and no token environment variable).
+
+The session is stored in
+`${XDG_CONFIG_HOME:-~/.config}/pocketshell/credentials.json`, mode `0600`
+inside a `0700` directory, and every write replaces the file atomically (temp
+file + rename). On POSIX it is shared with the Python `pocketshell` CLI. A
+session expires after 30 days, or after 14 days without use; `psc logout`
+revokes it, and every session can be listed and revoked from the web
+(`psc whoami` prints the URL).
+
 ## Remote aplexer (`psc a`)
 
 `psc a` is a short, predictable command family for non-interactively driving

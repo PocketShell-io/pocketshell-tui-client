@@ -35,6 +35,11 @@ to PocketShell. The session is stored in
 with the \`pocketshell\` CLI on POSIX. Windows uses a separately approved current-user DPAPI PSC store and never imports a Python session. An existing login is never replaced silently: pass
 --force to replace it (the old session is then revoked). Ctrl+C cancels (exit 130).
 
+The device flow is the only issuance path: an existing API token cannot be
+imported (there is no --token-stdin and no token environment variable). The
+credentials file is replaced atomically (temp file + rename) inside a 0700
+directory.
+
 --json streams TWO JSON lines on stdout (the one command that does):
   1. as soon as the code is issued, relay it to a human:
      {"event":"pending","userCode":"BCDF-GHJK","verificationUri":"https://...",
