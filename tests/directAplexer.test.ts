@@ -17,6 +17,11 @@ describe('direct snapshot mapping', () => {
       workspace: raw.workspace, tag: 'test', engine: null, profile: null, agent: 'codex', agentState: 'idle',
       agentStateSource: 'reported', attached: true, createdEpoch: 1, activityEpoch: 10, phase: 'running' }] });
   });
+  it('uses tag alone at a Windows drive/share root and preserves literal POSIX backslashes', () => {
+    expect(directSessions([{ ...raw, workspace: 'C:/' }]).sessions[0]?.name).toBe('test');
+    expect(directSessions([{ ...raw, workspace: '\\\\server\\share\\' }]).sessions[0]?.name).toBe('test');
+    expect(directSessions([{ ...raw, workspace: '/tmp/a\\b' }]).sessions[0]?.name).toBe('a\\b:test');
+  });
   it('filters dead, unknown and duplicate records and applies heuristic state expiry', () => {
     const rows = directSessions([raw, raw, { ...raw, id: 'dead', state: 'exited' },
       { ...raw, id: 'unknown', state: 'unknown' }, { ...raw, id: 'starting', state: 'starting', phase: 'starting' }], 24000).sessions;
