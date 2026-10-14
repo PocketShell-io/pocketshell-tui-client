@@ -270,6 +270,9 @@ them. Hosts without the explicit native policy retain their Linux/POSIX behavior
 
 ## Windows outgoing client source candidate
 
+For the per-user offline Windows x64 zip, installation, account bootstrap and
+release checks, see [Windows package installation](docs/windows-package.md).
+
 The Windows branch uses local drive-absolute paths, separate DPAPI-backed account state (`pocketshell-client-account/credentials.dpapi`), and the protected state helper described in `native/psc-security/README.md`. Python's plaintext credentials are neither imported nor overwritten. Device login preflights storage before requesting a grant. Pin parsing, full SSH public-key validation, aliases and explicit replacement checks remain the existing shared logic; Windows storage routes through the protected helper.
 
 Reviewed protected staging must supply `dist/windows-bindings.json`, adjacent to the emitted CLI tree, with exactly these fields: `version` (2), `sshFamily` (`win32-openssh`), absolute `helper`, `ssh`, `node`, `entry`, `systemRoot`, `systemDrive`, `programData`, and lowercase full SHA256 `helperSha256`, `sshSha256`, `nodeSha256`, `entrySha256`. The helper basename is `psc-security.exe`, and SSH is a qualified Win32 OpenSSH `ssh.exe`. Source mode looks for the equivalent `src/windows-bindings.json`; this candidate supplies neither file nor a runtime bypass. The manifest, Node executable, CLI tree and helper must be staged under verified protected ancestors by the parent. Digests bind reviewed files; a writable manifest is not an independent trust anchor. A manifest chosen by environment, cwd, PATH or an SSH override is refused.

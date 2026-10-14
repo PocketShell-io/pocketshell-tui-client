@@ -2,6 +2,7 @@ node_modules/
 dist/
 .fixture-*/
 dist-bundle/
+out/
 .tmp/
 *.log
 *.tgz
