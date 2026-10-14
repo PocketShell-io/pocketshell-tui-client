@@ -12,6 +12,9 @@ const api = await import(pathToFileURL(join(prefix, 'psc/dist/platform/windows.j
 const bindings = api.bindings();
 assert.equal(Object.keys(bindings).length, 13);
 assert.equal(bindings.node.toLowerCase(), process.execPath.toLowerCase());
+const ssh = spawnSync(bindings.ssh, ['-V'], { encoding: 'utf8', shell: false, windowsHide: true });
+assert.equal(ssh.status, 0, ssh.stderr);
+assert.match(ssh.stderr + ssh.stdout, /OpenSSH_for_Windows/);
 const root = mkdtempSync(join(process.env.LOCALAPPDATA, 'PocketShell/psc-smoke-'));
 // The helper creates the final directory with its protected descriptor.
 rmSync(root, { recursive: true });
