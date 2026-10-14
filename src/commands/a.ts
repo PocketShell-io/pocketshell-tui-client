@@ -2,6 +2,7 @@
  * `psc <host> <verb>` (legacy spelling `psc a <host> <verb>`): remote aplexer through PocketShell — one short, predictable
  * command family for driving agent sessions across hosts.
  */
+import { requests } from '../daemon/context.js';
 import { Command } from 'commander';
 import type { CreatedSession, SessionRow } from '@pocketshell/core';
 import { mintGatewayToken } from '../account/index.js';
@@ -64,6 +65,8 @@ function ref(row: SessionRow): { name: string; id: string | null } {
 
 /** Read everything from stdin. */
 export async function readAllStdin(): Promise<string> {
+  const context = requests.getStore();
+  if (context) return context.stdin;
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   return Buffer.concat(chunks).toString('utf8');
@@ -79,8 +82,9 @@ export async function readAllStdin(): Promise<string> {
 export async function resolveSendText(
   text: string | undefined,
   readStdin: () => Promise<string> = readAllStdin,
-  stdinIsTty = Boolean(process.stdin.isTTY),
+  stdinIsTty = requests.getStore()?.tty ?? Boolean(process.stdin.isTTY),
 ): Promise<string> {
+  if (requests.getStore() && text !== undefined && Buffer.byteLength(text)>1<<20) throw usageError('send payload exceeds 1 MiB');
   if (text !== undefined && text !== '-') return text;
   if (text === '-' || !stdinIsTty) {
     return (await readStdin()).replace(/\r?\n$/, '');
