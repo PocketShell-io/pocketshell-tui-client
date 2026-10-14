@@ -135,6 +135,20 @@ try {
         [Environment]::SetEnvironmentVariable('Path', (($oldPath.TrimEnd(';') + ';' + $bin).TrimStart(';')), 'User')
     }
     $env:Path = "$bin;$env:Path"
+    # Explorer refreshes its environment for subsequently opened terminals.
+    if (!(('PscEnvironmentNotify' -as [type]))) {
+        Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class PscEnvironmentNotify {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg,
+        UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);
+}
+'@
+    }
+    $notification = [UIntPtr]::Zero
+    [void][PscEnvironmentNotify]::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$notification)
     Write-Host "PSC installed. Open a new terminal, then run psc login and psc hosts sync. Shim: $bin\psc.cmd"
 } catch {
     if ($fresh) { Remove-Item -LiteralPath $dest -Recurse -Force }
