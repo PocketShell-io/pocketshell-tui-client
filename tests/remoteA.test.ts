@@ -442,7 +442,7 @@ describe('device presence and HOST_OFFLINE detail enrichment', () => {
       'host agent not connected (pocketshell gateway run / pocketshell-link not running on the host)',
     );
     expect(onlineDetail).toBe(
-      'host agent is connected but could not reach its local sshd (start OpenSSH Server / sshd on the host)',
+      'host agent is connected but its private SSH endpoint did not answer (check the PocketShell gateway tray or `pocketshell gateway status` on the host; no system sshd is used)',
     );
 
     const err = new ConnectionError(`laptop: ${onlineDetail}`, 'HOST_OFFLINE', 4, { detail: onlineDetail });
