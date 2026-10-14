@@ -272,12 +272,17 @@ func relayFailure(a []string, code, message string) {
 		fmt.Fprintln(os.Stderr, "psc: "+message)
 	}
 }
+// The resident daemon is the default on this platform (unix sockets only;
+// Windows keeps the classic path until a named-pipe daemon lands): an
+// explicit PSC_DAEMON=0 opts out, and every daemon failure still falls back
+// transparently to the classic entry.
+func daemonEnabled() bool { return os.Getenv("PSC_DAEMON") != "0" }
 func relay(a []string) int {
 	if len(a) == 1 && (a[0] == "--version" || a[0] == "-V") {
 		fmt.Println(version)
 		return 0
 	}
-	if os.Getenv("PSC_DAEMON") != "1" && !(len(a) > 0 && a[0] == "daemon") || !eligible(a) {
+	if !daemonEnabled() && !(len(a) > 0 && a[0] == "daemon") || !eligible(a) {
 		return legacy(a, nil, false)
 	}
 	path, e := runtimePath()

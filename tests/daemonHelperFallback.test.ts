@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadBackendCapability } from '../src/hostCapability.js';
 
 /**
  * Old-helper fallback (see channel.helperCommand + services.daemonClient):
@@ -82,6 +86,7 @@ function stubContext() {
 }
 
 beforeEach(() => {
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'psc-helper-fallback-'));
   closeChannels();
   state.generation = 'A';
   state.now = 1_700_000_000_000;
@@ -117,6 +122,9 @@ describe('old-helper legacy fallback', () => {
     expect(vi.mocked(openConnection)).toHaveBeenCalledTimes(1);
     expect(state.constructions).toBe(1);
     expect(context.transportPath).toBe('legacy');
+    // An old-helper refusal downgrades knowledge but never invents it: with
+    // nothing probed yet, there is still no backend verdict to serve.
+    expect(loadBackendCapability(laptop)).toBeNull();
   });
 
   it('caches the verdict briefly, then re-dials', async () => {

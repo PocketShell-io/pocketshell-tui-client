@@ -1,5 +1,6 @@
 import { requests } from './context.js';
 import { HostClient } from '../hostClient.js';
+import { noteResidentCapability } from '../hostCapability.js';
 import { trace } from '../trace.js';
 import { parseHostSessionsList, type SessionRow, type SessionsListing } from '@pocketshell/core';
 import type { HostEntry } from '../hosts/store.js';
@@ -115,7 +116,7 @@ function selected(value: unknown): SessionRow {
   return parsed;
 }
 class RpcHostClient extends HostClient {
-  constructor(private host: HostEntry) {
+  constructor(host: HostEntry) {
     super(
       {
         hostName: host.name,
@@ -129,11 +130,12 @@ class RpcHostClient extends HostClient {
         close: async () => {},
       },
       host.binary,
+      host,
     );
   }
   override async probe(): Promise<{ pocketshell: string | null; aplexer: string | null }> {
-    await request(this.host, 'ping', {});
-    const channel = await channelFor(this.host);
+    await request(this.host!, 'ping', {});
+    const channel = await channelFor(this.host!);
     const capabilities = (await channel.ready) as { versions?: { pocketshell?: unknown; aplexer?: unknown } };
     const versions = capabilities.versions;
     return {
@@ -142,10 +144,10 @@ class RpcHostClient extends HostClient {
     };
   }
   override async listSessions(): Promise<SessionsListing> {
-    return listing(await request(this.host, 'list', { format: 'psc' }));
+    return listing(await request(this.host!, 'list', { format: 'psc' }));
   }
   override async resolveSession(selector: string): Promise<SessionRow> {
-    return selected(await request(this.host, 'status', { selector, selectorMode: 'psc' }));
+    return selected(await request(this.host!, 'status', { selector, selectorMode: 'psc' }));
   }
   override async sendSelected(
     selector: string,
@@ -154,7 +156,7 @@ class RpcHostClient extends HostClient {
   ): Promise<SessionRow> {
     return selected(
       await request(
-        this.host,
+        this.host!,
         'send',
         { selector, selectorMode: 'psc', payload: text, submit: options.enter },
         true,
@@ -165,7 +167,7 @@ class RpcHostClient extends HostClient {
     selector: string,
     options: { mode: 'screen' | 'raw'; bytes?: number },
   ): Promise<{ row: SessionRow; text: string }> {
-    const value = await request(this.host, 'capture', {
+    const value = await request(this.host!, 'capture', {
       selector,
       selectorMode: 'psc',
       mode: options.mode === 'raw' ? 'history' : 'screenPlain',
@@ -211,11 +213,16 @@ export async function daemonClient(host: HostEntry): Promise<HostClient> {
     const channel = await channelFor(host);
     const caps = (await channel.ready) as { pscSchema?: number; selectorModes?: string[] };
     if (caps.pscSchema !== 3 || !caps.selectorModes?.includes('psc')) return legacy();
+    // The negotiation itself proved the helper: remember that this host has
+    // `a`, so a later classic fallback serves `a --json snapshot` in one
+    // connection instead of re-probing through the wrapper.
+    noteResidentCapability(host, true);
     const context = requests.getStore();
     if (context) context.transportPath = 'resident';
     return new RpcHostClient(host);
   } catch (error) {
     if (error instanceof RpcFailure && error.code === 'RPC_UNSUPPORTED' && error.notDispatched) {
+      noteResidentCapability(host, false);
       unsupported.set(host.name, { generation: policy.generation, until: Date.now() + 30_000 });
       return legacy();
     }

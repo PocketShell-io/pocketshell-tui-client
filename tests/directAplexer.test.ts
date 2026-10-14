@@ -1,14 +1,19 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { directSessions } from '../src/directAplexer.js';
 import { HostClient } from '../src/hostClient.js';
+import { loadBackendCapability } from '../src/hostCapability.js';
 import { ConnectionError, type Connection, type ExecOutcome } from '../src/transport/types.js';
+import { isProbeExec, isRawAplexerExec, probeStdout } from './hostProbeFixture.js';
 
 const raw = { id: 'abcd1234', workspace: 'C:/Users/Alexey/my project', tag: 'test', engine: 'shell',
   state: 'running', phase: 'running', created_at_ms: 1000, last_activity_ms: 10000,
   reported_state: 'idle', reported_state_at_ms: 15000, attached_clients: 2, agent: ' codex ' };
 const outcome = (stdout: string, exitCode = 0): ExecOutcome => ({ stdout, exitCode, stderr: '', timedOut: false });
-function connection(exec: Connection['exec']): Connection {
-  return { hostName: 'direct', mode: 'ssh', exec, attachInteractive: async () => 0, close: async () => {} };
+function connection(exec: Connection['exec'], hostName = 'direct'): Connection {
+  return { hostName, mode: 'ssh', exec, attachInteractive: async () => 0, close: async () => {} };
 }
 
 describe('direct snapshot mapping', () => {
@@ -32,24 +37,76 @@ describe('direct snapshot mapping', () => {
 });
 
 describe('host session backend', () => {
-  it.each([127, 1])('falls back on wrapper exit %i and resolves a from the initial endpoint PATH once', async (code) => {
+  let xdg: string | undefined;
+  beforeEach(() => {
+    xdg = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'psc-backend-'));
+  });
+  afterEach(() => {
+    if (xdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = xdg;
+  });
+
+  it.each([127, 1])('falls back on wrapper exit %i and resolves a from the raw endpoint PATH once', async (code) => {
     const seen: string[] = [];
     const client = new HostClient(connection(async (cmd) => {
       seen.push(cmd);
-      if (cmd.includes('pocketshell sessions list')) return { ...outcome('', code), stderr: 'sessions is not supported on Windows by this CLI' };
-      if (cmd === 'command -v a') return outcome('/managed runtime/python/a\n');
+      if (isProbeExec(cmd))
+        return outcome(probeStdout({ wrapper: { exit: code }, apath: '' }));
+      if (isRawAplexerExec(cmd))
+        return outcome(probeStdout({ apath: '/managed runtime/python/a', snapshot: { output: JSON.stringify([raw]) } }));
       return outcome(JSON.stringify([raw]));
     }));
     await client.listSessions();
     await client.captureSelected('test', { mode: 'screen' });
     await client.sendSelected('test', 'echo safe', { enter: true });
     await client.killSession('test', raw.id);
-    expect(seen.filter((c) => c.includes('pocketshell sessions list'))).toHaveLength(1);
-    expect(seen.filter((c) => c === 'command -v a')).toHaveLength(1);
+    expect(seen.filter(isProbeExec)).toHaveLength(1);
+    expect(seen.filter(isRawAplexerExec)).toHaveLength(1);
     for (const verb of ['snapshot', 'capture', 'send', 'kill']) {
-      expect(seen.some((c) => c.includes(verb) && c.includes('/managed runtime/python/a'))).toBe(true);
+      expect(seen.some((c) => c.includes(verb) && c.includes(`'/managed runtime/python/a'`))).toBe(true);
     }
   });
+
+  it('serves a working wrapper and a working a from one combined probe exec, preferring a', async () => {
+    const seen: string[] = [];
+    const client = new HostClient(connection(async (cmd) => {
+      seen.push(cmd);
+      if (isProbeExec(cmd))
+        return outcome(
+          probeStdout({
+            wrapper: { output: JSON.stringify({ schema: 3, sessions: [], errors: [] }) },
+            apath: '/home/u/.local/bin/a',
+            snapshot: { output: JSON.stringify([raw]) },
+          }),
+        );
+      return outcome(JSON.stringify([raw]));
+    }));
+    const listing = await client.listSessions();
+    expect(listing.sessions.map((r) => r.id)).toEqual([raw.id]);
+    expect(seen).toHaveLength(1);
+    // The probe's own listing is served, never fetched twice.
+    expect(seen[0]).toContain('pocketshell sessions list --json');
+    expect(seen[0]).toContain('--json snapshot');
+  });
+
+  it('caches the wrapper-only verdict and skips both a sections on later lists', async () => {
+    const seen: string[] = [];
+    const client = new HostClient(connection(async (cmd) => {
+      seen.push(cmd);
+      if (isProbeExec(cmd))
+        return outcome(probeStdout({ wrapper: { output: JSON.stringify({ schema: 3, sessions: [], errors: [] }) }, apath: '' }));
+      if (isRawAplexerExec(cmd)) return outcome(probeStdout({ apath: '' }));
+      return outcome(JSON.stringify({ schema: 3, sessions: [], errors: [] }));
+    }));
+    await client.listSessions();
+    expect(seen).toHaveLength(2); // combined probe + raw aplexer probe (no a anywhere)
+    await client.listSessions();
+    expect(seen).toHaveLength(3); // one plain wrapper list, nothing else
+    expect(seen[2]).toContain('pocketshell sessions list --json');
+    expect(isProbeExec(seen[2])).toBe(false);
+  });
+
   it('does not downgrade transport failures or timeouts to an alternate backend', async () => {
     const seen: string[] = [];
     const client = new HostClient(connection(async (cmd) => {
@@ -59,28 +116,29 @@ describe('host session backend', () => {
     await expect(client.listSessions()).rejects.toThrow('offline');
     expect(seen).toHaveLength(1);
     const timeout = new HostClient(connection(async () => ({ ...outcome(''), timedOut: true, exitCode: null })));
-    await expect(timeout.listSessions()).rejects.toMatchObject({ timedOut: true });
+    await expect(timeout.listSessions()).rejects.toMatchObject({ code: 'TIMEOUT', outcome: { timedOut: true } });
   });
+
   it('caches a successful fallback across client instances for the same saved host', async () => {
     const seen: string[] = [];
     const host = { name: 'cache-direct-fixture', mode: 'ssh' as const, ssh: { destination: 'fixture' } };
-    const conn = () => ({ ...connection(async (cmd) => {
+    const conn = () => connection(async (cmd) => {
       seen.push(cmd);
-      if (cmd.includes('pocketshell sessions list')) return outcome('', 127);
-      if (cmd === 'command -v a') return outcome('/managed/a');
+      if (isProbeExec(cmd)) return outcome(probeStdout({ wrapper: { exit: 127 }, apath: '/managed/a', snapshot: { output: JSON.stringify([raw]) } }));
       return outcome(JSON.stringify([raw]));
-    }), hostName: host.name });
+    }, host.name);
     await new HostClient(conn(), 'pocketshell', host).listSessions();
     await new HostClient(conn(), 'pocketshell', host).listSessions();
-    expect(seen.filter((c) => c.includes('pocketshell sessions list'))).toHaveLength(1);
-    expect(seen.filter((c) => c === 'command -v a')).toHaveLength(1);
+    expect(seen.filter(isProbeExec)).toHaveLength(1);
+    expect(seen.filter(isRawAplexerExec)).toHaveLength(0);
+    expect(loadBackendCapability(host)).toMatchObject({ wrapper: false, direct: '/managed/a' });
   });
+
   it('starts a new session with quoted arguments and returns the wrapper create shape', async () => {
     const seen: string[] = [];
     const client = new HostClient(connection(async (cmd) => {
       seen.push(cmd);
-      if (cmd.includes('pocketshell sessions list')) return outcome('', 127);
-      if (cmd === 'command -v a') return outcome('/managed/a');
+      if (isProbeExec(cmd)) return outcome(probeStdout({ wrapper: { exit: 127 }, apath: '/managed/a', snapshot: { output: JSON.stringify([]) } }));
       if (cmd.includes('pwd -P')) return outcome('/c/Users/Alexey/my project\n');
       if (cmd.includes('--json start')) return outcome(JSON.stringify(raw));
       return outcome('[]');
@@ -90,12 +148,12 @@ describe('host session backend', () => {
     expect(seen.filter((c) => c.includes('--json start'))).toHaveLength(1);
     expect(seen.find((c) => c.includes('--json start'))).toContain('--engine');
   });
+
   it('creates directly and reuses an existing workspace/tag without starting again', async () => {
     const seen: string[] = [];
     const client = new HostClient(connection(async (cmd) => {
       seen.push(cmd);
-      if (cmd.includes('pocketshell sessions list')) return outcome('', 127);
-      if (cmd === 'command -v a') return outcome('/managed/a');
+      if (isProbeExec(cmd)) return outcome(probeStdout({ wrapper: { exit: 127 }, apath: '/managed/a', snapshot: { output: JSON.stringify([raw]) } }));
       if (cmd.includes('pwd -P')) return outcome('/c/Users/Alexey/my project\n');
       return outcome(JSON.stringify([raw]));
     }));

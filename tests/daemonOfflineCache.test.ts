@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * Short-TTL negative cache for offline gateway refusals (see services.ts):
@@ -55,6 +58,7 @@ const desktop = { name: 'desktop', mode: 'gateway' as const, gateway: { deviceId
 vi.spyOn(Date, 'now').mockImplementation(() => state.now);
 
 beforeEach(() => {
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'psc-offline-cache-'));
   closeChannels();
   state.generation = 'A';
   state.now = 1_700_000_000_000;

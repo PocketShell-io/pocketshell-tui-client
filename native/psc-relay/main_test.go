@@ -103,6 +103,24 @@ func TestEligibility(t *testing.T) {
 	}
 }
 
+func TestDaemonDefault(t *testing.T) {
+	// The resident daemon is on unless explicitly opted out; `daemon ...` is always allowed through.
+	for _, value := range []string{"", "1", "anything"} {
+		t.Setenv("PSC_DAEMON", value)
+		if !daemonEnabled() {
+			t.Fatalf("PSC_DAEMON=%q must keep the daemon on", value)
+		}
+	}
+	t.Setenv("PSC_DAEMON", "0")
+	if daemonEnabled() {
+		t.Fatal("PSC_DAEMON=0 must opt out")
+	}
+	os.Unsetenv("PSC_DAEMON")
+	if !daemonEnabled() {
+		t.Fatal("unset PSC_DAEMON must default to the daemon")
+	}
+}
+
 func TestForeignUID(t *testing.T) {
 	if sameUser(uint32(os.Geteuid()+1), nil) {
 		t.Fatal("foreign UID accepted")
