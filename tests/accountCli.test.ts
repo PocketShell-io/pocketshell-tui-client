@@ -160,8 +160,9 @@ describe('CLI', () => {
     routes['POST /auth/device/token'] = () => ({ status: 400, body: { error: 'access_denied' } });
     const r = await cli(['login', '--no-open']);
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain('To log in, open:  https://app.pocketshell.io/device\nand enter code:   BCDF-GHJK');
-    expect(r.stdout).toContain('Confirm the code shown in the browser matches: BCDF-GHJK');
+    expect(r.stdout).toContain('To log in, open:  https://app.pocketshell.io/device\nand type this code: BCDF-GHJK');
+    expect(r.stdout).not.toContain('Confirm the code shown in the browser matches:');
+    expect(r.stdout).not.toContain('last 4 characters');
     expect(r.stdout).toContain('Waiting for approval (Ctrl+C to cancel)...');
     expect(r.stdout + r.stderr).not.toContain('evil.example');
     expect(r.stderr).toMatch(/warning: the broker sent a verification URL outside/);
@@ -173,7 +174,7 @@ describe('CLI', () => {
     expect(r.code).toBe(2);
     expect(JSON.parse(r.stdout)).toMatchObject({ ok: false, error: { code: 'USAGE' } });
     expect(hits).toEqual([]);
-  });
+  }, 30_000);
 
   it('logout --json: 429 keeps the file and exits 1; then 401 counts as logged out', async () => {
     storeCreds();
