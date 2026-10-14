@@ -27,6 +27,7 @@ import {
   type PendingLogin,
 } from '../src/account/index.js';
 import { sessionBrokerUrl, validateBrokerUrl, webOrigin } from '../src/account/config.js';
+import { rewriteVerificationUri } from '../src/account/device.js';
 import { load, save, serialize, type Credentials } from '../src/account/credentials.js';
 import { loadsStrict, parseStrict } from '../src/account/json.js';
 import { cleanText, httpsUrl } from '../src/account/sanitize.js';
@@ -320,16 +321,49 @@ describe('login (device flow)', () => {
     }
   });
 
-  it('never shows an untrusted verification URL', async () => {
+  it('rewrites a lookalike-host verification URL onto the trusted origin (bba21c7f)', async () => {
     happyRoutes();
     routes['POST /auth/device/start'] = deviceStart({
       verification_uri: 'https://app.pocketshell.io.evil.example/device',
       verification_uri_complete: `https://app.pocketshell.io.evil.example/device?code=${CODE}`,
     });
     const { pendingInfo, warnings } = await runLogin();
-    expect(pendingInfo[0]).toMatchObject({ verificationUri: 'https://app.pocketshell.io/device', verificationUriComplete: null });
-    expect(warnings.join()).toMatch(/outside https:\/\/app\.pocketshell\.io; it was not shown/);
+    expect(warnings).toEqual([]);
+    expect(pendingInfo[0]).toEqual({
+      userCode: CODE,
+      verificationUri: VERIFY,
+      verificationUriComplete: `${VERIFY}?code=${CODE}`,
+      expiresIn: 600,
+    });
+    // The raw host is never shown or opened.
     expect(JSON.stringify(pendingInfo)).not.toContain('evil');
+  });
+
+  it('rewrites a raw internal verification host onto the trusted origin (bba21c7f)', async () => {
+    happyRoutes();
+    routes['POST /auth/device/start'] = deviceStart({
+      verification_uri: 'https://raw-broker.internal.example/device',
+      verification_uri_complete: `https://raw-broker.internal.example/device?code=${CODE}`,
+    });
+    const { pendingInfo, warnings } = await runLogin();
+    expect(warnings).toEqual([]);
+    expect(pendingInfo[0]).toEqual({
+      userCode: CODE,
+      verificationUri: VERIFY,
+      verificationUriComplete: `${VERIFY}?code=${CODE}`,
+      expiresIn: 600,
+    });
+  });
+
+  it('a verification URL that cannot be served on the trusted origin is still suppressed', async () => {
+    happyRoutes();
+    routes['POST /auth/device/start'] = deviceStart({
+      verification_uri: 'ftp://app.pocketshell.io/device',
+      verification_uri_complete: null,
+    });
+    const { pendingInfo, warnings } = await runLogin();
+    expect(pendingInfo[0]).toMatchObject({ verificationUri: VERIFY, verificationUriComplete: null });
+    expect(warnings.join()).toMatch(/outside https:\/\/app\.pocketshell\.io; it was not shown/);
   });
 
   it('drops a pre-filled URL whose code differs from the printed one', async () => {
@@ -339,12 +373,16 @@ describe('login (device flow)', () => {
     expect(pendingInfo[0]).toMatchObject({ verificationUri: VERIFY, verificationUriComplete: null, userCode: CODE });
   });
 
-  it('http verification URLs are untrusted too', async () => {
+  it('an http verification URL is upgraded onto the trusted https origin, never shown as-is', async () => {
     happyRoutes();
-    routes['POST /auth/device/start'] = deviceStart({ verification_uri: 'http://app.pocketshell.io/device' });
+    routes['POST /auth/device/start'] = deviceStart({
+      verification_uri: 'http://app.pocketshell.io/device',
+      verification_uri_complete: `http://app.pocketshell.io/device?code=${CODE}`,
+    });
     const { pendingInfo, warnings } = await runLogin();
+    expect(warnings).toEqual([]);
     expect(pendingInfo[0]!.verificationUri).toBe('https://app.pocketshell.io/device');
-    expect(warnings).toHaveLength(1);
+    expect(pendingInfo[0]!.verificationUriComplete).toBe(`${VERIFY}?code=${CODE}`);
   });
 
   it('does not follow a redirect', async () => {
@@ -448,6 +486,23 @@ describe('login (device flow)', () => {
 });
 
 // -- whoami / logout ---------------------------------------------------------
+
+describe('rewriteVerificationUri (dataops bba21c7f)', () => {
+  const raw = 'https://el4jt4z2k4lnxwvoqawrdcsedm0axjzc.lambda-url.eu-west-1.on.aws/#/device?userCode=BCDF-GHJK';
+  it('rewrites a raw internal host onto the target origin, keeping path, query and hash', () => {
+    expect(rewriteVerificationUri(raw, 'https://app.pocketshell.io')).toBe(
+      'https://app.pocketshell.io/#/device?userCode=BCDF-GHJK',
+    );
+  });
+  it('leaves a URI already on the target origin untouched', () => {
+    expect(rewriteVerificationUri(`${VERIFY}?code=XYZ`, 'https://app.pocketshell.io')).toBe(`${VERIFY}?code=XYZ`);
+  });
+  it('null for unparseable or non-http(s) URIs and targets', () => {
+    expect(rewriteVerificationUri('not a url', 'https://app.pocketshell.io')).toBeNull();
+    expect(rewriteVerificationUri('ftp://host/device', 'https://app.pocketshell.io')).toBeNull();
+    expect(rewriteVerificationUri('https://host/device', 'not a url')).toBeNull();
+  });
+});
 
 describe('whoami', () => {
   it('verified against the broker', async () => {

@@ -3,9 +3,11 @@
  * the caller gets the code through `onPending` and renders it however it likes.
  *
  * 1. `POST /auth/device/start` with a label (`user@hostname`).
- * 2. Validate the user code and the verification URL (https on the trusted
- *    origin; the pre-filled URL only when it is exactly
- *    `${verification_uri}?code=${user_code}`), then call `onPending`.
+ * 2. Rewrite the verification URL onto the trusted web origin (a broker
+ *    behind a raw internal hostname keeps only its path/query/hash — port of
+ *    dataops bba21c7f), require https on that origin (the pre-filled URL only
+ *    when it is exactly `${verification_uri}?code=${user_code}`), then call
+ *    `onPending`.
  * 3. Poll `POST /auth/device/token` every `interval` s; slow_down/429 add 5 s
  *    (cap 60); access_denied/expired_token stop; ≤ 5 transient failures.
  * 4. Confirm with `GET /cli/session` and save. If anything fails — including
@@ -90,6 +92,28 @@ function trusted(value: unknown, origin: string): string | null {
   return url !== null && sameOrigin(url, origin) ? url : null;
 }
 
+/**
+ * Port of dataops bba21c7f: a broker behind a raw internal hostname (e.g. a
+ * Lambda-style function URL) returns verification URIs on that host, but only
+ * the trusted web origin may ever be shown or opened. Graft the URI's path,
+ * query and hash onto `targetOrigin` and drop its host; a URI already on the
+ * target origin passes through untouched; anything unparseable or not
+ * http(s) is null (the caller suppresses it entirely).
+ */
+export function rewriteVerificationUri(rawUri: string, targetOrigin: string): string | null {
+  let parsed: URL;
+  let target: URL;
+  try {
+    parsed = new URL(rawUri);
+    target = new URL(targetOrigin);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  if (parsed.origin === target.origin) return rawUri;
+  return `${target.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
 const defaultSleep = (seconds: number, signal?: AbortSignal): Promise<void> =>
   delay(seconds * 1000, undefined, { signal });
 const defaultMonotonic = (): number => performance.now() / 1000;
@@ -119,8 +143,10 @@ export async function deviceLogin(options: DeviceLoginOptions): Promise<Credenti
       // Never echo it: an unexpected code could carry terminal escapes.
       throw new AccountError(`The broker returned a malformed user code. ${AGAIN}`);
     }
-    let verificationUri = trusted(start.verificationUri, origin);
-    let completeUri = trusted(start.verificationUriComplete, origin);
+    const rewrite = (uri: unknown): string | null =>
+      typeof uri === 'string' ? rewriteVerificationUri(uri, origin) : null;
+    let verificationUri = trusted(rewrite(start.verificationUri), origin);
+    let completeUri = trusted(rewrite(start.verificationUriComplete), origin);
     if (verificationUri === null) {
       options.onWarning?.(
         `the broker sent a verification URL outside ${origin}; it was not shown or opened.`,

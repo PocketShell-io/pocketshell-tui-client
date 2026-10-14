@@ -165,7 +165,8 @@ describe('CLI', () => {
     expect(r.stdout).not.toContain('last 4 characters');
     expect(r.stdout).toContain('Waiting for approval (Ctrl+C to cancel)...');
     expect(r.stdout + r.stderr).not.toContain('evil.example');
-    expect(r.stderr).toMatch(/warning: the broker sent a verification URL outside/);
+    // dataops bba21c7f: the URL was rewritten onto the trusted origin, so no warning fires.
+    expect(r.stderr).not.toMatch(/warning:/);
     expect(r.stderr).toMatch(/error: The login request was denied/);
   }, 30_000);
 

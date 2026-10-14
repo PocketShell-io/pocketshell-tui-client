@@ -13,13 +13,13 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { connect as netConnect, createServer as createNetServer, type Socket } from 'node:net';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import * as broker from '../src/account/broker.js';
-import { save } from '../src/account/credentials.js';
+import { load, save } from '../src/account/credentials.js';
 import { deviceLogin } from '../src/account/device.js';
 import { logout, TransportRefused } from '../src/account/index.js';
 import {
@@ -530,6 +530,10 @@ describe('device login transport', () => {
     });
     expect(pending).toHaveLength(1);
     expect(requests.some((r) => r.path === '/auth/device/start')).toBe(true);
+    // The success criterion: the session actually saved, owner-only, and loads back.
+    expect(statSync(join(xdg, 'pocketshell', 'credentials.json')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(xdg, 'pocketshell')).mode & 0o777).toBe(0o700);
+    expect(load()?.accessToken).toBe(TOKEN);
   });
 
   it('succeeds through a trusted proxy (https broker, CONNECT tunnel, test CA)', async () => {
@@ -554,6 +558,9 @@ describe('device login transport', () => {
       });
       expect(pending).toHaveLength(1);
       expect(proxy.seen.length).toBeGreaterThan(0);
+      // Credentials saved through the tunnel are owner-only on disk.
+      expect(statSync(join(xdg, 'pocketshell', 'credentials.json')).mode & 0o777).toBe(0o600);
+      expect(load()?.accessToken).toBe(TOKEN);
     } finally {
       await proxy.close();
     }
