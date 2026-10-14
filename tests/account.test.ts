@@ -5,10 +5,10 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AccountError,
   BrokerRateLimited,
@@ -30,6 +30,24 @@ import { sessionBrokerUrl, validateBrokerUrl, webOrigin } from '../src/account/c
 import { load, save, serialize, type Credentials } from '../src/account/credentials.js';
 import { loadsStrict, parseStrict } from '../src/account/json.js';
 import { cleanText, httpsUrl } from '../src/account/sanitize.js';
+
+// Injectable node:fs failure for the atomic-write tests below (port of
+// dataops cli/test/config.test.mjs): while fsHooks.failRename is set,
+// renameSync fails synthetically, so save() must leave the original
+// credentials intact and remove its temporary file.
+const fsHooks = vi.hoisted(() => ({ failRename: false }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    renameSync(from: string, to: string): void {
+      if (fsHooks.failRename) {
+        throw Object.assign(new Error('synthetic rename failure'), { code: 'EFAIL' });
+      }
+      actual.renameSync(from, to);
+    },
+  };
+});
 
 // -- fake broker ---------------------------------------------------------------
 
@@ -703,6 +721,36 @@ describe('credentials file', () => {
       `{\n  "access_token": "${TOKEN}",\n  "broker_url": "https://b",\n  "email": "\\u00e9@x",\n  "expires_at": 5,\n` +
         `  "label": "l\\ud83d\\ude00",\n  "token_id": "t",\n  "version": 1\n}\n`,
     );
+  });
+
+  // Ported from dataops cli/test/config.test.mjs (the kept half of the
+  // 4d595da0 + 21317f4a device-login work): a credential write replaces the
+  // file atomically, leaves no temporary files behind, and a failed
+  // replacement leaves the original credentials intact.
+  it('a replacement leaves no temporary files and the new session is immediately readable', () => {
+    storeCreds({ accessToken: OLD_TOKEN, email: 'old@example.com' });
+    save({ brokerUrl: base, accessToken: TOKEN, tokenId: 'tok_1', email: 'you@example.com', expiresAt: now() + 86400, label: 'me@box' });
+    expect(readdirSync(join(xdg, 'pocketshell'))).toEqual(['credentials.json']);
+    expect(statSync(credPath()).mode & 0o777).toBe(0o600);
+    expect(statSync(join(xdg, 'pocketshell')).mode & 0o777).toBe(0o700);
+    expect(loadCredentials()).toMatchObject({ accessToken: TOKEN, email: 'you@example.com' });
+  });
+
+  it('a failed replacement leaves the original credentials intact and removes the temporary file', () => {
+    storeCreds({ accessToken: OLD_TOKEN, email: 'old@example.com' });
+    const original = readFileSync(credPath(), 'utf8');
+    fsHooks.failRename = true;
+    try {
+      expect(() =>
+        save({ brokerUrl: base, accessToken: TOKEN, tokenId: 'tok_1', email: 'you@example.com', expiresAt: now() + 86400, label: 'me@box' }),
+      ).toThrow(/Could not write .* \(EFAIL\)/);
+    } finally {
+      fsHooks.failRename = false;
+    }
+    expect(readFileSync(credPath(), 'utf8')).toBe(original);
+    expect(readdirSync(join(xdg, 'pocketshell'))).toEqual(['credentials.json']);
+    // The surviving session still loads.
+    expect(loadCredentials()).toMatchObject({ accessToken: OLD_TOKEN, email: 'old@example.com' });
   });
 });
 

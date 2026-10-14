@@ -176,6 +176,46 @@ describe('CLI', () => {
     expect(hits).toEqual([]);
   }, 30_000);
 
+  // Ported decision (dataops 4d595da0 + 21317f4a final state): a device flow is
+  // the only issuance path. Importing an existing API token was added and then
+  // removed there, so `login --token-stdin` must not exist here in any spelling
+  // and must never reach the broker or touch stored credentials.
+  it('login has no --token-stdin import: any spelling is a usage error and contacts nothing', async () => {
+    storeCreds();
+    const original = readFileSync(credPath(), 'utf8');
+    // The real entry: it owns the commander → USAGE/exit 2 routing.
+    const realCli = (args: string[]): Promise<{ code: number; stdout: string; stderr: string }> =>
+      new Promise((done) => {
+        execFile(
+          process.execPath,
+          ['--import', 'tsx', join(ROOT, 'src/cli.ts'), ...args],
+          { cwd: ROOT, env: { ...process.env, PSC_JSON: '' }, timeout: 60_000 },
+          (error, stdout, stderr) => {
+            const code = error ? (typeof error.code === 'number' ? error.code : 1) : 0;
+            done({ code, stdout, stderr });
+          },
+        );
+      });
+    for (const args of [
+      ['--token-stdin'],
+      [`--token-stdin=${TOKEN}`],
+      ['--token-stdin', '--force'],
+      ['--token-stdin', '--label', 'me@box'],
+    ]) {
+      const json = await realCli(['login', ...args, '--json']);
+      expect(json.code).toBe(2);
+      expect(JSON.parse(json.stdout)).toMatchObject({
+        ok: false,
+        error: { code: 'USAGE', message: expect.stringMatching(/unknown option '--token-stdin/) },
+      });
+      const human = await realCli(['login', ...args]);
+      expect(human.code).toBe(2);
+      expect(human.stderr).toMatch(/unknown option '--token-stdin/);
+    }
+    expect(hits).toEqual([]);
+    expect(readFileSync(credPath(), 'utf8')).toBe(original);
+  }, 120_000);
+
   it('logout --json: 429 keeps the file and exits 1; then 401 counts as logged out', async () => {
     storeCreds();
     routes['POST /cli/logout'] = () => ({ status: 429, body: { error: 'rate_limited' } });
