@@ -27,6 +27,7 @@ import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import type { Readable, Writable } from 'node:stream';
 import WebSocket from 'ws';
+import { TransportRefused } from '../account/errors.js';
 import { PROXY_MARKER, writeStatusFile } from '../transport/openssh.js';
 import { clientSshUrl, validateDeviceId, type GatewayEndpoint } from './endpoint.js';
 import { isPlainObject, parseStrictJson, sanitizeRemoteText, StrictJsonError } from './text.js';
@@ -44,6 +45,8 @@ export const EXIT = {
   HOST_OFFLINE: 9,
   QUOTA: 10,
   LOST: 11,
+  /** The transport policy refused to send credentials (fail-closed env proxy). Never a login problem. */
+  TRANSPORT_REFUSED: 12,
 } as const;
 
 /** Stable machine codes for the stderr marker, one per exit status. */
@@ -59,6 +62,7 @@ export const EXIT_CODE_NAME: Record<number, string> = {
   9: 'HOST_OFFLINE',
   10: 'GATEWAY_QUOTA',
   11: 'CONNECTION_LOST',
+  12: 'TRANSPORT_REFUSED',
 };
 
 /** Short human summaries for the terminal form of the failure line. */
@@ -74,6 +78,7 @@ const SUMMARY: Record<string, string> = {
   HOST_OFFLINE: 'host offline',
   GATEWAY_QUOTA: 'quota exceeded',
   CONNECTION_LOST: 'connection lost',
+  TRANSPORT_REFUSED: 'proxy refused',
 };
 
 /** The machine-readable failure line (stderr when piped, and the status file). */
@@ -207,6 +212,12 @@ interface Outcome {
 }
 
 function tokenFailure(error: unknown): Outcome {
+  if (error instanceof TransportRefused || (error as { code?: unknown })?.code === 'TRANSPORT_REFUSED') {
+    // Ours, not remote text: pass the refusal through verbatim (it names the
+    // fixes) under its own marker code, so no slicer or login hint touches it.
+    const reason = error instanceof Error ? error.message : String(error);
+    return { code: EXIT.TRANSPORT_REFUSED, message: `could not get a gateway token: ${reason}` };
+  }
   const detail = sanitizeRemoteText(error instanceof Error ? error.message : String(error), 1000);
   const notLoggedIn = (error as { code?: unknown })?.code === 'NOT_LOGGED_IN';
   return {

@@ -13,7 +13,8 @@ import {
   whoami,
   type PendingLogin,
 } from '../account/index.js';
-import { emit, isJsonMode, setJsonMode } from '../output.js';
+import { setExitCode } from '../daemon/context.js';
+import { emit, EXIT, isJsonMode, setJsonMode } from '../output.js';
 import { action, jsonOption } from './common.js';
 
 function when(epoch: number): string {
@@ -112,8 +113,8 @@ export function registerAccount(program: Command): void {
       if (result.result === 'removed_unreadable') warn('Removed an unreadable credentials file.');
       if (result.warning !== null) {
         warn(
-          `could not revoke the session on the broker (${result.warning}); ` +
-            `it stays valid until ${when(result.expiresAt ?? 0)}.`,
+          `server-side revoke failed (${result.warning}); ` +
+            `the session stays valid until ${when(result.expiresAt ?? 0)}.`,
         );
       }
       emit(
@@ -122,11 +123,15 @@ export function registerAccount(program: Command): void {
           loggedIn: false,
           result: result.result,
           revoked: result.revoked,
+          ...(result.revokeError !== null ? { revokeError: result.revokeError } : {}),
           warning: result.warning,
           expiresAt: result.expiresAt,
         },
         () => (result.result === 'not_logged_in' ? 'Not logged in.' : result.result === 'logged_out' ? 'Logged out.' : ''),
       );
+      // The local credentials are gone, but the session may still be valid
+      // on the broker: exit non-zero so scripts notice (exit 1, ERROR).
+      if (result.result === 'logged_out' && result.revokeError !== null) setExitCode(EXIT.ERROR);
     }),
   );
 

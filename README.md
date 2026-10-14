@@ -192,8 +192,13 @@ exec              {"ok","host","command","exitCode","stdout","stderr","timedOut"
                   timeout → error TIMEOUT, exit 124; no exit status → error CONNECTION_LOST, exit 4
 hosts check       {"ok","host","mode","ms","pocketshell","aplexer"} (cannot connect → exit 4)
 whoami            {"ok":true,"loggedIn":true,"email","label","brokerUrl","expiresAt","tokenId","verified"}
-logout            {"ok":true,"loggedIn":false,"result","revoked","warning","expiresAt"}
+logout            {"ok":true,"loggedIn":false,"result","revoked","warning","expiresAt"[,"revokeError"]}
 ```
+
+A failed server revoke still deletes the local credentials but exits 1 with
+`"revoked":false` and `"revokeError":{"code","message"}` — the session stays
+valid until `expiresAt`. See [Corporate / environment proxies](docs/corporate-proxy.md)
+for `NO_PROXY` / `PSC_TRUSTED_PROXY` behavior (fail-closed under `NODE_USE_ENV_PROXY`).
 
 A typical loop for an agent that drives another agent:
 
