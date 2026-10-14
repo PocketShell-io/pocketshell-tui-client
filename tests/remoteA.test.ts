@@ -18,6 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SessionRow } from '@pocketshell/core';
 import {
   allCandidateHosts,
+  confirmPromptDelivery,
   normalizeAArgs,
   remoteAplexerArgs,
   resolveAHost,
@@ -577,5 +578,46 @@ describe('CLI subprocess, EPIPE handling, and standalone bundle', () => {
       ok: true,
       hosts: [{ name: 'local', mode: 'local', online: true, status: 'online' }],
     });
+  });
+});
+
+describe('confirmPromptDelivery', () => {
+  const row = { name: 'p:t', id: 'id1' } as SessionRow;
+  function fake(script: { state?: string; screen: string }[]) {
+    let i = 0;
+    const sent: string[] = [];
+    const client = {
+      listSessions: async () => ({ sessions: [{ ...row, agentState: script[Math.min(i, script.length - 1)]!.state ?? 'waiting' }] }),
+      capture: async () => script[Math.min(i++, script.length - 1)]!.screen,
+      send: async (_r: SessionRow, text: string) => {
+        sent.push(text);
+      },
+    };
+    return { client: client as never, sent };
+  }
+  const opts = { windowS: 3, pollMs: 1000, sleepFn: async () => {} };
+
+  it('returns at once when the agent is working', async () => {
+    const { client, sent } = fake([{ state: 'working', screen: '' }]);
+    expect(await confirmPromptDelivery(client, row, 'hello', opts)).toBe('working');
+    expect(sent).toEqual([]);
+  });
+
+  it('resends a swallowed prompt once', async () => {
+    const { client, sent } = fake([{ screen: '› Ask Codex to do anything' }]);
+    expect(await confirmPromptDelivery(client, row, 'line one\nline two', opts)).toBe('resent');
+    expect(sent).toEqual(['line one\nline two']);
+  });
+
+  it('presses Enter when the prompt is typed but not submitted', async () => {
+    const { client, sent } = fake([{ screen: '› line   one' }]);
+    expect(await confirmPromptDelivery(client, row, 'line one', opts)).toBe('entered');
+    expect(sent).toEqual(['']);
+  });
+
+  it('treats a paste placeholder as delivered (never a double prompt)', async () => {
+    const { client, sent } = fake([{ screen: '› [Pasted Content 812 chars]' }]);
+    expect(await confirmPromptDelivery(client, row, 'a\nb\nc', opts)).toBe('entered');
+    expect(sent).toEqual(['']);
   });
 });

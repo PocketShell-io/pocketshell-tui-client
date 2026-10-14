@@ -266,6 +266,56 @@ export async function waitForAgentReady(
   }
 }
 
+/** Whitespace-collapsed text, for matching a prompt against a rendered screen. */
+function collapse(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Make sure a `start --prompt` actually reached the agent. A TUI that is
+ * still initialising (codex loading MCP servers, for one) can drop typed
+ * input even though its screen looked settled. Within `windowS` the agent
+ * must be seen working; otherwise:
+ * - neither the prompt's first line nor a "[Pasted text…]" placeholder is on
+ *   screen: it was swallowed, send it again (once);
+ * - it is on screen but never submitted: press Enter.
+ */
+export async function confirmPromptDelivery(
+  client: Pick<HostClient, 'listSessions' | 'capture' | 'send'>,
+  row: SessionRow,
+  promptText: string,
+  options: { windowS?: number; pollMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
+): Promise<'working' | 'resent' | 'entered' | 'visible'> {
+  const windowS = options.windowS ?? 15;
+  const pollMs = options.pollMs ?? 1000;
+  const pause = options.sleepFn ?? sleep;
+  const firstLine = promptText.split('\n').find((line) => line.trim() !== '') ?? '';
+  const probe = collapse(firstLine).slice(0, 40);
+  const polls = Math.max(1, Math.ceil((windowS * 1000) / pollMs));
+  let resent = false;
+  for (let round = 0; round < 2; round++) {
+    let visible = false;
+    for (let i = 0; i < polls; i++) {
+      await pause(pollMs);
+      const { sessions } = await client.listSessions();
+      const current = sessions.find((s) => (row.id && s.id === row.id) || s.name === row.name);
+      if (current?.agentState === 'working') return resent ? 'resent' : 'working';
+      const screen = collapse(trimCapture(await client.capture(current ?? row, { mode: 'screen' })));
+      // A multi-line paste is shown as a placeholder, not as its text.
+      visible = (probe !== '' && screen.includes(probe)) || /\[Pasted (text|content)\b/i.test(screen);
+    }
+    if (visible) {
+      if (resent) return 'resent';
+      await client.send(row, '', { enter: true });
+      return 'entered';
+    }
+    if (resent || probe === '') return resent ? 'resent' : 'visible';
+    await client.send(row, promptText, { enter: true });
+    resent = true;
+  }
+  return 'resent';
+}
+
 export interface WaitIdleResult {
   row: SessionRow;
   state: string;
@@ -561,8 +611,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
               timeoutS: opts.readyTimeout,
             });
             await client.send(row, promptText, { enter: true });
-            // Give the agent a moment to register the prompt transition before returning.
-            await sleep(250);
+            await confirmPromptDelivery(client, row, promptText);
           }
           emit(
             {
