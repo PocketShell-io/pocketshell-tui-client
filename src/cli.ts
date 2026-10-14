@@ -6,7 +6,7 @@
  * as a subcommand with `--json`, so agents and scripts get the same reach.
  */
 import { Command, CommanderError } from 'commander';
-import { dispatchA, registerA } from './commands/a.js';
+import { dispatchA, registerA, remoteAplexerArgs } from './commands/a.js';
 import { registerAccount } from './commands/account.js';
 import { registerGateway } from './commands/gateway.js';
 import { registerHosts } from './commands/hosts.js';
@@ -30,6 +30,20 @@ program
       'Run with no arguments for the interactive UI; every action is also a subcommand (add --json for agents).',
   )
   .version(VERSION)
+  .usage('[options] [command] | <host> <connect|ls|start|send|wait|capture|status|stop> ...')
+  .addHelpText(
+    'after',
+    '\nRemote aplexer (any saved host, gateway device id, or unique prefix):\n' +
+      '  psc hosts [--check]                 saved hosts + gateway presence (--check: live ssh round trip)\n' +
+      '  psc <host> connect                  interactive shell on <host> (like ssh)\n' +
+      '  psc <host> ls                       sessions on <host>\n' +
+      '  psc <host> start <tag> -C DIR -e ENGINE [--prompt TEXT|-]\n' +
+      '  psc <host> send <session> [TEXT|-]  type + submit\n' +
+      '  psc <host> wait <session>           until the agent is idle again\n' +
+      '  psc <host> capture <session>        plain-text screen\n' +
+      '  psc <host> status|stop <session>\n' +
+      '  psc help <verb>                     options of one verb (e.g. `psc help start`)\n',
+  )
   .option('-H, --host <name>', 'saved host for every subcommand (same as the per-command -H)')
   .option('--json', 'machine-readable output for every subcommand')
   // `psc -H box sessions list` and `psc sessions list -H box` both work: the
@@ -72,6 +86,8 @@ function routeUsageErrors(command: Command): void {
 }
 routeUsageErrors(program);
 
+const TOP_LEVEL_COMMANDS = new Set(program.commands.flatMap((c) => [c.name(), ...c.aliases()]));
+
 /** `--json` anywhere before a `--` separator: known before parsing, so a parse failure honours it. */
 function wantsJson(args: readonly string[]): boolean {
   const end = args.indexOf('--');
@@ -89,9 +105,9 @@ async function main(): Promise<void> {
     program.outputHelp();
     return;
   }
-  if (args[0] === 'a' || (args[0] === '--json' && args[1] === 'a')) {
-    const aIndex = args.indexOf('a');
-    await dispatchA(args.slice(aIndex + 1));
+  const remoteA = remoteAplexerArgs(args, TOP_LEVEL_COMMANDS);
+  if (remoteA) {
+    await dispatchA(remoteA);
     return;
   }
   await program.parseAsync(process.argv);

@@ -18,6 +18,12 @@ export class LocalConnection implements Connection {
   }
 
   attachInteractive(command: string, options: AttachOptions = {}): Promise<number | null> {
+    // Empty command: this machine's interactive shell.
+    if (command === '') {
+      const shell =
+        process.platform === 'win32' ? (process.env.COMSPEC ?? 'cmd.exe') : (process.env.SHELL ?? '/bin/sh');
+      return runInteractive(shell, process.platform === 'win32' ? [] : ['-l'], process.env, options);
+    }
     return runInteractive('/bin/sh', ['-c', command], process.env, options);
   }
 

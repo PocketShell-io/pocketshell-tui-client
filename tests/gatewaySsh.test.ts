@@ -118,6 +118,8 @@ describe('buildGatewaySshArgv', () => {
     const argv = buildGatewaySshArgv({ ...base, alias: legacyHostKeyAlias('Home-Lab'), kind: 'attach', command: 'x' });
     expect(argv).not.toContain('BatchMode=yes');
     expect(argv.slice(-4)).toEqual(['-t', '--', 'pocketshell-gateway.Home-Lab', 'x']);
+    const shell = buildGatewaySshArgv({ ...base, kind: 'attach', command: '' });
+    expect(shell.slice(-3)).toEqual(['-t', '--', hostKeyAlias('Home-Lab')]);
     expect(() => buildGatewaySshArgv({ ...base, alias: hostKeyAlias('other'), kind: 'exec', command: 'x' })).toThrow(/alias/);
   });
 

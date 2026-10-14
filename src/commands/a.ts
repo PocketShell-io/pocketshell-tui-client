@@ -1,5 +1,5 @@
 /**
- * `psc a`: remote aplexer through PocketShell — one short, predictable
+ * `psc <host> <verb>` (legacy spelling `psc a <host> <verb>`): remote aplexer through PocketShell — one short, predictable
  * command family for driving agent sessions across hosts.
  */
 import { Command } from 'commander';
@@ -10,7 +10,7 @@ import { resolveEndpoint } from '../gateway/endpoint.js';
 import { loadPins } from '../gateway/pins.js';
 import { encodeSendPayload, HostClient, SessionNotFound } from '../hostClient.js';
 import { defaultHostName, friendlyHostName, listHosts, pickHost, type HostEntry } from '../hosts/store.js';
-import { classify, CliError, emit, EXIT, setJsonMode, usageError } from '../output.js';
+import { classify, CliError, emit, EXIT, isJsonMode, setJsonMode, usageError } from '../output.js';
 import { safeLine, safeText } from '../sanitize.js';
 import { openConnection } from '../transport/index.js';
 import { action, jsonOption, parsePositiveInt, parseSeconds } from './common.js';
@@ -19,19 +19,21 @@ import { table } from './sessions.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export const A_HELP = `Usage: psc a [options] <command>
+export const A_HELP = `Usage: psc [options] <host> <command>
+       psc hosts [--check]
 
 Remote aplexer across your PocketShell hosts.
 
 Commands:
-  psc a hosts [--check]                 saved hosts; --check pings each in parallel (online/offline/error + versions)
-  psc a <host> ls                       sessions on <host> (name, engine, state, workspace) — plain table
-  psc a <host> start <tag> [options]    create (or reuse live) session <basename DIR>:<tag>; optionally send --prompt
-  psc a <host> send <session> [TEXT|-]  send and SUBMIT (Enter is default; --no-enter to just type)
-  psc a <host> capture <session> [opts] plain-text rendered screen by default (no ANSI), trailing blank lines trimmed
-  psc a <host> wait <session> [opts]    block until the session's agent is idle/waiting (exit 124 on timeout)
-  psc a <host> stop <session> [opts]    stop a session (--if-exists succeeds when already gone)
-  psc a <host> status <session>         one session's row (state, agent state, engine, created)
+  psc hosts [--check]                 saved hosts; --check pings each in parallel (online/offline/error + versions)
+  psc <host> connect                  interactive login shell on <host> (like ssh)
+  psc <host> ls                       sessions on <host> (name, engine, state, workspace) — plain table
+  psc <host> start <tag> [options]    create (or reuse live) session <basename DIR>:<tag>; optionally send --prompt
+  psc <host> send <session> [TEXT|-]  send and SUBMIT (Enter is default; --no-enter to just type)
+  psc <host> capture <session> [opts] plain-text rendered screen by default (no ANSI), trailing blank lines trimmed
+  psc <host> wait <session> [opts]    block until the session's agent is idle/waiting (exit 124 on timeout)
+  psc <host> stop <session> [opts]    stop a session (--if-exists succeeds when already gone)
+  psc <host> status <session>         one session's row (state, agent state, engine, created)
 
 Host resolution (<host>):
   1. exact saved host name (or \`local\`),
@@ -45,15 +47,15 @@ Options:
   -h, --help                            display help for command
 
 Examples:
-  psc a hosts
-  psc a hosts --check --json
-  psc a hetzner ls
-  psc a hetzner start e2e-test -C '~/git/project' -e claude --prompt 'reply with just the word PONG'
-  psc a hetzner wait e2e-test --timeout 120
-  psc a hetzner capture e2e-test --lines 20 --wait-for PONG
-  echo -e 'line1\\nline2: reply LINES-OK' | psc a hetzner send e2e-test
-  psc a hetzner status e2e-test
-  psc a hetzner stop e2e-test --if-exists
+  psc hosts
+  psc hosts --check --json
+  psc hetzner ls
+  psc hetzner start e2e-test -C '~/git/project' -e claude --prompt 'reply with just the word PONG'
+  psc hetzner wait e2e-test --timeout 120
+  psc hetzner capture e2e-test --lines 20 --wait-for PONG
+  echo -e 'line1\\nline2: reply LINES-OK' | psc hetzner send e2e-test
+  psc hetzner status e2e-test
+  psc hetzner stop e2e-test --if-exists
 `;
 
 function ref(row: SessionRow): { name: string; id: string | null } {
@@ -68,7 +70,7 @@ export async function readAllStdin(): Promise<string> {
 }
 
 /**
- * Resolve text for `psc a <host> send <session> [TEXT|-]`:
+ * Resolve text for `psc <host> send <session> [TEXT|-]`:
  * - explicit `TEXT` (not `'-'`) is used verbatim;
  * - `'-'`, or omitted `TEXT` when stdin is not a TTY, reads stdin and strips
  *   at most one trailing line break;
@@ -87,7 +89,7 @@ export async function resolveSendText(
 }
 
 /**
- * Resolve `--prompt <text|->` for `psc a <host> start`:
+ * Resolve `--prompt <text|->` for `psc <host> start`:
  * - `undefined` → null (no prompt to send);
  * - `'-'` → read stdin and strip one trailing line break;
  * - any other string → verbatim.
@@ -102,7 +104,7 @@ export async function resolvePromptText(
 }
 
 /**
- * Trim a captured screen or raw buffer for `psc a <host> capture`:
+ * Trim a captured screen or raw buffer for `psc <host> capture`:
  * - in screen mode (default), strip ANSI/control sequences via `safeText`;
  * - always trim trailing blank (empty or whitespace-only) lines;
  * - with `lines: N`, return the last N non-empty lines.
@@ -481,9 +483,9 @@ function configureSubcommandErrorHandling(command: Command): void {
   for (const sub of command.commands) configureSubcommandErrorHandling(sub);
 }
 
-/** Build the Commander parser for `psc a <host> <verb> ...`. */
+/** Build the Commander parser for `psc <host> <verb> ...`. */
 export function buildHostVerbProgram(hostSelector: string): Command {
-  const hostCmd = new Command(`psc a ${hostSelector}`).description(`drive aplexer sessions on ${hostSelector}`);
+  const hostCmd = new Command(`psc ${hostSelector}`).description(`drive aplexer sessions on ${hostSelector}`);
 
   jsonOption(
     hostCmd
@@ -761,6 +763,23 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     }),
   );
 
+  hostCmd
+    .command('connect')
+    .alias('shell')
+    .description('open an interactive login shell on <host> (like ssh; exit the shell to return)')
+    .action(
+      action(async () => {
+        if (isJsonMode()) throw usageError('connect takes over the terminal and has no --json output');
+        const host = resolveAHost(hostSelector);
+        const connection = await openConnection(host);
+        try {
+          process.exitCode = (await connection.attachInteractive('')) ?? 1;
+        } finally {
+          await connection.close();
+        }
+      }),
+    );
+
   jsonOption(
     hostCmd
       .command('status <session>')
@@ -795,10 +814,10 @@ export function buildHostVerbProgram(hostSelector: string): Command {
   return hostCmd;
 }
 
-/** Build the Commander parser for `psc a hosts [--check] [--json]`. */
+/** Build the Commander parser for `psc hosts [--check] [--json]`. */
 export function buildAHostsCommand(): Command {
   const cmd = jsonOption(
-    new Command('psc a hosts')
+    new Command('psc hosts')
       .description('saved hosts; --check pings each in parallel (online/offline/error + versions)')
       .option('--check', 'ping each host in parallel over SSH/gateway and report versions'),
   ).action(action(runAHosts));
@@ -806,10 +825,10 @@ export function buildAHostsCommand(): Command {
   return cmd;
 }
 
-const HOST_VERB_NAMES = new Set(['ls', 'list', 'start', 'create', 'send', 'capture', 'wait', 'stop', 'kill', 'status', 'show']);
+export const HOST_VERB_NAMES = new Set(['connect', 'shell', 'ls', 'list', 'start', 'create', 'send', 'capture', 'wait', 'stop', 'kill', 'status', 'show']);
 
 /**
- * Normalize `psc a` arguments before Commander parsing:
+ * Normalize remote-aplexer arguments before Commander parsing:
  * - trailing `--prompt` (with no argument) becomes `--prompt -` so piped stdin works.
  */
 export function normalizeAArgs(args: readonly string[]): string[] {
@@ -825,7 +844,7 @@ export function normalizeAArgs(args: readonly string[]): string[] {
   return out;
 }
 
-/** Run `psc a ...` given the arguments after `a`. */
+/** Run `psc <host> <verb> ...` / `psc hosts [--check]` (or legacy `psc a ...`) given the arguments after `psc` / `psc a`. */
 export async function dispatchA(rawArgs: readonly string[]): Promise<void> {
   const args = normalizeAArgs(rawArgs);
   const filtered = args.filter((a) => a !== '--json');
@@ -881,7 +900,7 @@ export async function dispatchA(rawArgs: readonly string[]): Promise<void> {
   const rest = [...args.slice(0, hostIndex), ...args.slice(hostIndex + 1)];
   const restWithoutJson = rest.filter((a) => a !== '--json');
   if (restWithoutJson.length === 0) {
-    throw usageError(`missing command for host ${JSON.stringify(first)} (expected ls, start, send, capture, wait, stop, or status)`);
+    throw usageError(`missing command for host ${JSON.stringify(first)} (expected connect, ls, start, send, capture, wait, stop, or status)`);
   }
   if (restWithoutJson.length === 1 && (restWithoutJson[0] === '--help' || restWithoutJson[0] === '-h')) {
     buildHostVerbProgram(first).outputHelp();
@@ -891,13 +910,44 @@ export async function dispatchA(rawArgs: readonly string[]): Promise<void> {
   await hostProg.parseAsync(rest, { from: 'user' });
 }
 
+/**
+ * The remote-aplexer spellings, as arguments for dispatchA, or null for a
+ * normal subcommand:
+ * - `psc <host> <verb> ...` where <host> is not a top-level command and <verb>
+ *   is an aplexer verb (or --help); anything else stays commander's, so
+ *   `psc sesions` still fails as an unknown command;
+ * - `psc hosts` with no subcommand, or `psc hosts --check` (presence listing);
+ * - `psc help <verb>` for an aplexer verb;
+ * - the hidden legacy alias `psc a ...`.
+ * Leading `--json` is allowed (dispatchA honours it anywhere).
+ */
+export function remoteAplexerArgs(args: readonly string[], topLevelCommands: ReadonlySet<string>): string[] | null {
+  const lead = args.findIndex((a) => a !== '--json');
+  if (lead === -1) return null;
+  const json = args.slice(0, lead);
+  const [first, second] = [args[lead]!, args[lead + 1]];
+  const rest = args.slice(lead + 1);
+  if (first === 'a') return [...json, ...rest];
+  if (first === 'hosts') {
+    if (second === undefined || second === '--check' || second === '--json') return [...json, 'hosts', ...rest];
+    return null;
+  }
+  if (first === 'help') return second !== undefined && HOST_VERB_NAMES.has(second) ? ['--help', ...rest] : null;
+  if (first.startsWith('-') || topLevelCommands.has(first)) return null;
+  if (second !== undefined && (HOST_VERB_NAMES.has(second) || second === '--help' || second === '-h')) {
+    return [...json, first, ...rest];
+  }
+  return null;
+}
+
 export function registerA(program: Command): void {
   program
-    .command('a [args...]')
+    // Hidden compatibility alias: `psc a <host> <verb>` == `psc <host> <verb>`.
+    .command('a [args...]', { hidden: true })
     .allowUnknownOption(true)
     .allowExcessArguments(true)
     .helpOption(false)
-    .description('remote aplexer: hosts, ls, start, send, capture, wait, stop, status (see `psc a --help`)')
+    .description('remote aplexer: hosts, ls, start, send, capture, wait, stop, status (legacy alias of `psc <host> <verb>`)')
     .action(async (args: string[]) => {
       await dispatchA(args);
     });

@@ -19,6 +19,7 @@ import type { SessionRow } from '@pocketshell/core';
 import {
   allCandidateHosts,
   normalizeAArgs,
+  remoteAplexerArgs,
   resolveAHost,
   resolvePromptText,
   resolveSendText,
@@ -178,6 +179,29 @@ describe('stdin handling and argument normalization', () => {
     expect(await resolvePromptText(undefined, async () => 'ignored')).toBeNull();
     expect(await resolvePromptText('reply PONG', async () => 'ignored')).toBe('reply PONG');
     expect(await resolvePromptText('-', async () => 'line1\nline2\n')).toBe('line1\nline2');
+  });
+
+  it('remoteAplexerArgs routes `psc <host> <verb>`, bare `psc hosts`, `psc help <verb>`, and legacy `psc a`', () => {
+    const top = new Set(['hosts', 'sessions', 's', 'exec', 'gateway', 'login', 'a', 'tui']);
+    expect(remoteAplexerArgs(['hetzner', 'ls'], top)).toEqual(['hetzner', 'ls']);
+    expect(remoteAplexerArgs(['--json', 'lap', 'capture', 'x'], top)).toEqual(['--json', 'lap', 'capture', 'x']);
+    expect(remoteAplexerArgs(['win35', 'connect'], top)).toEqual(['win35', 'connect']);
+    expect(remoteAplexerArgs(['hetzner', '--help'], top)).toEqual(['hetzner', '--help']);
+    expect(remoteAplexerArgs(['a', 'hetzner', 'ls'], top)).toEqual(['hetzner', 'ls']);
+    expect(remoteAplexerArgs(['--json', 'a', 'hosts'], top)).toEqual(['--json', 'hosts']);
+    expect(remoteAplexerArgs(['hosts'], top)).toEqual(['hosts']);
+    expect(remoteAplexerArgs(['hosts', '--check'], top)).toEqual(['hosts', '--check']);
+    expect(remoteAplexerArgs(['help', 'send'], top)).toEqual(['--help', 'send']);
+    // normal subcommands stay commander's
+    expect(remoteAplexerArgs(['hosts', 'sync'], top)).toBeNull();
+    expect(remoteAplexerArgs(['sessions', 'ls'], top)).toBeNull();
+    expect(remoteAplexerArgs(['s', 'ls'], top)).toBeNull();
+    expect(remoteAplexerArgs(['exec', 'ls'], top)).toBeNull();
+    expect(remoteAplexerArgs(['-H', 'box', 'sessions', 'ls'], top)).toBeNull();
+    expect(remoteAplexerArgs(['sesions'], top)).toBeNull();
+    expect(remoteAplexerArgs(['typo', 'bogus'], top)).toBeNull();
+    expect(remoteAplexerArgs(['help'], top)).toBeNull();
+    expect(remoteAplexerArgs([], top)).toBeNull();
   });
 
   it('normalizeAArgs turns a bare `--prompt` flag into `--prompt -`', () => {
@@ -487,9 +511,36 @@ describe('CLI subprocess, EPIPE handling, and standalone bundle', () => {
   it('prints help with examples for `psc a --help`', async () => {
     const r = await runScript(BUNDLE, ['a', '--help']);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain('psc a hosts [--check]');
-    expect(r.stdout).toContain('psc a <host> start <tag>');
+    expect(r.stdout).toContain('psc hosts [--check]');
+    expect(r.stdout).toContain('psc <host> start <tag>');
+    expect(r.stdout).toContain('psc <host> connect');
     expect(r.stdout).toContain('Examples:');
+  });
+
+  it('top-level `psc --help` lists the host verbs and hides the legacy `a` alias', async () => {
+    const r = await runScript(BUNDLE, ['--help']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('psc <host> connect');
+    expect(r.stdout).toContain('psc <host> ls');
+    expect(r.stdout).not.toMatch(/^\s+a \[args\.\.\.\]/m);
+  });
+
+  it('top-level host verbs give the same USAGE errors as `psc a` (exit 2)', async () => {
+    for (const args of [
+      ['hetzner', 'start', '--json'],
+      ['--json', 'hetzner', 'send'],
+      ['hetzner', 'connect', '--json'],
+    ]) {
+      const r = await runScript(BUNDLE, args);
+      expect(r.code).toBe(2);
+      expect(JSON.parse(r.stdout.trim())).toMatchObject({ ok: false, error: { code: 'USAGE' } });
+    }
+  });
+
+  it('`psc help start` prints the verb help', async () => {
+    const r = await runScript(BUNDLE, ['help', 'start']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('--prompt');
   });
 
   it('returns USAGE (exit 2) for invalid `psc a` invocations in JSON mode', async () => {

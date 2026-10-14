@@ -46,6 +46,8 @@ describe('buildSshArgv', () => {
     expect(argv).not.toContain('-i');
     expect(argv.some((a) => a.startsWith('ControlPath'))).toBe(false);
     expect(argv.slice(-4)).toEqual(['-t', '--', 'me@box', 'aplexer attach x']);
+    const shell = buildSshArgv({ config: { destination: 'me@box' }, controlPath: null, kind: 'attach', command: '' });
+    expect(shell.slice(-3)).toEqual(['-t', '--', 'me@box']);
   });
 
   it('refuses option-injection and malformed destinations', () => {

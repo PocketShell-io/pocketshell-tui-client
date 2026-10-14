@@ -216,7 +216,10 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
     argv.push('-i', ident);
   }
   argv.push(kind === 'exec' ? '-T' : '-t');
-  argv.push('--', input.alias, command);
+  argv.push('--', input.alias);
+  // An empty attach command is a plain login shell (whatever the host's
+  // default shell is: bash, PowerShell, cmd), like `ssh host`.
+  if (command !== '') argv.push(command);
   return argv;
 }
 

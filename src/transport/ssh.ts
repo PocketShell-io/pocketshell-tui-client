@@ -60,7 +60,9 @@ export function buildSshArgv({ config, controlPath, kind, command }: SshArgvInpu
   // The command is one complete shell command string: ssh joins remote
   // words with spaces and the remote login shell parses the result, so it
   // goes as a single argv element, never re-quoted.
-  argv.push('--', destination, command);
+  argv.push('--', destination);
+  // Empty command: the host's own login shell, like `ssh host`.
+  if (command !== '') argv.push(command);
   return argv;
 }
 
