@@ -88,7 +88,7 @@ export class HostChannel {
   constructor(
     host: HostEntry,
     accountExpires: number,
-    private readonly onRetire: (reason: unknown) => void,
+    private readonly onRetire: (reason: unknown, established: boolean) => void,
     private readonly validatePolicy?: () => void,
   ) {
     const config = host.gateway!;
@@ -300,6 +300,6 @@ export class HostChannel {
       try {
         unlinkSync(p);
       } catch {}
-    this.onRetire(reason);
+    this.onRetire(reason, !this.negotiating);
   }
 }

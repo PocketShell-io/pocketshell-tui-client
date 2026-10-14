@@ -17,6 +17,7 @@ const env = {
   PSC_DAEMON: '1',
   PSC_DAEMON_IDLE_MS: '1000',
   PSC_RPC_BINARY: '',
+  NODE_OPTIONS: '--require /psc-relay-test/untrusted-preload',
 };
 const run = (argv) => spawnSync(binary, argv, { env, encoding: 'utf8', timeout: 7000 });
 const child = (argv) =>
@@ -32,6 +33,7 @@ const child = (argv) =>
 try {
   const rows = await Promise.all(Array.from({ length: 32 }, () => child(['daemon', 'start'])));
   assert.equal(new Set(rows.map((r) => r.pid)).size, 1, 'exactly one backend');
+  delete env.NODE_OPTIONS; // Legacy fallback continues to use the caller's ordinary environment.
   const runtime = join(
     owned,
     readdirSync(owned).find((n) => n.startsWith('psc-daemon-')),
