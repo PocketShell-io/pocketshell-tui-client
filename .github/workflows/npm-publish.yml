@@ -1,0 +1,67 @@
+# Publish the standalone psc bundle (@pocketshell/tui-client) to npm on a
+# version tag, or by hand for an existing tag. Needs the NPM_TOKEN repository
+# secret (an npm automation token with publish rights on the @pocketshell
+# scope), the same secret pocketshell-core's publish workflow uses.
+name: npm publish
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'existing release tag to publish, e.g. v0.3.2'
+        required: true
+permissions:
+  contents: read
+  id-token: write # npm provenance
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          path: client
+      # The client depends on file:../pocketshell-core: the same pinned Core as ci.yml.
+      - uses: actions/checkout@v4
+        with:
+          repository: PocketShell-io/pocketshell-core
+          ref: 07174896ce7041370bcbf4f791ec513870b9535f
+          path: pocketshell-core
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.13.1'
+          registry-url: https://registry.npmjs.org
+      - name: Build pinned Core
+        working-directory: pocketshell-core
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          node scripts/fix-esm-extensions.mjs
+      - working-directory: client
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Tag matches package version
+        working-directory: client
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="$(node -p "require('./package.json').version")"
+          test "$tag" = "v$version" || { echo "tag $tag does not match package.json version $version"; exit 1; }
+      - working-directory: client
+        run: npm test
+      - working-directory: client
+        run: npm run build && node scripts/bundle.mjs
+      - name: Publish
+        working-directory: client
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is not set on this repository; nothing was published"
+            exit 1
+          fi
+          version="$(node -p "require('./package.json').version")"
+          if npm view "@pocketshell/tui-client@$version" version >/dev/null 2>&1; then
+            echo "@pocketshell/tui-client@$version is already on npm"; exit 0
+          fi
+          npm publish "dist-bundle/pocketshell-tui-client-$version.tgz" --access public --provenance
