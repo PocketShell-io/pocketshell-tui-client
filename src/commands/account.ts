@@ -83,10 +83,8 @@ export function registerAccount(program: Command): void {
                   out(`To log in, open:  ${info.verificationUriComplete}`);
                 } else {
                   out(`To log in, open:  ${info.verificationUri}`);
-                  out(`and enter code:   ${info.userCode}`);
                 }
-                out(`Confirm the code shown in the browser matches: ${info.userCode}`);
-                out('The page will ask you to type its last 4 characters before approving.');
+                out(`and type this code: ${info.userCode}`);
               }
               if (opts.open && info.verificationUriComplete !== null && canOpenBrowser()) {
                 openBrowser(info.verificationUriComplete);
