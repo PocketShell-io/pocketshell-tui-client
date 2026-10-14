@@ -1,3 +1,4 @@
+import { directSessions } from './directAplexer.js';
 import { requests } from './daemon/context.js';
 /**
  * Everything the client asks of a PocketShell host, over any Connection.
@@ -13,6 +14,7 @@ import {
   BP_START,
   frameForPaste,
   HostCliCore,
+  HostCliError,
   needsBracketedPaste,
   pathAwareCommand,
   shellQuote,
@@ -149,7 +151,11 @@ export function execCommandLine(words: readonly string[]): string {
   return words.map((word) => shellQuote(word)).join(' ');
 }
 
+const sessionBackends = new Map<string, Promise<string | null>>();
+
 export class HostClient {
+  private backend?: Promise<string | null>;
+  private backendKey?: string;
   readonly cli: HostCliCore;
   readonly native?: NativeWindowsHost;
 
@@ -174,6 +180,7 @@ export class HostClient {
     } catch (error) {
       throw new HostStoreError(`host ${connection.hostName}: ${(error as Error).message}`);
     }
+    if (host) this.backendKey = JSON.stringify([connection.mode, host, binary]);
     this.cli = new HostCliCore(
       {
         exec: (command, timeoutMs) => {
@@ -238,9 +245,53 @@ export class HostClient {
     return { pocketshell: values.pocketshell ?? null, aplexer: values.aplexer ?? null };
   }
 
-  listSessions(): Promise<SessionsListing> {
+  private async sessionBackend(): Promise<string | null> {
+    if (!this.backend) {
+      this.backend = this.backendKey ? sessionBackends.get(this.backendKey) : undefined;
+      if (!this.backend) {
+        this.backend = this.detectSessionBackend();
+        if (this.backendKey) sessionBackends.set(this.backendKey, this.backend);
+        // Connectivity failures must not poison a host's capability cache.
+        this.backend.catch(() => {
+          if (this.backendKey) sessionBackends.delete(this.backendKey);
+          this.backend = undefined;
+        });
+      }
+    }
+    return this.backend;
+  }
+
+  private async detectSessionBackend(): Promise<string | null> {
+    try {
+      const listing = await this.cli.listSessions();
+      if (listing.errors.length === 0) return null;
+    } catch (error) {
+      // A transport failure or timeout is not a missing host CLI.
+      if (!(error instanceof HostCliError)) throw error;
+      if ((error as Error & { timedOut?: boolean }).timedOut
+        || (error.kind === 'failed' && (error.cause || (error as Error & { exitCode?: number | null }).exitCode === null))) throw error;
+    }
+    // The endpoint's initial PATH prefers its managed tools. The login-shell
+    // wrapper prepends user bins, which may contain unusable Windows uv shims.
+    let outcome = await this.connection.exec('command -v a', {
+      timeoutMs: 15_000, signal: requests.getStore()?.signal,
+    });
+    if (!outcome.timedOut && outcome.exitCode !== null && (outcome.exitCode !== 0 || !outcome.stdout.trim())) {
+      outcome = await this.run('command -v a', 15_000);
+    }
+    if (outcome.timedOut || outcome.exitCode !== 0) throw new HostCommandError('cannot resolve aplexer on the host', outcome);
+    const binary = outcome.stdout.trim();
+    if (!binary || /[\r\n\0]/.test(binary)) throw new HostCommandError('invalid aplexer executable path', outcome);
+    const command = shellQuote(binary);
+    directSessions(JSON.parse(stripSystemdNoise(await this.runChecked(`${command} --json snapshot`, 20_000))));
+    return command;
+  }
+
+  async listSessions(): Promise<SessionsListing> {
     if (this.native) return this.native.listSessions();
-    return this.cli.listSessions();
+    const binary = await this.sessionBackend();
+    return binary === null ? this.cli.listSessions()
+      : directSessions(JSON.parse(stripSystemdNoise(await this.runChecked(`${binary} --json snapshot`, 20_000))));
   }
 
   /**
@@ -271,12 +322,28 @@ export class HostClient {
     return { row, text: await this.capture(row, options) };
   }
 
-  createSession(
+  async createSession(
     name: string,
     options: { cwd?: string | null; engine?: string | null; profile?: string | null } = {},
   ): Promise<CreatedSession> {
     if (this.native) return this.native.createSession(name, options);
-    return this.cli.createSession(name, options);
+    const binary = await this.sessionBackend();
+    if (binary === null) return this.cli.createSession(name, options);
+    const workspace = options.cwd == null ? '.' : options.cwd === '~' ? '"$HOME"'
+      : options.cwd.startsWith('~/') ? `"$HOME"/${shellQuote(options.cwd.slice(2))}` : shellQuote(options.cwd);
+    const resolvedWorkspace = (await this.runChecked(`cd ${workspace} && pwd -P`)).trim();
+    const normalize = (path: string) => path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`).replace(/\/+$/, '');
+    const existing = (await this.listSessions()).sessions.find((r) => r.tag === name && r.workspace !== null
+      && normalize(r.workspace) === normalize(resolvedWorkspace));
+    if (existing) return { name: existing.name, id: existing.id, created: false };
+    let command = `${binary} --json start --workspace ${workspace} --tag ${shellQuote(name)}`;
+    if (options.engine) command += ` --engine ${shellQuote(options.engine)}`;
+    if (options.profile) command += ` --profile ${shellQuote(options.profile)}`;
+    const record = JSON.parse(stripSystemdNoise(await this.runChecked(command, 60_000)));
+    if (typeof record.id !== 'string') throw new Error('aplexer start returned no session id');
+    const row = directSessions([{ ...record, state: 'starting' }]).sessions[0];
+    if (!row) throw new Error('aplexer start returned an invalid session record');
+    return { name: row.name, id: row.id, created: true };
   }
 
   async killSession(name: string, immutableId?: string | null): Promise<void> {
@@ -284,7 +351,11 @@ export class HostClient {
       const row = await this.resolveSession(immutableId ?? name);
       return this.native.killSession(row.id!);
     }
-    return this.cli.killSession(name);
+    const binary = await this.sessionBackend();
+    if (binary === null) return this.cli.killSession(name);
+    const row = await this.resolveSession(immutableId ?? name);
+    if (!row.id) throw new Error('cannot stop a session without an aplexer id');
+    await this.runChecked(`${binary} --json kill ${shellQuote(row.id)}`, 20_000);
   }
 
   async listWarnings(): Promise<WarningRow[]> {
@@ -340,21 +411,25 @@ export class HostClient {
    */
   async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<void> {
     if (this.native) this.native.unsupported('session send (not advertised by the reviewed native CLI)');
+    const binary = this.backend ? await this.backend : null;
+    const a = binary ?? 'a';
     const target = shellQuote(session.id ?? session.name);
     const encoded = encodeSendPayload(text, options);
     if (encoded.bracketed && encoded.enter) {
-      await this.runChecked(`a send ${target} --stdin && sleep 0.15 && a send ${target} --hex 0d`, DEFAULT_TIMEOUT_MS, encoded.framed);
+      await this.runChecked(`${a} send ${target} --stdin && sleep 0.15 && ${a} send ${target} --hex 0d`, DEFAULT_TIMEOUT_MS, encoded.framed);
       return;
     }
-    await this.runChecked(`a send ${target} --stdin${encoded.enter ? ' --enter' : ''}`, DEFAULT_TIMEOUT_MS, encoded.framed);
+    await this.runChecked(`${a} send ${target} --stdin${encoded.enter ? ' --enter' : ''}`, DEFAULT_TIMEOUT_MS, encoded.framed);
   }
 
   /** What the session shows right now (`--screen --plain`) or its recent raw output. */
   async capture(session: SessionRow, options: { mode: 'screen' | 'raw'; bytes?: number }): Promise<string> {
     if (this.native) this.native.unsupported('session capture (not advertised by the reviewed native CLI)');
+    const binary = this.backend ? await this.backend : null;
+    const a = binary ?? 'a';
     const target = shellQuote(session.id ?? session.name);
     const flags = options.mode === 'screen' ? '--screen --plain' : options.bytes ? `--bytes ${Math.floor(options.bytes)}` : '';
-    return stripSystemdNoise(await this.runChecked(`a capture ${target} ${flags}`.trim()));
+    return stripSystemdNoise(await this.runChecked(`${a} capture ${target} ${flags}`.trim()));
   }
 
   /**
