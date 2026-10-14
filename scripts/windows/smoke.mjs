@@ -30,7 +30,8 @@ try {
     assert.equal(r.status, 0, r.stderr);
     return r.stdout;
   };
-  assert.match(run('--version'), /0\.3\.1/);
+  const version = JSON.parse(readFileSync(join(prefix, 'package-manifest.json'), 'utf8')).version;
+  assert.equal(run('--version').trim(), version);
   assert.match(run('hosts'), /local/);
   // Actual installed device-flow commands against a loopback-only fake broker.
   const publicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGuV1O9rNRp7VtgPq3H6Mze4PugDi32wsIYRrGAzHWLb';

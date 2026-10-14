@@ -1,17 +1,17 @@
 # Windows x64 package
 
-The v0.3.1 release workflow builds `psc-windows-x64-0.3.1.zip` on Linux,
+The v0.3.2 release workflow builds `psc-windows-x64-0.3.2.zip` on Linux,
 checks that exact zip on `windows-latest`, then attaches it and its SHA256 file
 to the GitHub release when the release owner pushes the version tag.
 The zip contains official Node 24.13.1, emitted PSC and pinned Core sources,
 the locked commander/ws packages, the reviewed Windows PTY closure, and the
 Go security helper. The Node archive SHA256 is pinned in the builder.
 
-Run this in a regular, non-administrator PowerShell terminal after v0.3.1 is
+Run this in a regular, non-administrator PowerShell terminal after v0.3.2 is
 released (use the corresponding version for later releases):
 
 ```powershell
-$v='0.3.1'; $u="https://github.com/PocketShell-io/pocketshell-tui-client/releases/download/v$v"; $z="$env:TEMP\psc-windows-x64-$v.zip"; Invoke-WebRequest "$u/psc-windows-x64-$v.zip" -OutFile $z; Invoke-WebRequest "$u/psc-windows-x64-$v.zip.sha256" -OutFile "$z.sha256"; if ((Get-FileHash $z).Hash.ToLowerInvariant() -ne (Get-Content "$z.sha256").Split(' ')[0]) { throw 'PSC zip hash differs' }; $d="$env:TEMP\psc-install-$v"; Expand-Archive $z $d; & "$d\install.ps1"; & "$env:LOCALAPPDATA\PocketShell\psc\bin\psc.cmd" login; & "$env:LOCALAPPDATA\PocketShell\psc\bin\psc.cmd" hosts sync
+$v='0.3.2'; $u="https://github.com/PocketShell-io/pocketshell-tui-client/releases/download/v$v"; $z="$env:TEMP\psc-windows-x64-$v.zip"; Invoke-WebRequest "$u/psc-windows-x64-$v.zip" -OutFile $z; Invoke-WebRequest "$u/psc-windows-x64-$v.zip.sha256" -OutFile "$z.sha256"; if ((Get-FileHash $z).Hash.ToLowerInvariant() -ne (Get-Content "$z.sha256").Split(' ')[0]) { throw 'PSC zip hash differs' }; $d="$env:TEMP\psc-install-$v"; Expand-Archive $z $d; & "$d\install.ps1"; & "$env:LOCALAPPDATA\PocketShell\psc\bin\psc.cmd" login; & "$env:LOCALAPPDATA\PocketShell\psc\bin\psc.cmd" hosts sync
 ```
 
 Approve the device code using the URL printed by `psc login`. Windows stores
