@@ -12,6 +12,7 @@ import {
 } from '../src/hostClient.js';
 import { runCaptured } from '../src/transport/process.js';
 import { ConnectionError, type Connection, type ExecOutcome } from '../src/transport/types.js';
+import { isProbeExec, isRawAplexerExec, probeStdout } from './hostProbeFixture.js';
 
 function row(name: string, id: string | null, tag = name.split(':')[1] ?? null): SessionRow {
   return {
@@ -155,9 +156,19 @@ describe('HostClient binary', () => {
   });
   it('retains POSIX UUID attachment and legacy kill name despite optional row UUID', async () => {
     const seen: string[] = [];
-    const client = new HostClient(fakeConnection(async (command) => { seen.push(command); return { ...okOutcome(), stdout: JSON.stringify({ schema: 3, sessions: [], errors: [] }) }; }));
+    const wrapperJson = JSON.stringify({ schema: 3, sessions: [], errors: [] });
+    const client = new HostClient(fakeConnection(async (command) => {
+      seen.push(command);
+      if (isProbeExec(command)) return { ...okOutcome(), stdout: probeStdout({ wrapper: { output: wrapperJson }, apath: '' }) };
+      if (isRawAplexerExec(command)) return { ...okOutcome(), stdout: probeStdout({ apath: '' }) };
+      return { ...okOutcome(), stdout: wrapperJson };
+    }));
     expect(client.attachCommand(row('project:main', 'aplexer-fixture-id'))).toBe(pathAwareCommand("exec a attach 'aplexer-fixture-id'"));
     await client.killSession('project:main', 'aplexer-fixture-id');
-    expect(seen).toEqual([pathAwareCommand("pocketshell sessions list --json"), pathAwareCommand("pocketshell sessions kill -- 'project:main'")]);
+    // Combined probe (wrapper list inside, no a anywhere), raw aplexer probe, then the wrapper kill.
+    expect(seen).toHaveLength(3);
+    expect(isProbeExec(seen[0]!)).toBe(true);
+    expect(isRawAplexerExec(seen[1]!)).toBe(true);
+    expect(seen[2]).toBe(pathAwareCommand("pocketshell sessions kill -- 'project:main'"));
   });
 });

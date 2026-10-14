@@ -189,7 +189,7 @@ async function withResolvedHost(
   const host = resolveAHost(selector);
   const client = requests.getStore()
     ? await (await import('../daemon/services.js')).daemonClient(host)
-    : new HostClient(await openConnection(host), host.binary);
+    : new HostClient(await openConnection(host), host.binary, host);
   try {
     await body(client, host);
   } finally {
@@ -528,11 +528,14 @@ async function runAHosts(opts: { check?: boolean; json?: boolean }): Promise<voi
     try {
       const client = requests.getStore()
         ? await (await import('../daemon/services.js')).daemonClient(host)
-        : new HostClient(await openConnection(host), host.binary);
+        : new HostClient(await openConnection(host), host.binary, host);
       connection = client.connection;
       const versions = await client.probe();
       const ms = Date.now() - started;
-      const missing = versions.pocketshell === null;
+      // The resident daemon path only needs the `a` RPC helper; its versions
+      // probe runs under the raw ssh PATH, so a present aplexer with no
+      // pocketshell beside it is online, not missing.
+      const missing = versions.pocketshell === null && versions.aplexer === null;
       return {
         ...host,
         default: isDefault,

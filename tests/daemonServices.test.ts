@@ -1,5 +1,9 @@
 import { requests } from '../src/daemon/context.js';
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { loadBackendCapability } from '../src/hostCapability.js';
 const state = vi.hoisted(() => ({
   generation: 'A',
   error: false,
@@ -71,7 +75,10 @@ vi.mock('../src/daemon/channel.js', async (original) => {
 });
 import { daemonClient, closeChannels } from '../src/daemon/services.js';
 const host = { name: 'fixture', mode: 'gateway' as const, gateway: { deviceId: 'Lab' } };
+let xdg: string | undefined;
 beforeEach(() => {
+  xdg = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'psc-daemon-services-'));
   closeChannels();
   state.instances = [];
   state.calls = [];
@@ -80,13 +87,17 @@ beforeEach(() => {
   state.generation = 'A';
   state.failNext = '';
   state.legacy.mockReset();
-  state.legacy.mockResolvedValue({
+    state.legacy.mockResolvedValue({
     hostName: 'fixture',
     mode: 'gateway',
     exec: vi.fn(),
     attachInteractive: vi.fn(),
     close: vi.fn(),
   });
+});
+afterEach(() => {
+  if (xdg === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = xdg;
 });
 describe('daemon atomic operations and policy retirement', () => {
   it('uses one helper request per selector operation and validates schema3 output', async () => {
@@ -135,6 +146,12 @@ describe('daemon atomic operations and policy retirement', () => {
     client = await daemonClient(host);
     expect(state.legacy).toHaveBeenCalledOnce();
     expect(client.connection.hostName).toBe('fixture');
+  });
+
+  it('a resident negotiation persists the host capability for the classic fallback', async () => {
+    expect(loadBackendCapability(host)).toBeNull();
+    await daemonClient(host);
+    expect(loadBackendCapability(host)).toMatchObject({ direct: 'a', rpc: true });
   });
 });
 

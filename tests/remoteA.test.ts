@@ -277,7 +277,7 @@ describe('multi-line send encoding and HostClient.send', () => {
     calls.length = 0;
     await client.send(session, 'line1\nline2', { enter: true });
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.command).toContain('--stdin && sleep 0.15 && a send');
+    expect(calls[0]!.command).toContain("--stdin && sleep 0.15 && '\\''a'\\'' send");
     expect(calls[0]!.command).toContain('--hex 0d');
     expect(calls[0]!.stdin).toBe('\x1b[200~line1\nline2\x1b[201~');
 

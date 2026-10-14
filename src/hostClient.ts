@@ -1,5 +1,11 @@
 import { directSessions } from './directAplexer.js';
 import { requests } from './daemon/context.js';
+import {
+  forgetBackendCapability,
+  loadBackendCapability,
+  storeBackendCapability,
+  type BackendCapability,
+} from './hostCapability.js';
 /**
  * Everything the client asks of a PocketShell host, over any Connection.
  *
@@ -15,7 +21,9 @@ import {
   frameForPaste,
   HostCliCore,
   HostCliError,
+  HostCliFailed,
   needsBracketedPaste,
+  parseHostSessionsList,
   pathAwareCommand,
   shellQuote,
   SUBMIT_KEY,
@@ -151,18 +159,136 @@ export function execCommandLine(words: readonly string[]): string {
   return words.map((word) => shellQuote(word)).join(' ');
 }
 
-const sessionBackends = new Map<string, Promise<string | null>>();
+/**
+ * Which host side serves the session verbs: the `pocketshell` wrapper, a
+ * direct `a`, or both. Direct `a` is preferred whenever it is known to work
+ * (it answers in about 80 ms where the wrapper costs about 260 ms).
+ */
+interface SessionBackend {
+  /** The `pocketshell` wrapper answered a schema-valid, error-free listing. */
+  wrapper: boolean;
+  /** A validated `a` executable word (unquoted), or null when there is none. */
+  direct: string | null;
+}
+
+/** A resolved backend plus, when its probe just fetched one, that listing. */
+interface BackendResolution {
+  backend: SessionBackend;
+  listing: SessionsListing | null;
+}
+
+const PROBE_LINE = /^__PSC_BACKEND__(wrapper|wexit|apath|snapshot|sexit)(?: (.*))?$/;
+
+interface ProbeSection {
+  text: string;
+  exit: number;
+}
+
+interface ProbeSections {
+  wrapper?: ProbeSection;
+  apath?: string;
+  snapshot?: ProbeSection;
+}
+
+/** Marker-delimited probe output (see {@link detectSessionBackend}); null when no marker survived. */
+function parseProbeSections(stdout: string): ProbeSections | null {
+  const sections: ProbeSections = {};
+  let open: 'wrapper' | 'snapshot' | null = null;
+  let lines: string[] = [];
+  const close = (exit: number): void => {
+    if (open) sections[open] = { text: lines.join('\n'), exit };
+    open = null;
+    lines = [];
+  };
+  let sawMarker = false;
+  for (const line of stripSystemdNoise(stdout.replace(/\r\n/g, '\n')).split('\n')) {
+    const match = PROBE_LINE.exec(line);
+    if (!match) {
+      if (open) lines.push(line);
+      continue;
+    }
+    sawMarker = true;
+    const [, tag, value = ''] = match;
+    if (tag === 'wrapper' || tag === 'snapshot') {
+      close(-1);
+      open = tag;
+    } else if (tag === 'wexit' || tag === 'sexit') close(Number(value));
+    else sections.apath = value.trim();
+  }
+  return sawMarker ? sections : null;
+}
+
+/** The wrapper works when it exits 0 with a schema-valid, error-free listing. */
+function evaluateWrapperListing(section: ProbeSection | undefined): SessionsListing | null {
+  if (!section || section.exit !== 0) return null;
+  try {
+    const listing = parseHostSessionsList(section.text);
+    return listing.errors.length === 0 ? listing : null;
+  } catch {
+    return null;
+  }
+}
+
+function evaluateSnapshotListing(section: ProbeSection | undefined): SessionsListing | null {
+  if (!section || section.exit !== 0) return null;
+  try {
+    return directSessions(JSON.parse(stripSystemdNoise(section.text)));
+  } catch {
+    return null;
+  }
+}
+
+/** A `command -v a` answer usable as a host command word, or null. Every use site single-quotes it, so only word-splitting and control characters disqualify. */
+function usableAPath(path: string | undefined): string | null {
+  if (!path || path.length > 4096 || /[\r\n\0]/.test(path)) return null;
+  return path;
+}
+
+function probeAplexerLines(): string[] {
+  return [
+    `a_path=$(command -v a 2>/dev/null) || a_path=''`,
+    `printf '__PSC_BACKEND__apath %s\\n' "$a_path"`,
+    'if [ -n "$a_path" ]; then',
+    `printf '__PSC_BACKEND__snapshot\\n'`,
+    '"$a_path" --json snapshot',
+    `printf '__PSC_BACKEND__sexit %s\\n' "$?"`,
+    'fi',
+  ];
+}
+
+/** One exec that answers every probe question at once: does the wrapper list, where is `a`, does `a` snapshot. */
+function probeScript(binary: string): string {
+  return [
+    `printf '__PSC_BACKEND__wrapper\\n'`,
+    `${binary} sessions list --json`,
+    `printf '__PSC_BACKEND__wexit %s\\n' "$?"`,
+    ...probeAplexerLines(),
+  ].join('\n');
+}
+
+/** The same `a` questions under the endpoint's raw PATH: a managed helper may live there while the login shell misses it (or hits an unusable shim). */
+function rawAplexerScript(): string {
+  return probeAplexerLines().join('\n');
+}
+
+const sessionBackends = new Map<string, Promise<SessionBackend>>();
+
+function cachedBackend(capability: BackendCapability): SessionBackend {
+  return { wrapper: capability.wrapper, direct: capability.direct };
+}
 
 export class HostClient {
-  private backend?: Promise<string | null>;
+  private backend?: Promise<SessionBackend>;
   private backendKey?: string;
+  private pendingListing?: SessionsListing;
+  private hostHomePromise?: Promise<string>;
   readonly cli: HostCliCore;
   readonly native?: NativeWindowsHost;
 
   constructor(
     readonly connection: Connection,
     binary = 'pocketshell',
-    host?: HostEntry,
+    readonly host?: HostEntry,
   ) {
     if (host?.nativeWindowsCli !== undefined) {
       validateHostEntry(host);
@@ -245,53 +371,154 @@ export class HostClient {
     return { pocketshell: values.pocketshell ?? null, aplexer: values.aplexer ?? null };
   }
 
-  private async sessionBackend(): Promise<string | null> {
+  private sessionBackend(): Promise<SessionBackend> {
     if (!this.backend) {
-      this.backend = this.backendKey ? sessionBackends.get(this.backendKey) : undefined;
-      if (!this.backend) {
-        this.backend = this.detectSessionBackend();
-        if (this.backendKey) sessionBackends.set(this.backendKey, this.backend);
-        // Connectivity failures must not poison a host's capability cache.
-        this.backend.catch(() => {
-          if (this.backendKey) sessionBackends.delete(this.backendKey);
-          this.backend = undefined;
-        });
+      if (this.backendKey && sessionBackends.has(this.backendKey)) {
+        this.backend = sessionBackends.get(this.backendKey)!;
+      } else {
+        const stored = this.host ? loadBackendCapability(this.host) : null;
+        if (stored) {
+          this.backend = Promise.resolve(cachedBackend(stored));
+          if (this.backendKey) sessionBackends.set(this.backendKey, this.backend);
+        } else {
+          const probe = this.detectSessionBackend().then((found) => {
+            // The probe's own listing is handed to its first caller only.
+            this.pendingListing = found.listing ?? undefined;
+            if (this.host)
+              storeBackendCapability(this.host, { wrapper: found.backend.wrapper, direct: found.backend.direct, rpc: null });
+            return found.backend;
+          });
+          this.backend = probe;
+          if (this.backendKey) sessionBackends.set(this.backendKey, probe);
+          // Connectivity failures must not poison a host's capability cache.
+          probe.catch(() => {
+            if (this.backendKey && sessionBackends.get(this.backendKey) === probe) {
+              sessionBackends.delete(this.backendKey);
+            }
+            this.backend = undefined;
+          });
+        }
       }
     }
     return this.backend;
   }
 
-  private async detectSessionBackend(): Promise<string | null> {
-    try {
-      const listing = await this.cli.listSessions();
-      if (listing.errors.length === 0) return null;
-    } catch (error) {
-      // A transport failure or timeout is not a missing host CLI.
-      if (!(error instanceof HostCliError)) throw error;
-      if ((error as Error & { timedOut?: boolean }).timedOut
-        || (error.kind === 'failed' && (error.cause || (error as Error & { exitCode?: number | null }).exitCode === null))) throw error;
+  /** Resolve the backend; the first caller after a probe also receives that probe's listing. */
+  private async sessionsBackend(): Promise<BackendResolution> {
+    const backend = await this.sessionBackend();
+    const listing = this.pendingListing ?? null;
+    this.pendingListing = undefined;
+    return { backend, listing };
+  }
+
+  /** Drop every cached verdict for this host and probe again from scratch. */
+  private async refreshedBackend(): Promise<BackendResolution> {
+    if (this.backendKey) sessionBackends.delete(this.backendKey);
+    this.backend = undefined;
+    if (this.host) forgetBackendCapability(this.host);
+    return this.sessionsBackend();
+  }
+
+  /**
+   * Whether a failure suggests the session backend changed under us — the
+   * wrapper erroring host-side (an unsupported verb, a too-old schema) or
+   * the direct `a` no longer resolving — as opposed to a transport failure
+   * or timeout, which change nothing.
+   */
+  static backendMayHaveChanged(error: unknown): boolean {
+    if (error instanceof HostCliError) {
+      const failed = error as HostCliFailed;
+      return !failed.timedOut && failed.exitCode !== null;
     }
-    // The endpoint's initial PATH prefers its managed tools. The login-shell
-    // wrapper prepends user bins, which may contain unusable Windows uv shims.
-    let outcome = await this.connection.exec('command -v a', {
-      timeoutMs: 15_000, signal: requests.getStore()?.signal,
-    });
-    if (!outcome.timedOut && outcome.exitCode !== null && (outcome.exitCode !== 0 || !outcome.stdout.trim())) {
-      outcome = await this.run('command -v a', 15_000);
+    if (error instanceof SyntaxError) return true;
+    if (error instanceof HostCommandError) {
+      const { timedOut, exitCode, stderr } = error.outcome;
+      if (timedOut || exitCode === null) return false;
+      return exitCode === 127 || /command not found|no such file|not found/i.test(stderr);
     }
-    if (outcome.timedOut || outcome.exitCode !== 0) throw new HostCommandError('cannot resolve aplexer on the host', outcome);
-    const binary = outcome.stdout.trim();
-    if (!binary || /[\r\n\0]/.test(binary)) throw new HostCommandError('invalid aplexer executable path', outcome);
-    const command = shellQuote(binary);
-    directSessions(JSON.parse(stripSystemdNoise(await this.runChecked(`${command} --json snapshot`, 20_000))));
-    return command;
+    return error instanceof Error && error.message === 'aplexer snapshot must be an array';
+  }
+
+  /**
+   * Learn, in as few execs as possible, which backend serves this host. One
+   * combined exec runs the wrapper listing, resolves `a` under the user-bin
+   * PATH, and validates `a` with a snapshot — every answer it can give is
+   * reused, so a first-contact `ls` is exactly one connection. Only when no
+   * usable `a` emerges does a second, raw-PATH exec run (a managed helper
+   * may live there while the login shell misses it, or an unusable user-bin
+   * shim shadows it).
+   */
+  private async detectSessionBackend(): Promise<BackendResolution> {
+    const outcome = await this.run(probeScript(this.cli.binary), 35_000);
+    if (outcome.timedOut)
+      throw new HostCommandError('the session backend probe timed out after 35s (it may still complete on the host)', outcome);
+    const sections = parseProbeSections(outcome.stdout);
+    if (!sections)
+      throw new HostCommandError(
+        `the session backend probe failed (exit ${outcome.exitCode}): ${stripSystemdNoise(outcome.stderr).trim().split('\n').slice(-3).join(' ') || 'no probe markers'}`,
+        outcome,
+      );
+    const wrapperListing = evaluateWrapperListing(sections.wrapper);
+    let direct = usableAPath(sections.apath);
+    let listing = direct ? evaluateSnapshotListing(sections.snapshot) : null;
+    if (!listing) direct = null;
+    let rawError: unknown;
+    if (!direct) {
+      try {
+        const raw = await this.connection.exec(rawAplexerScript(), {
+          timeoutMs: 25_000, signal: requests.getStore()?.signal,
+        });
+        if (!raw.timedOut) {
+          const rawSections = parseProbeSections(raw.stdout);
+          const rawPath = usableAPath(rawSections?.apath);
+          if (rawPath) {
+            const rawListing = evaluateSnapshotListing(rawSections?.snapshot);
+            if (rawListing) {
+              direct = rawPath;
+              listing = rawListing;
+            }
+          }
+        }
+      } catch (error) {
+        rawError = error;
+      }
+    }
+    if (direct && listing) return { backend: { wrapper: wrapperListing !== null, direct }, listing };
+    if (wrapperListing) return { backend: { wrapper: true, direct: null }, listing: wrapperListing };
+    if (rawError) throw rawError;
+    throw new HostCommandError(
+      'no usable session backend: the pocketshell wrapper failed and no aplexer `a` could be resolved',
+      outcome,
+    );
+  }
+
+  private async fetchListing(backend: SessionBackend): Promise<SessionsListing> {
+    if (backend.direct) return this.snapshotListing(backend.direct);
+    return this.cli.listSessions();
+  }
+
+  private async snapshotListing(direct: string): Promise<SessionsListing> {
+    return directSessions(
+      JSON.parse(stripSystemdNoise(await this.runChecked(`${shellQuote(direct)} --json snapshot`, 20_000))),
+    );
+  }
+
+  /** The resolved direct `a` word, without probing; null when not yet known. */
+  private async resolvedDirect(): Promise<string | null> {
+    return this.backend ? (await this.backend).direct : null;
   }
 
   async listSessions(): Promise<SessionsListing> {
     if (this.native) return this.native.listSessions();
-    const binary = await this.sessionBackend();
-    return binary === null ? this.cli.listSessions()
-      : directSessions(JSON.parse(stripSystemdNoise(await this.runChecked(`${binary} --json snapshot`, 20_000))));
+    const first = await this.sessionsBackend();
+    if (first.listing) return first.listing;
+    try {
+      return await this.fetchListing(first.backend);
+    } catch (error) {
+      if (!HostClient.backendMayHaveChanged(error)) throw error;
+      const retry = await this.refreshedBackend();
+      return retry.listing ?? this.fetchListing(retry.backend);
+    }
   }
 
   /**
@@ -327,13 +554,58 @@ export class HostClient {
     options: { cwd?: string | null; engine?: string | null; profile?: string | null } = {},
   ): Promise<CreatedSession> {
     if (this.native) return this.native.createSession(name, options);
-    const binary = await this.sessionBackend();
-    if (binary === null) return this.cli.createSession(name, options);
-    const workspace = options.cwd == null ? '.' : options.cwd === '~' ? '"$HOME"'
-      : options.cwd.startsWith('~/') ? `"$HOME"/${shellQuote(options.cwd.slice(2))}` : shellQuote(options.cwd);
+    const { backend, listing } = await this.sessionsBackend();
+    if (backend.direct) return this.directCreateSession(name, options, backend.direct, listing);
+    try {
+      return await this.cli.createSession(name, options);
+    } catch (error) {
+      if (!HostClient.backendMayHaveChanged(error)) throw error;
+      // The wrapper's answer for this verb changed under us (e.g. a tray
+      // build without `sessions create`): re-probe and let a direct `a` serve it.
+      const retry = await this.refreshedBackend();
+      if (retry.backend.direct) return this.directCreateSession(name, options, retry.backend.direct, retry.listing);
+      throw error;
+    }
+  }
+
+  /**
+   * `--cwd` as one quoted host command word. A leading `~` is expanded on
+   * the host itself (one exec, cached per client): a Windows host must get
+   * its Windows profile directory (`USERPROFILE`), not whatever an MSYS
+   * login shell calls home, or `a start --workspace` lands in the wrong place.
+   */
+  private async workspaceArgument(cwd?: string | null): Promise<string> {
+    if (cwd == null || cwd === '.') return '.';
+    if (cwd === '~') return shellQuote(await this.hostHome());
+    if (cwd.startsWith('~/')) return `${shellQuote(await this.hostHome())}/${shellQuote(cwd.slice(2))}`;
+    return shellQuote(cwd);
+  }
+
+  private hostHome(): Promise<string> {
+    if (!this.hostHomePromise) {
+      this.hostHomePromise = this.runChecked(
+        'home=${USERPROFILE:-$HOME}; [ -n "$home" ] || { printf \'no home directory on the host\\n\' >&2; exit 1; }; printf \'%s\' "$home"',
+        15_000,
+      ).then((out) => out.trim());
+      this.hostHomePromise.catch(() => {
+        this.hostHomePromise = undefined;
+      });
+    }
+    return this.hostHomePromise;
+  }
+
+  private async directCreateSession(
+    name: string,
+    options: { cwd?: string | null; engine?: string | null; profile?: string | null },
+    direct: string,
+    probeListing?: SessionsListing | null,
+  ): Promise<CreatedSession> {
+    const binary = shellQuote(direct);
+    const workspace = await this.workspaceArgument(options.cwd);
     const resolvedWorkspace = (await this.runChecked(`cd ${workspace} && pwd -P`)).trim();
     const normalize = (path: string) => path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`).replace(/\/+$/, '');
-    const existing = (await this.listSessions()).sessions.find((r) => r.tag === name && r.workspace !== null
+    const listing = probeListing ?? (await this.listSessions());
+    const existing = listing.sessions.find((r) => r.tag === name && r.workspace !== null
       && normalize(r.workspace) === normalize(resolvedWorkspace));
     if (existing) return { name: existing.name, id: existing.id, created: false };
     let command = `${binary} --json start --workspace ${workspace} --tag ${shellQuote(name)}`;
@@ -351,11 +623,22 @@ export class HostClient {
       const row = await this.resolveSession(immutableId ?? name);
       return this.native.killSession(row.id!);
     }
-    const binary = await this.sessionBackend();
-    if (binary === null) return this.cli.killSession(name);
+    const { backend } = await this.sessionsBackend();
+    if (backend.direct) return this.directKillSession(name, immutableId, backend.direct);
+    try {
+      return await this.cli.killSession(name);
+    } catch (error) {
+      if (!HostClient.backendMayHaveChanged(error)) throw error;
+      const retry = await this.refreshedBackend();
+      if (retry.backend.direct) return this.directKillSession(name, immutableId, retry.backend.direct);
+      throw error;
+    }
+  }
+
+  private async directKillSession(name: string, immutableId: string | null | undefined, direct: string): Promise<void> {
     const row = await this.resolveSession(immutableId ?? name);
     if (!row.id) throw new Error('cannot stop a session without an aplexer id');
-    await this.runChecked(`${binary} --json kill ${shellQuote(row.id)}`, 20_000);
+    await this.runChecked(`${shellQuote(direct)} --json kill ${shellQuote(row.id)}`, 20_000);
   }
 
   async listWarnings(): Promise<WarningRow[]> {
@@ -411,8 +694,7 @@ export class HostClient {
    */
   async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<void> {
     if (this.native) this.native.unsupported('session send (not advertised by the reviewed native CLI)');
-    const binary = this.backend ? await this.backend : null;
-    const a = binary ?? 'a';
+    const a = shellQuote((await this.resolvedDirect()) ?? 'a');
     const target = shellQuote(session.id ?? session.name);
     const encoded = encodeSendPayload(text, options);
     if (encoded.bracketed && encoded.enter) {
@@ -425,8 +707,7 @@ export class HostClient {
   /** What the session shows right now (`--screen --plain`) or its recent raw output. */
   async capture(session: SessionRow, options: { mode: 'screen' | 'raw'; bytes?: number }): Promise<string> {
     if (this.native) this.native.unsupported('session capture (not advertised by the reviewed native CLI)');
-    const binary = this.backend ? await this.backend : null;
-    const a = binary ?? 'a';
+    const a = shellQuote((await this.resolvedDirect()) ?? 'a');
     const target = shellQuote(session.id ?? session.name);
     const flags = options.mode === 'screen' ? '--screen --plain' : options.bytes ? `--bytes ${Math.floor(options.bytes)}` : '';
     return stripSystemdNoise(await this.runChecked(`${a} capture ${target} ${flags}`.trim()));

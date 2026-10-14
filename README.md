@@ -150,6 +150,45 @@ before the command so its flags aren't read as psc options. `-t/--timeout`
 (seconds, default 60) kills the command; in `local` mode its whole process
 tree is killed, over ssh/gateway the remote command may keep running.
 
+## The resident daemon and the classic path
+
+On Linux and macOS `psc` routes the read-heavy commands (`ls`, `status`,
+`capture`, `send`, `hosts`, `hosts --check`) through a per-user resident
+daemon by default: one open gateway channel to the host helper
+(`a rpc --stdio`), so a warm `psc hetzner ls` costs about one network round
+trip instead of a fresh WebSocket + SSH handshake per call. The daemon is
+started on demand, is idle-reaped, lives behind a peer-UID-checked unix
+socket in `$XDG_RUNTIME_DIR` (or a private `/tmp` fallback when that is
+unset, e.g. for non-interactive agents), and never holds ambient
+credentials.
+
+- `PSC_DAEMON=0` opts out and runs every command on the classic path.
+- On Windows the default stays the classic path (a named-pipe daemon is P1).
+- Every daemon failure falls back transparently to the classic path: an
+  unsafe or refused socket, a spawn failure, or a host helper without
+  `a rpc` (the request is then served `transport: legacy`).
+
+The classic path itself is one connection per command wherever possible:
+
+- psc prefers a **direct `a --json snapshot`** over the `pocketshell`
+  wrapper whenever the host's `a` is known to work — the snapshot answers in
+  ~80 ms where the wrapper costs ~260 ms. The tradeoff: a snapshot listing
+  does not carry the wrapper's per-workspace `errors[]` rows (warnings that
+  part of the session list could not be read), and any wrapper-only field
+  arrives only on wrapper-served hosts. A host whose `a` breaks falls back
+  to the wrapper automatically.
+- Which backend serves a host is probed **once** (one combined exec: the
+  wrapper listing, `command -v a` under the user-bin PATH, and an
+  `a --json snapshot` validation) and the verdict is persisted for 24 h in
+  `~/.config/pocketshell-tui-client/backend-cache.json` (0600, keyed by
+  host name + host-key fingerprint, pruned after a week). Failures that
+  suggest the backend changed — a wrapper error, `a` no longer resolving,
+  a wrapper usage error on a verb (tray builds without `sessions create`)
+  — invalidate the entry and re-probe once.
+- `start -C '~'` expands `~` **on the host** (to its real profile
+  directory, `$USERPROFILE` on Windows hosts), so a Windows host never gets
+  an MSYS-internal home as its workspace.
+
 ## For agents
 
 The CLI is meant to be driven by coding agents as well as people:
@@ -214,9 +253,11 @@ psc -H box sessions list --json                # agentState: working / waiting /
 | Path | What |
 | --- | --- |
 | `~/.config/pocketshell-tui-client/hosts.json` | saved hosts |
+| `~/.config/pocketshell-tui-client/backend-cache.json` | per-host session-backend verdicts (24 h TTL) |
 | `~/.config/pocketshell/credentials.json` | login session, shared with the `pocketshell` CLI |
 | `~/.config/pocketshell/gateway_known_hosts` | gateway host-key pins, shared with the `pocketshell` CLI |
 | `$XDG_RUNTIME_DIR/pocketshell-tui-client/` | OpenSSH control sockets |
+| `$XDG_RUNTIME_DIR/psc-daemon-<uid>/` | resident daemon socket (0700, peer-UID checked) |
 
 ## Development
 
