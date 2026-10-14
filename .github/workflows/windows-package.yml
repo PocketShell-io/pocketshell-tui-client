@@ -93,6 +93,26 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           node node_modules/vitest/vitest.mjs run tests/windowsBoundary.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'Boundary tests failed' }
+      - name: Named-pipe relay unit tests
+        working-directory: client/native/psc-relay
+        run: go test ./...
+      - name: Named-pipe daemon smoke (opt-in PSC_DAEMON=1)
+        shell: pwsh
+        run: |
+          $version = (Get-Content "$env:RUNNER_TEMP\psc-package\package-manifest.json" -Raw | ConvertFrom-Json).version
+          $prefix = "$env:LOCALAPPDATA\PocketShell\psc\$version"
+          # Opt-in daemon over the named pipe: spawn, serve, stop.
+          $env:PSC_DAEMON = '1'
+          & "$prefix\psc.cmd" daemon status --json
+          if ($LASTEXITCODE -ne 0) { throw 'daemon status failed' }
+          & "$prefix\psc.cmd" hosts --json
+          if ($LASTEXITCODE -ne 0) { throw 'daemon-routed hosts failed' }
+          & "$prefix\psc.cmd" daemon stop --json
+          if ($LASTEXITCODE -ne 0) { throw 'daemon stop failed' }
+          # Daemon off: the relay must fall back to the classic entry.
+          Remove-Item Env:PSC_DAEMON
+          & "$prefix\psc.cmd" hosts --json
+          if ($LASTEXITCODE -ne 0) { throw 'classic fallback failed' }
       - name: Native helper unit tests on Windows
         working-directory: client/native/psc-security
         run: go test ./...

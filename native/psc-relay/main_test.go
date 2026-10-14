@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -8,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFrames(t *testing.T) {
@@ -76,7 +79,7 @@ func TestPeerAndSocket(t *testing.T) {
 		}
 		done <- e
 	}()
-	c, e := connect(p)
+	c, e := daemonDial(p, 10*time.Millisecond)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -85,7 +88,7 @@ func TestPeerAndSocket(t *testing.T) {
 		t.Fatal(e)
 	}
 	os.Chmod(p, 0666)
-	if c, e = connect(p); e == nil {
+	if c, e = daemonDial(p, 10*time.Millisecond); e == nil {
 		c.Close()
 		t.Fatal("loose socket accepted")
 	}
@@ -128,6 +131,32 @@ func TestForeignUID(t *testing.T) {
 	if !sameUser(uint32(os.Geteuid()), nil) {
 		t.Fatal("owner refused")
 	}
+}
+
+func TestSpawnFailureMemo(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	assertClean := func() {
+		if spawnFailedRecently() {
+			t.Fatal("memo honored without a marker")
+		}
+	}
+	assertClean()
+	markSpawnFailed()
+	if !spawnFailedRecently() {
+		t.Fatal("memo not honored after a failed spawn")
+	}
+	st, e := os.Stat(spawnMarkerPath())
+	if e != nil || st.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("marker not private: %v %v", e, st.Mode())
+	}
+	clearSpawnMarker()
+	assertClean()
+	// A loosened marker file is ignored, not honored.
+	os.WriteFile(spawnMarkerPath(), []byte("x\n"), 0600)
+	os.Chmod(spawnMarkerPath(), 0o666)
+	assertClean()
+	os.Remove(spawnMarkerPath())
 }
 
 func TestClosedDaemonEnvironment(t *testing.T) {

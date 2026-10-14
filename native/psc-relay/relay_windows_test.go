@@ -1,0 +1,277 @@
+//go:build windows
+
+// The named-pipe daemon boundary: owner-scoped pipe naming, exclusive
+// secret creation, and the constant-time connection secret handshake.
+// These run on the Windows runner only (the transport itself is Windows).
+package main
+
+import (
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/Microsoft/go-winio"
+	"golang.org/x/sys/windows"
+)
+
+func TestPipeEndpointIsStableAndNamespaced(t *testing.T) {
+	a, e := resolvePipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	b, e := resolvePipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if a.name == "" || a.secret == "" || a.name != b.name || a.secret != b.secret {
+		t.Fatal("pipe endpoint is not stable")
+	}
+	if filepath.Base(a.secret) == "psc-daemon.secret" {
+		t.Fatal("secret file must be namespace-scoped, not shared across daemons")
+	}
+	addr, e := daemonAddr()
+	if e != nil || addr != a.name {
+		t.Fatal("daemonAddr does not match the resolved pipe")
+	}
+}
+
+func TestSecretCreateReadAndExclusiveCreate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "psc-daemon-test.secret")
+	secret, e := createSecretExcl(path)
+	if e != nil || len(secret) != secretBytes {
+		t.Fatal(e)
+	}
+	if _, e := createSecretExcl(path); !os.IsExist(e) {
+		t.Fatal("exclusive creation allowed a second writer")
+	}
+	got, e := readSecretFile(path)
+	if e != nil || string(got) != string(secret) {
+		t.Fatal(e)
+	}
+	os.Remove(path)
+	if _, e := readSecretFile(path); e == nil {
+		t.Fatal("missing secret accepted")
+	}
+}
+
+func TestListenDialSecretHandshake(t *testing.T) {
+	os.Setenv("LOCALAPPDATA", t.TempDir())
+	defer os.Unsetenv("LOCALAPPDATA")
+	accept, stop, cleanup, e := listenDaemon()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if accept == nil {
+		t.Fatal("listener refused to own a fresh pipe")
+	}
+	defer cleanup()
+	// Keep accepting like the real daemon core does, or the pipe runs out
+	// of free instances for the second dial.
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, e := accept()
+			if e != nil {
+				close(conns)
+				return
+			}
+			conns <- c
+		}
+	}()
+	ep, e := resolvePipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	// A correct secret is accepted; a wrong one is dropped.
+	secret, e := readSecretFile(ep.secret)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(ep.secret); e != nil {
+		t.Fatal(e)
+	}
+	c, e := daemonDial(ep.name, time.Second)
+	if e != nil {
+		t.Fatal(e)
+	}
+	accepted := <-conns
+	if accepted == nil {
+		t.Fatal("daemon dropped a correct secret")
+	}
+	accepted.Close()
+	c.Close()
+	// Corrupt the presented secret: the daemon must close the connection.
+	presented := make([]byte, secretBytes)
+	copy(presented, secret)
+	presented[0] ^= 0xff
+	bad, e := dialWithSecret(ep.name, presented)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer bad.Close()
+	if _, e := bad.Write([]byte("{}")); e == nil {
+		bad.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var b [1]byte
+		if _, e := bad.Read(b[:]); e == nil {
+			t.Fatal("daemon served a connection with a wrong secret")
+		}
+	}
+	// The rejected connection was closed by the daemon, not handed upward.
+	for {
+		select {
+		case leaked := <-conns:
+			leaked.Close()
+			continue
+		default:
+		}
+		break
+	}
+	stop()
+}
+
+func dialWithSecret(name string, secret []byte) (net.Conn, error) {
+	timeout := time.Second
+	c, e := winio.DialPipe(name, &timeout)
+	if e != nil {
+		return nil, e
+	}
+	if _, e := c.Write(secret); e != nil {
+		c.Close()
+		return nil, e
+	}
+	return c, nil
+}
+
+// A second daemon must not steal a pipe that is already answering.
+func TestListenDaemonYieldsToLivePipe(t *testing.T) {
+	os.Setenv("LOCALAPPDATA", t.TempDir())
+	defer os.Unsetenv("LOCALAPPDATA")
+	accept, stop, cleanup, e := listenDaemon()
+	if e != nil || accept == nil {
+		t.Fatal(e)
+	}
+	defer cleanup()
+	done := make(chan struct{})
+	go func() {
+		for {
+			if _, e := accept(); e != nil {
+				close(done)
+				return
+			}
+		}
+	}()
+	accept2, _, cleanup2, e := listenDaemon()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if accept2 != nil {
+		cleanup2()
+		t.Fatal("second daemon did not yield to the live one")
+	}
+	stop()
+	<-done
+}
+
+// A squatter holding the pipe name with a DIFFERENT owner SID must be
+// refused BEFORE any secret byte is written to it: the verifier is
+// injected to answer with a foreign SID (the production check reads the
+// server process's token, which a same-user test cannot fake).
+func TestDialRefusesForeignPipeServerBeforeSecret(t *testing.T) {
+	os.Setenv("LOCALAPPDATA", t.TempDir())
+	defer os.Unsetenv("LOCALAPPDATA")
+	ep, e := resolvePipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	// A readable secret must exist, or dialing would fail before the check.
+	if _, e := createSecretExcl(ep.secret); e != nil {
+		t.Fatal(e)
+	}
+	// The squatter: a plain pipe server on OUR predictable name, recording
+	// every byte it receives.
+	squatter, e := winio.ListenPipe(ep.name, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer squatter.Close()
+	received := make(chan int, 4)
+	go func() {
+		for {
+			c, e := squatter.Accept()
+			if e != nil {
+				close(received)
+				return
+			}
+			c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var b [64]byte
+			n, _ := c.Read(b[:])
+			received <- n
+			c.Close()
+		}
+	}()
+	// Simulate a foreign server owner.
+	restore := pipeServerOwnerSID
+	pipeServerOwnerSID = func(windows.Handle) (string, error) { return "S-1-5-21-attacker", nil }
+	defer func() { pipeServerOwnerSID = restore }()
+	if _, e := daemonDial(ep.name, time.Second); !errors.Is(e, errForeignPipeServer) {
+		t.Fatalf("foreign pipe server accepted: %v", e)
+	}
+	// Exactly one connection was made and ZERO secret bytes reached it.
+	if n := <-received; n != 0 {
+		t.Fatalf("squatter received %d bytes before the owner check", n)
+	}
+	select {
+	case n := <-received:
+		t.Fatalf("unexpected second connection, %d bytes", n)
+	default:
+	}
+}
+
+// A pre-existing pipe of the same name must make OUR listener fail (the
+// go-winio first instance is FILE_CREATE, i.e. FILE_FLAG_FIRST_PIPE_INSTANCE):
+// the daemon never coexists with a squatter.
+func TestListenerRefusesToCoexistWithSquatter(t *testing.T) {
+	os.Setenv("LOCALAPPDATA", t.TempDir())
+	defer os.Unsetenv("LOCALAPPDATA")
+	ep, e := resolvePipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	squatter, e := winio.ListenPipe(ep.name, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer squatter.Close()
+	accept, _, cleanup, e := listenDaemon()
+	if e == nil {
+		if accept != nil && cleanup != nil {
+			cleanup()
+		}
+		t.Fatal("listener coexisted with a squatter on the same pipe name")
+	}
+}
+
+func TestSecretIsRandom(t *testing.T) {
+	dir := t.TempDir()
+	a, e := createSecretExcl(filepath.Join(dir, "a.secret"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	b, e := createSecretExcl(filepath.Join(dir, "b.secret"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	same := true
+	for i := range a {
+		if a[i] != b[i] {
+			same = false
+		}
+	}
+	if same {
+		t.Fatal("secrets are not random")
+	}
+}

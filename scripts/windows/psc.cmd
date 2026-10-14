@@ -1,3 +1,3 @@
 @echo off
-"%~dp0node.exe" "%~dp0psc\dist\cli.js" %*
+"%~dp0psc.exe" %*
 exit /b %errorlevel%

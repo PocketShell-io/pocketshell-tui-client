@@ -2,12 +2,24 @@
 import { registerHosts } from '../commands/hosts.js';
 import { Command, CommanderError } from 'commander';
 import { closeChannels, warmHost, pingHost } from './services.js';
+import { preWarm, watchNetworkChanges } from './prewarm.js';
 import { resolveAHost } from '../commands/a.js';
 import { dispatchA } from '../commands/a.js';
 import { fail, usageError } from '../output.js';
 import { VERSION } from '../version.js';
 import { requests, type RequestContext } from './context.js';
 import { frames, sendFrame } from './framing.js';
+
+/**
+ * Keep recently used hosts warm: once at start, and again whenever the
+ * network changes underneath us. Background-only — it never touches the
+ * idle timer (which counts client requests, not this traffic).
+ */
+const reWarm = (): void => {
+  void preWarm(warmHost);
+};
+reWarm();
+watchNetworkChanges(reWarm);
 interface Request {
   protocol: number;
   id: string;
@@ -92,6 +104,7 @@ async function dispatch(r: Request): Promise<void> {
             break;
           case 'reconnect':
             closeChannels();
+            reWarm();
             break;
           case 'ping':
             if (!r.argv[2]) throw usageError('daemon ping requires a host');

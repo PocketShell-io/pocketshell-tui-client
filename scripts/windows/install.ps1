@@ -92,7 +92,7 @@ if ($fresh) {
 }
 try {
     if ($fresh) {
-    Copy-Item -LiteralPath "$PSScriptRoot\node.exe", "$PSScriptRoot\psc-security.exe", "$PSScriptRoot\psc.cmd", "$PSScriptRoot\NODE-LICENSE.txt", "$PSScriptRoot\package-manifest.json" -Destination $dest
+    Copy-Item -LiteralPath "$PSScriptRoot\node.exe", "$PSScriptRoot\psc-security.exe", "$PSScriptRoot\psc.exe", "$PSScriptRoot\psc.cmd", "$PSScriptRoot\NODE-LICENSE.txt", "$PSScriptRoot\package-manifest.json" -Destination $dest
     Copy-Item -LiteralPath "$PSScriptRoot\psc" -Destination $dest -Recurse
     # Inbox Windows files can be hardlinked or carry ACLs rejected by the helper.
     # Copy only the client, verify Microsoft's signature on the actual copy,
