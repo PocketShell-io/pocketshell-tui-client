@@ -1,4 +1,5 @@
 /** Glue every command shares: pick the host, open it, always close it. */
+import { setExitCode } from '../daemon/context.js';
 import { InvalidArgumentError, type Command } from 'commander';
 import { HostClient } from '../hostClient.js';
 import { defaultHostName, getHost, LOCAL_HOST_NAME, type HostEntry } from '../hosts/store.js';
@@ -42,7 +43,7 @@ export function action<A extends unknown[]>(fn: (...args: A) => Promise<void>): 
     try {
       await fn(...args);
     } catch (error) {
-      process.exitCode = fail(error);
+      setExitCode(fail(error));
     }
   };
 }

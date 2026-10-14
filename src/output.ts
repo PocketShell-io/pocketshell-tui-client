@@ -7,6 +7,7 @@
  * - Without it: readable text on stdout, `error: …` on stderr.
  * - Exit codes are stable (see EXIT below) in both modes.
  */
+import { requests, writeOutput } from './daemon/context.js';
 import { HostCliError, HostCliFailed } from '@pocketshell/core';
 import { stripSystemdNoise } from './hostClient.js';
 import { HostStoreError } from './hosts/store.js';
@@ -28,11 +29,12 @@ export const EXIT = {
 let jsonMode = process.env.PSC_JSON === '1';
 
 export function setJsonMode(value: boolean): void {
-  jsonMode = jsonMode || value;
+  const context = requests.getStore();
+  if (context) context.json ||= value; else jsonMode ||= value;
 }
 
 export function isJsonMode(): boolean {
-  return jsonMode;
+  return requests.getStore()?.json ?? jsonMode;
 }
 
 /**
@@ -58,19 +60,19 @@ export function usageError(message: string): CliError {
 
 /** Emit a successful result: `data` as JSON, or `human()` as text. */
 export function emit(data: unknown, human?: () => string): void {
-  if (jsonMode) {
-    process.stdout.write(`${JSON.stringify(data)}\n`);
+  if (isJsonMode()) {
+    writeOutput('stdout', `${JSON.stringify(data)}\n`);
   } else if (human) {
     const text = human();
-    if (text) process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+    if (text) writeOutput('stdout', text.endsWith('\n') ? text : `${text}\n`);
   } else {
-    process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+    writeOutput('stdout', `${JSON.stringify(data, null, 2)}\n`);
   }
 }
 
 /** Progress or hints for humans; silent in JSON mode, always on stderr. */
 export function note(message: string): void {
-  if (!jsonMode) process.stderr.write(`${message}\n`);
+  if (!isJsonMode()) writeOutput('stderr', `${message}\n`);
 }
 
 export interface Classified {
@@ -170,11 +172,11 @@ export function classify(error: unknown): Classified {
 /** Report a failure in the active output mode and return the exit status. */
 export function fail(error: unknown): number {
   const { code, message, exit, details } = classify(error);
-  if (jsonMode) {
+  if (isJsonMode()) {
     const { code: _c, message: _m, ...extra } = details ?? {};
-    process.stdout.write(`${JSON.stringify({ ok: false, error: { code, message, ...extra } })}\n`);
+    writeOutput('stdout', `${JSON.stringify({ ok: false, error: { code, message, ...extra } })}\n`);
   } else {
-    process.stderr.write(`error: ${safeText(message).trimEnd()}\n`);
+    writeOutput('stderr', `error: ${safeText(message).trimEnd()}\n`);
   }
   return exit;
 }
