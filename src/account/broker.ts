@@ -24,7 +24,7 @@ import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
 import { connect as netConnect, type Socket } from 'node:net';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
 import { VERSION } from '../version.js';
-import { AccountError, BrokerRateLimited, BrokerUnavailable, LOGIN_HINT, NotLoggedIn } from './errors.js';
+import { AccountError, BrokerRateLimited, BrokerUnavailable, LOGIN_HINT, NotLoggedIn, TransportRefused } from './errors.js';
 import { isObject, loadsStrict } from './json.js';
 import { cleanText } from './sanitize.js';
 import {
@@ -99,7 +99,7 @@ export function assertBrokerTransport(baseUrl: string, options: Pick<HttpOptions
   const decision =
     options.transport ??
     resolveBrokerTransport(new URL(baseUrl), process.env, process.execArgv, process.env.NODE_OPTIONS);
-  if (decision.kind === 'refused') throw new AccountError(decision.reason);
+  if (decision.kind === 'refused') throw new TransportRefused(decision.reason);
 }
 
 async function readCappedFetch(res: Response): Promise<Uint8Array> {
@@ -417,7 +417,7 @@ async function sendViaNode(
   try {
     if (options.transport.kind === 'trusted-proxy') {
       if (!secure) {
-        throw new AccountError('A trusted proxy only applies to https broker URLs.');
+        throw new TransportRefused('A trusted proxy only applies to https broker URLs.');
       }
       tunnel = await connectThroughProxy(options.transport.proxy, target.hostname, Number(target.port || 443), {
         signal: options.signal,
@@ -497,7 +497,7 @@ export async function request(
   const decision =
     options.transport ??
     resolveBrokerTransport(new URL(baseUrl), process.env, process.execArgv, process.env.NODE_OPTIONS);
-  if (decision.kind === 'refused') throw new AccountError(decision.reason);
+  if (decision.kind === 'refused') throw new TransportRefused(decision.reason);
   try {
     const { status, raw } = await sendViaNode(new URL(baseUrl + path), method, headers, payload, {
       signal: options.signal,

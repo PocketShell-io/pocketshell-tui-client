@@ -45,8 +45,7 @@ export class CredentialsUnsafe extends NotLoggedIn {
 }
 
 /** The broker could not be reached (DNS, TCP, TLS, timeout). code `BROKER_UNAVAILABLE`, exit 1. */
-export class BrokerUnavailable extends AccountError {
-  constructor(message: string, code = 'BROKER_UNAVAILABLE') {
+export class BrokerUnavailable extends AccountError {  constructor(message: string, code = 'BROKER_UNAVAILABLE') {
     super(message, { code, exitCode: 1 });
     this.name = 'BrokerUnavailable';
   }
@@ -69,5 +68,20 @@ export class LoginCancelled extends AccountError {
   constructor(message = 'Login cancelled.') {
     super(message, { code: 'CANCELLED', exitCode: 130 });
     this.name = 'LoginCancelled';
+  }
+}
+
+/**
+ * The transport policy refused to send broker credentials (an environment
+ * proxy is in effect, not bypassed, not trusted). code `TRANSPORT_REFUSED`,
+ * exit 1. The message is ours, not remote text: it names the fixes
+ * (NO_PROXY, PSC_TRUSTED_PROXY, unsetting NODE_USE_ENV_PROXY) and must
+ * propagate untruncated and without a re-login hint — logging in again
+ * cannot help.
+ */
+export class TransportRefused extends AccountError {
+  constructor(message: string) {
+    super(message, { code: 'TRANSPORT_REFUSED', exitCode: 1 });
+    this.name = 'TransportRefused';
   }
 }

@@ -31,6 +31,7 @@ export {
   CredentialsUnsafe,
   LoginCancelled,
   NotLoggedIn,
+  TransportRefused,
 } from './errors.js';
 export type { Credentials } from './credentials.js';
 export type { GatewayToken } from './broker.js';

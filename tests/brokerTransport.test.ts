@@ -21,7 +21,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import * as broker from '../src/account/broker.js';
 import { save } from '../src/account/credentials.js';
 import { deviceLogin } from '../src/account/device.js';
-import { logout } from '../src/account/index.js';
+import { logout, TransportRefused } from '../src/account/index.js';
 import {
   envProxyOptIn,
   matchesNoProxy,
@@ -374,6 +374,10 @@ describe('broker request transport', () => {
 
   it('JSON-body credential requests are policed the same as bearer ones (no request made)', async () => {
     await withEnv({ ...HOSTILE }, async () => {
+      const poll = await broker.pollDevice(httpBase, 'dc_0123456789abcdefXYZ').catch((e: unknown) => e);
+      expect(poll).toBeInstanceOf(TransportRefused);
+      expect(poll).toMatchObject({ code: 'TRANSPORT_REFUSED', exitCode: 1 });
+      expect((poll as Error).message).toContain('unset NODE_USE_ENV_PROXY');
       await expect(broker.pollDevice(httpBase, 'dc_0123456789abcdefXYZ')).rejects.toThrow(/NO_PROXY/);
       await expect(
         broker.getSession(httpBase, TOKEN),

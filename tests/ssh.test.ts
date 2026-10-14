@@ -88,6 +88,33 @@ describe('classifySshFailure', () => {
     expect(offline!.exitCode).toBe(4);
   });
 
+  it('a TRANSPORT_REFUSED marker passes through whole, exit 1, no login hint', () => {
+    // A realistic refusal is longer than the 300-char slice other markers get.
+    const reason =
+      'Refusing to send PocketShell broker credentials through the environment proxy (http://127.0.0.1:9); ' +
+      'the proxy would see the login. ' +
+      "add 'broker.example' to NO_PROXY to connect directly, " +
+      'or set PSC_TRUSTED_PROXY=http://127.0.0.1:9 to trust this proxy for https broker traffic, ' +
+      'or unset NODE_USE_ENV_PROXY to disable environment proxies.';
+    expect(reason.length).toBeGreaterThan(300);
+    // Even with a login hint configured (as the gateway transport does), a
+    // transport refusal gets neither slicing nor the hint.
+    const hinted = { hostName: 'hetzner', how: 'through the gateway', hint: { NOT_LOGGED_IN: 'run `pocketshell-tui-client login`' } };
+    const error = classifySshFailure(
+      {
+        exitCode: 255,
+        stderr: `${PROXY_MARKER}: TRANSPORT_REFUSED: could not get a gateway token: ${reason}\nConnection closed by UNKNOWN port 65535\n`,
+        timedOut: false,
+      },
+      hinted,
+    );
+    expect(error!.code).toBe('TRANSPORT_REFUSED');
+    expect(error!.exitCode).toBe(1);
+    expect(error!.message).toBe(`hetzner: could not get a gateway token: ${reason}`);
+    expect(error!.message).toContain('unset NODE_USE_ENV_PROXY');
+    expect(error!.message).not.toContain('pocketshell-tui-client login');
+  });
+
   it('leaves a remote command that merely exits 255 (or anything else) alone', () => {
     expect(fail('my script failed\n')).toBeNull();
     expect(fail('Permission denied (publickey).\n', 1)).toBeNull();

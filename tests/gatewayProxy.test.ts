@@ -10,7 +10,8 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { NotLoggedIn } from '../src/account/index.js';
+import { NotLoggedIn, TransportRefused } from '../src/account/index.js';
+import { resolveBrokerTransport } from '../src/account/transport.js';
 import { resolveEndpoint } from '../src/gateway/endpoint.js';
 import { EXIT, friendlyLine, runProxy } from '../src/gateway/proxy.js';
 import { newStatusFilePath, PROXY_MARKER, readStatusFile, writeStatusFile } from '../src/transport/openssh.js';
@@ -247,6 +248,29 @@ describe('gateway proxy', () => {
     expect(run.lines[0]).toMatch(new RegExp(`^${PROXY_MARKER}: NOT_LOGGED_IN: not logged in`));
     const bad = start(fake.port, { tokenProvider: async () => 'has space' });
     expect(await bad.result).toBe(EXIT.NO_TOKEN);
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it('a transport refusal on the gateway-token path propagates whole, with no login hint', async () => {
+    const decision = resolveBrokerTransport(
+      new URL('https://broker.example'),
+      { NODE_USE_ENV_PROXY: '1', HTTPS_PROXY: 'http://127.0.0.1:9' },
+      [],
+      undefined,
+    );
+    expect(decision.kind).toBe('refused');
+    const reason = (decision as { reason: string }).reason;
+    expect(reason.length).toBeGreaterThan(300); // the old 300-char slice would cut the fixes off
+    const fake = await fakeGateway(() => {});
+    const run = start(fake.port, {
+      tokenProvider: async () => {
+        throw new TransportRefused(reason);
+      },
+    });
+    expect(await run.result).toBe(EXIT.TRANSPORT_REFUSED);
+    expect(run.lines).toEqual([`${PROXY_MARKER}: TRANSPORT_REFUSED: could not get a gateway token: ${reason}`]);
+    expect(run.lines[0]).toContain('unset NODE_USE_ENV_PROXY');
+    expect(run.lines[0]).not.toContain('pocketshell-tui-client login');
     expect(fake.requests).toHaveLength(0);
   });
 

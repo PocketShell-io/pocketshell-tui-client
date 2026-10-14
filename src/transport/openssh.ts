@@ -448,6 +448,7 @@ const PROXY_MARKER_RE = new RegExp(`^${PROXY_MARKER}: ([A-Z][A-Z_]{1,40}): (.*)$
 function exitForCode(code: string): number {
   if (code === 'NOT_LOGGED_IN') return 3;
   if (code === 'USAGE') return 2;
+  if (code === 'TRANSPORT_REFUSED') return 1;
   return 4;
 }
 
@@ -466,6 +467,11 @@ export interface FailureContext {
 
 /** The ConnectionError for a proxy-classified failure (status file or stderr marker). */
 export function proxyFailure(status: ProxyStatus, context: FailureContext): ConnectionError {
+  if (status.code === 'TRANSPORT_REFUSED') {
+    // A local transport-policy refusal, not remote text: never slice it (the
+    // fixes would be cut off) and never hint at re-login (it cannot help).
+    return new ConnectionError(`${context.hostName}: ${status.message}`, status.code, 1);
+  }
   const hint = context.hint?.[status.code];
   return new ConnectionError(
     `${context.hostName}: ${status.message.slice(0, 300)}${hint ? ` (${hint})` : ''}`,
