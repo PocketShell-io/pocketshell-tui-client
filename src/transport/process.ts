@@ -75,6 +75,7 @@ export function runCaptured(
   argv: readonly string[],
   options: ExecOptions & { env?: NodeJS.ProcessEnv },
 ): Promise<ExecOutcome> {
+  if(options.signal?.aborted)return Promise.resolve({exitCode:null,stdout:'',stderr:'command cancelled\n',timedOut:false});
   return new Promise((resolve) => {
     const child = spawn(file, argv, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -89,6 +90,7 @@ export function runCaptured(
     let outBytes = 0;
     let errBytes = 0;
     let timedOut = false;
+    let aborted = false;
     let settled = false;
     const timers: NodeJS.Timeout[] = [];
 
@@ -119,27 +121,31 @@ export function runCaptured(
     const finish = (exitCode: number | null, extraErr = '') => {
       if (settled) return;
       settled = true;
+      options.signal?.removeEventListener('abort',abort);
       for (const timer of timers) clearTimeout(timer);
       if (pid !== undefined) {
         // A timed-out tree is killed whole; stragglers of a clean exit are left alone.
-        if (timedOut) killGroup(pid, 'SIGKILL');
+        if (timedOut || aborted) killGroup(pid, 'SIGKILL');
         unwatch(pid);
       }
       child.stdout.destroy();
       child.stderr.destroy();
       resolve({
-        exitCode: timedOut ? null : exitCode,
+        exitCode: timedOut || aborted ? null : exitCode,
         stdout: Buffer.concat(out).toString('utf8'),
         stderr: Buffer.concat(err).toString('utf8') + extraErr,
         timedOut,
       });
     };
+    const abort=()=>{if(settled)return;aborted=true;if(pid!==undefined)killGroup(pid,'SIGTERM');else child.kill('SIGTERM');timers.push(setTimeout(()=>{if(pid!==undefined)killGroup(pid,'SIGKILL');else child.kill('SIGKILL');finish(null);},KILL_GRACE_MS));};
     child.on('error', (error) => finish(null, `${error.message}\n`));
     child.on('exit', (code) => {
       timers.push(setTimeout(() => finish(code), DRAIN_GRACE_MS));
     });
     child.on('close', (code) => finish(code));
 
+    options.signal?.addEventListener('abort',abort,{once:true});
+    if(options.signal?.aborted)abort();
     child.stdin.on('error', () => {
       /* the command may exit without reading stdin: EPIPE is not our failure */
     });

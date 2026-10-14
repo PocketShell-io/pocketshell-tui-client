@@ -44,6 +44,19 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: client
         run: npm test
+      - uses: actions/setup-go@v5
+        if: runner.os == 'Linux'
+        with:
+          go-version-file: client/native/psc-relay/go.mod
+          cache-dependency-path: client/native/psc-relay/go.sum
+      - name: Native listener peer, framing and lifecycle tests
+        if: runner.os == 'Linux'
+        working-directory: client
+        run: |
+          go test -C native/psc-relay -race ./...
+          npm run bundle:relay
+          node scripts/test-relay.mjs
+          GOOS=darwin GOARCH=arm64 go build -C native/psc-relay -o /tmp/psc-relay-darwin .
       - name: Upstream integrity and private overlay packaging controls
         working-directory: client
         run: npm run test:packaging

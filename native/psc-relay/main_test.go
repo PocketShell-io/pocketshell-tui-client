@@ -101,3 +101,12 @@ func TestEligibility(t *testing.T) {
 		}
 	}
 }
+
+func TestForeignUID(t *testing.T) {
+	if sameUser(uint32(os.Geteuid()+1), nil) {
+		t.Fatal("foreign UID accepted")
+	}
+	if !sameUser(uint32(os.Geteuid()), nil) {
+		t.Fatal("owner refused")
+	}
+}

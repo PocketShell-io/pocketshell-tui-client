@@ -10,6 +10,8 @@
 export interface ExecOptions {
   /** Hard bound on the whole command; expiry kills it and sets `timedOut`. */
   timeoutMs: number;
+  /** Request-scoped cancellation for resident callers. */
+  signal?: AbortSignal;
   /** Bytes written to the command's stdin, then EOF. */
   stdin?: Uint8Array | string;
 }

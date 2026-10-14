@@ -12,7 +12,7 @@ import { registerGateway } from './commands/gateway.js';
 import { registerHosts } from './commands/hosts.js';
 import { registerCatalog, registerExec, registerSessions, registerWorkspaces } from './commands/sessions.js';
 import { fail, setJsonMode, usageError } from './output.js';
-import { runTui } from './tui/index.js';
+const runTui = async (options: { host?: string }) => (await import('./tui/index.js')).runTui(options);
 import { trace } from './trace.js';
 import { VERSION } from './version.js';
 
@@ -115,19 +115,22 @@ async function main(): Promise<void> {
   await program.parseAsync(process.argv);
 }
 
-main().catch((error: unknown) => {
-  if (error instanceof CommanderError) {
-    // help/version (exit 0) already printed; everything else is a usage error.
-    if (error.exitCode === 0) {
-      process.exitCode = 0;
+main()
+  .catch((error: unknown) => {
+    if (error instanceof CommanderError) {
+      // help/version (exit 0) already printed; everything else is a usage error.
+      if (error.exitCode === 0) {
+        process.exitCode = 0;
+        return;
+      }
+      // `psc sessions` with no subcommand: commander printed the help to stderr.
+      const message =
+        error.code === 'commander.help'
+          ? 'a subcommand is required'
+          : error.message.replace(/^error:\s*/i, '');
+      process.exitCode = fail(usageError(`${message} (see --help)`));
       return;
     }
-    // `psc sessions` with no subcommand: commander printed the help to stderr.
-    const message =
-      error.code === 'commander.help' ? 'a subcommand is required' : error.message.replace(/^error:\s*/i, '');
-    process.exitCode = fail(usageError(`${message} (see --help)`));
-    return;
-  }
-  process.exitCode = fail(error);
-});
-
+    process.exitCode = fail(error);
+  })
+  .finally(() => trace('output_exit'));

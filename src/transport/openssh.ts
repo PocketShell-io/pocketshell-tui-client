@@ -215,6 +215,7 @@ export function runSshCaptured(
   argv: readonly string[],
   options: ExecOptions & { env?: NodeJS.ProcessEnv },
 ): Promise<ExecOutcome> {
+  if(options.signal?.aborted)return Promise.resolve({exitCode:null,stdout:'',stderr:'command cancelled\n',timedOut:false});
   return new Promise((resolve) => {
     const child = spawn(file, argv, { stdio: ['pipe', 'pipe', 'pipe'], env: options.env ?? process.env, windowsHide: true });
     const out: Buffer[] = [];
@@ -222,6 +223,7 @@ export function runSshCaptured(
     let outBytes = 0;
     let errBytes = 0;
     let timedOut = false;
+    let aborted = false;
     let settled = false;
     let exitCode: number | null | undefined;
     let stdoutEnded = false;
@@ -233,11 +235,12 @@ export function runSshCaptured(
     const finish = (extraErr = '') => {
       if (settled) return;
       settled = true;
+      options.signal?.removeEventListener('abort',abort);
       for (const t of [...timers, stdoutTimer, stderrTimer]) if (t) clearTimeout(t);
       child.stdout.destroy();
       child.stderr.destroy();
       resolve({
-        exitCode: timedOut ? null : (exitCode ?? null),
+        exitCode: timedOut || aborted ? null : (exitCode ?? null),
         stdout: Buffer.concat(out).toString('utf8'),
         stderr: Buffer.concat(err).toString('utf8') + extraErr,
         timedOut,
@@ -291,6 +294,9 @@ export function runSshCaptured(
       maybeFinish();
     });
 
+    const abort=()=>{if(settled)return;aborted=true;child.kill('SIGTERM');timers.push(setTimeout(()=>{child.kill('SIGKILL');finish();},KILL_GRACE_MS));};
+    options.signal?.addEventListener('abort',abort,{once:true});
+    if(options.signal?.aborted)abort();
     child.stdin.on('error', () => {
       /* the command may exit without reading stdin: EPIPE is not our failure */
     });

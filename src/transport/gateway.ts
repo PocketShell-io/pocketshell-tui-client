@@ -117,6 +117,9 @@ export function cliInvocation(): string[] {
   }
   const node = process.execPath;
   const candidates: string[] = [];
+  if (process.argv[1]?.endsWith('/daemon.mjs')) {
+    try { candidates.push(join(dirname(realpathSync(process.argv[1])), 'psc.mjs')); } catch { /* missing backend */ }
+  }
   try {
     const here = fileURLToPath(import.meta.url);
     candidates.push(here);
@@ -185,6 +188,8 @@ export interface GatewayArgvInput {
   command: string;
   /** Fresh per ssh invocation; omitted → the proxy reports on stderr only. */
   statusFile?: string | null;
+  /** Daemon-only expiry receipt; legacy invocations omit it. */
+  leaseFile?: string;
 }
 
 /** The hardened ssh argv (without argv[0]). Pure apart from the identity-file existence check. */
@@ -202,7 +207,7 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
   argv.push(
     '-o', `UserKnownHostsFile=${checkSshPath(input.pinFile, 'pin file')}`,
     '-o', `HostKeyAlias=${input.alias}`,
-    '-o', `ProxyCommand=${proxyCommand(deviceId, endpoint, input.invocation, input.statusFile)}`,
+    '-o', `ProxyCommand=${proxyCommand(deviceId, endpoint, input.invocation, input.statusFile)}${input.leaseFile ? " --lease-file " + shQuote(checkSshPath(input.leaseFile, "lease file")) : ""}`,
   );
   if (input.user !== undefined) {
     if (!USER_RE.test(input.user)) throw usage(`invalid login name ${JSON.stringify(input.user).slice(0, 80)}`);

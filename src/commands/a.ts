@@ -68,7 +68,8 @@ export async function readAllStdin(): Promise<string> {
   const context = requests.getStore();
   if (context) return context.stdin;
   const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  for await (const chunk of process.stdin)
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   return Buffer.concat(chunks).toString('utf8');
 }
 
@@ -84,7 +85,8 @@ export async function resolveSendText(
   readStdin: () => Promise<string> = readAllStdin,
   stdinIsTty = requests.getStore()?.tty ?? Boolean(process.stdin.isTTY),
 ): Promise<string> {
-  if (requests.getStore() && text !== undefined && Buffer.byteLength(text)>1<<20) throw usageError('send payload exceeds 1 MiB');
+  if (requests.getStore() && text !== undefined && Buffer.byteLength(text) > 1 << 20)
+    throw usageError('send payload exceeds 1 MiB');
   if (text !== undefined && text !== '-') return text;
   if (text === '-' || !stdinIsTty) {
     return (await readStdin()).replace(/\r?\n$/, '');
@@ -185,11 +187,13 @@ async function withResolvedHost(
   body: (client: HostClient, host: HostEntry) => Promise<void>,
 ): Promise<void> {
   const host = resolveAHost(selector);
-  const connection = await openConnection(host);
+  const client = requests.getStore()
+    ? await (await import('../daemon/services.js')).daemonClient(host)
+    : new HostClient(await openConnection(host), host.binary);
   try {
-    await body(new HostClient(connection, host.binary), host);
+    await body(client, host);
   } finally {
-    await connection.close();
+    await client.connection.close();
   }
 }
 
@@ -211,7 +215,12 @@ function compileRegex(source: string): RegExp {
 export async function waitForAgentReady(
   client: Pick<HostClient, 'listSessions' | 'capture'>,
   created: CreatedSession,
-  options: { engine?: string; timeoutS?: number; pollMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
+  options: {
+    engine?: string;
+    timeoutS?: number;
+    pollMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+  } = {},
 ): Promise<SessionRow> {
   const timeoutS = options.timeoutS ?? 30;
   const pollMs = options.pollMs ?? 500;
@@ -341,7 +350,13 @@ export interface WaitIdleResult {
 export async function waitForSessionIdle(
   client: Pick<HostClient, 'resolveSession' | 'capture'>,
   selector: string,
-  options: { idleS?: number; settleS?: number; timeoutS?: number; pollMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
+  options: {
+    idleS?: number;
+    settleS?: number;
+    timeoutS?: number;
+    pollMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+  } = {},
 ): Promise<WaitIdleResult> {
   const idleS = options.idleS ?? 5;
   const settleS = options.settleS ?? 3;
@@ -429,16 +444,52 @@ async function fetchPresenceMap(hosts: readonly HostEntry[]): Promise<Map<string
   return map;
 }
 
+let presenceCache:
+  | { generation: string; fetchedAt: number; map: Map<string, DevicePresence | null> }
+  | undefined;
+let presenceRefresh: Promise<Map<string, DevicePresence | null>> | undefined;
+async function daemonPresence(hosts: readonly HostEntry[]): Promise<Map<string, DevicePresence | null>> {
+  let generation: string;
+  try {
+    generation = (await import('../daemon/services.js')).presenceGeneration(hosts);
+  } catch {
+    presenceCache = undefined;
+    return new Map();
+  }
+  if (presenceCache?.generation !== generation) {
+    presenceCache = undefined;
+    presenceRefresh = undefined;
+  }
+  if (!presenceRefresh && (!presenceCache || Date.now() - presenceCache.fetchedAt > 30_000)) {
+    const refresh = fetchPresenceMap(hosts)
+      .then((map) => {
+        presenceCache = { generation, fetchedAt: Date.now(), map };
+        return map;
+      })
+      .finally(() => {
+        if (presenceRefresh === refresh) presenceRefresh = undefined;
+      });
+    presenceRefresh = refresh;
+  }
+  const map = presenceCache?.map ?? (await presenceRefresh) ?? new Map();
+  const context = requests.getStore();
+  if (context) context.presenceAgeMs = presenceCache ? Date.now() - presenceCache.fetchedAt : null;
+  return map;
+}
+
 async function runAHosts(opts: { check?: boolean; json?: boolean }): Promise<void> {
   if (opts.json) setJsonMode(true);
   const def = defaultHostName() ?? 'local';
   const hosts = allCandidateHosts();
-  const presenceByDevice = await fetchPresenceMap(hosts);
+  const presenceByDevice = requests.getStore() ? await daemonPresence(hosts) : await fetchPresenceMap(hosts);
 
   if (!opts.check) {
     const rows = hosts.map((host) => {
       const isDefault = host.name === def;
-      const presence = host.mode === 'gateway' && host.gateway ? (presenceByDevice.get(host.gateway.deviceId) ?? null) : null;
+      const presence =
+        host.mode === 'gateway' && host.gateway
+          ? (presenceByDevice.get(host.gateway.deviceId) ?? null)
+          : null;
       const online = host.mode === 'local' ? true : presence ? presence.online : null;
       const status = online === true ? 'online' : online === false ? 'offline' : 'unknown';
       return {
@@ -446,7 +497,12 @@ async function runAHosts(opts: { check?: boolean; json?: boolean }): Promise<voi
         default: isDefault,
         online,
         status,
-        ...(host.mode === 'gateway' ? { presence } : {}),
+        ...(host.mode === 'gateway'
+          ? {
+              presence,
+              ...(requests.getStore() ? { presenceAgeMs: requests.getStore()!.presenceAgeMs } : {}),
+            }
+          : {}),
       };
     });
     emit({ ok: true, hosts: rows }, () =>
@@ -463,55 +519,70 @@ async function runAHosts(opts: { check?: boolean; json?: boolean }): Promise<voi
     return;
   }
 
-  const checked = await Promise.all(
-    hosts.map(async (host) => {
-      const isDefault = host.name === def;
-      const presence = host.mode === 'gateway' && host.gateway ? (presenceByDevice.get(host.gateway.deviceId) ?? null) : null;
-      const started = Date.now();
-      let connection;
-      try {
-        connection = await openConnection(host);
-        const versions = await new HostClient(connection, host.binary).probe();
-        const ms = Date.now() - started;
-        const missing = versions.pocketshell === null;
-        return {
-          ...host,
-          default: isDefault,
-          online: !missing,
-          status: (missing ? 'error' : 'online') as 'online' | 'offline' | 'error',
-          ms,
-          pocketshell: versions.pocketshell,
-          aplexer: versions.aplexer,
-          ...(host.mode === 'gateway' ? { presence } : {}),
-          ...(missing
-            ? {
-                error: {
-                  code: 'HOST_CLI_MISSING',
-                  message: `no working \`${host.binary ?? 'pocketshell'}\` CLI on ${host.name}`,
-                },
-              }
-            : {}),
-        };
-      } catch (error) {
-        const ms = Date.now() - started;
-        const c = classify(error);
-        const status: 'offline' | 'error' = c.code === 'HOST_OFFLINE' ? 'offline' : 'error';
-        return {
-          ...host,
-          default: isDefault,
-          online: false,
-          status,
-          ms,
-          pocketshell: null,
-          aplexer: null,
-          ...(host.mode === 'gateway' ? { presence } : {}),
-          error: { code: c.code, message: c.message, ...(c.details ?? {}) },
-        };
-      } finally {
-        await connection?.close();
-      }
-    }),
-  );
+  const checkOne = async (host: HostEntry) => {
+    const isDefault = host.name === def;
+    const presence =
+      host.mode === 'gateway' && host.gateway ? (presenceByDevice.get(host.gateway.deviceId) ?? null) : null;
+    const started = Date.now();
+    let connection;
+    try {
+      const client = requests.getStore()
+        ? await (await import('../daemon/services.js')).daemonClient(host)
+        : new HostClient(await openConnection(host), host.binary);
+      connection = client.connection;
+      const versions = await client.probe();
+      const ms = Date.now() - started;
+      const missing = versions.pocketshell === null;
+      return {
+        ...host,
+        default: isDefault,
+        online: !missing,
+        status: (missing ? 'error' : 'online') as 'online' | 'offline' | 'error',
+        ms,
+        pocketshell: versions.pocketshell,
+        aplexer: versions.aplexer,
+        ...(host.mode === 'gateway'
+          ? {
+              presence,
+              ...(requests.getStore() ? { presenceAgeMs: requests.getStore()!.presenceAgeMs } : {}),
+            }
+          : {}),
+        ...(missing
+          ? {
+              error: {
+                code: 'HOST_CLI_MISSING',
+                message: `no working \`${host.binary ?? 'pocketshell'}\` CLI on ${host.name}`,
+              },
+            }
+          : {}),
+      };
+    } catch (error) {
+      const ms = Date.now() - started;
+      const c = classify(error);
+      const status: 'offline' | 'error' = c.code === 'HOST_OFFLINE' ? 'offline' : 'error';
+      return {
+        ...host,
+        default: isDefault,
+        online: false,
+        status,
+        ms,
+        pocketshell: null,
+        aplexer: null,
+        ...(host.mode === 'gateway'
+          ? {
+              presence,
+              ...(requests.getStore() ? { presenceAgeMs: requests.getStore()!.presenceAgeMs } : {}),
+            }
+          : {}),
+        error: { code: c.code, message: c.message, ...(c.details ?? {}) },
+      };
+    } finally {
+      await connection?.close();
+    }
+  };
+  const checked = requests.getStore()
+    ? await (await import('../daemon/concurrency.js')).mapConcurrent(hosts, 8, checkOne)
+    : await Promise.all(hosts.map(checkOne));
 
   emit({ ok: true, hosts: checked }, () =>
     table(
@@ -522,9 +593,7 @@ async function runAHosts(opts: { check?: boolean; json?: boolean }): Promise<voi
         r.status,
         safeLine(r.pocketshell ?? '-'),
         safeLine(r.aplexer ?? '-'),
-        r.error
-          ? safeLine((r.error as { detail?: string }).detail ?? r.error.message)
-          : `${r.ms}ms`,
+        r.error ? safeLine((r.error as { detail?: string }).detail ?? r.error.message) : `${r.ms}ms`,
       ]),
     ),
   );
@@ -586,7 +655,12 @@ export function buildHostVerbProgram(hostSelector: string): Command {
       .option('-e, --engine <engine>', 'agent engine to launch (claude, codex, opencode, grok, ...)')
       .option('--profile <profile>', 'aplexer profile')
       .option('-p, --prompt <text>', 'initial prompt to send once ready (`-` reads stdin)')
-      .option('--ready-timeout <seconds>', 'seconds to wait for the agent to be ready for --prompt', parseSeconds, 30),
+      .option(
+        '--ready-timeout <seconds>',
+        'seconds to wait for the agent to be ready for --prompt',
+        parseSeconds,
+        30,
+      ),
   ).action(
     action(
       async (
@@ -649,8 +723,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
       const enter = opts.enter ?? true;
       const encoded = encodeSendPayload(payload, { enter });
       await withResolvedHost(hostSelector, async (client, host) => {
-        const row = await client.resolveSession(selector);
-        await client.send(row, payload, { enter });
+        const row = await client.sendSelected(selector, payload, { enter });
         emit(
           {
             ok: true,
@@ -679,16 +752,23 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     action(
       async (
         selector: string,
-        opts: { lines?: number; waitFor?: string; timeout: number; raw?: boolean; bytes?: number; json?: boolean },
+        opts: {
+          lines?: number;
+          waitFor?: string;
+          timeout: number;
+          raw?: boolean;
+          bytes?: number;
+          json?: boolean;
+        },
       ) => {
         if (opts.json) setJsonMode(true);
         if (opts.bytes !== undefined && !opts.raw) throw usageError('--bytes only applies with --raw');
         const pattern = opts.waitFor === undefined ? null : compileRegex(opts.waitFor);
         await withResolvedHost(hostSelector, async (client, host) => {
-          const row = await client.resolveSession(selector);
           const mode = opts.raw ? 'raw' : 'screen';
           const captureOptions = { mode, bytes: opts.bytes } as const;
-          if (pattern) {
+          const row = pattern ? await client.resolveSession(selector) : null;
+          if (pattern && row) {
             const deadline = Date.now() + opts.timeout * 1000;
             for (;;) {
               const rawText = await client.capture(row, captureOptions);
@@ -722,13 +802,14 @@ export function buildHostVerbProgram(hostSelector: string): Command {
               await sleep(Math.min(500, Math.max(0, deadline - Date.now())));
             }
           }
-          const rawText = await client.capture(row, captureOptions);
+          const captured = await client.captureSelected(selector, captureOptions);
+          const rawText = captured.text;
           const text = trimCapture(rawText, { raw: opts.raw, lines: opts.lines });
           emit(
             {
               ok: true,
               host: host.name,
-              session: ref(row),
+              session: ref(captured.row),
               mode,
               text,
               ...(opts.lines !== undefined ? { lines: opts.lines } : {}),
@@ -744,32 +825,44 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     hostCmd
       .command('wait <session>')
       .description("block until the session's agent is idle/waiting (exit 124 on timeout)")
-      .option('--idle <seconds>', 'fallback screen-unchanged duration when agent state is not reported', parseSeconds, 5)
-      .option('--settle <seconds>', 'ignore an idle agent state until the agent was seen working or this long has passed', parseSeconds, 3)
+      .option(
+        '--idle <seconds>',
+        'fallback screen-unchanged duration when agent state is not reported',
+        parseSeconds,
+        5,
+      )
+      .option(
+        '--settle <seconds>',
+        'ignore an idle agent state until the agent was seen working or this long has passed',
+        parseSeconds,
+        3,
+      )
       .option('--timeout <seconds>', 'give up after this many seconds (exit 124)', parseSeconds, 300),
   ).action(
-    action(async (selector: string, opts: { idle: number; settle: number; timeout: number; json?: boolean }) => {
-      if (opts.json) setJsonMode(true);
-      await withResolvedHost(hostSelector, async (client, host) => {
-        const result = await waitForSessionIdle(client, selector, {
-          idleS: opts.idle,
-          settleS: opts.settle,
-          timeoutS: opts.timeout,
+    action(
+      async (selector: string, opts: { idle: number; settle: number; timeout: number; json?: boolean }) => {
+        if (opts.json) setJsonMode(true);
+        await withResolvedHost(hostSelector, async (client, host) => {
+          const result = await waitForSessionIdle(client, selector, {
+            idleS: opts.idle,
+            settleS: opts.settle,
+            timeoutS: opts.timeout,
+          });
+          emit(
+            {
+              ok: true,
+              host: host.name,
+              session: ref(result.row),
+              state: result.state,
+              agentState: result.row.agentState,
+              reason: result.reason,
+              elapsedMs: result.elapsedMs,
+            },
+            () => `${safeLine(result.row.name)} ${safeLine(result.state)}`,
+          );
         });
-        emit(
-          {
-            ok: true,
-            host: host.name,
-            session: ref(result.row),
-            state: result.state,
-            agentState: result.row.agentState,
-            reason: result.reason,
-            elapsedMs: result.elapsedMs,
-          },
-          () => `${safeLine(result.row.name)} ${safeLine(result.state)}`,
-        );
-      });
-    }),
+      },
+    ),
   );
 
   jsonOption(
@@ -878,7 +971,21 @@ export function buildAHostsCommand(): Command {
   return cmd;
 }
 
-export const HOST_VERB_NAMES = new Set(['connect', 'shell', 'ls', 'list', 'start', 'create', 'send', 'capture', 'wait', 'stop', 'kill', 'status', 'show']);
+export const HOST_VERB_NAMES = new Set([
+  'connect',
+  'shell',
+  'ls',
+  'list',
+  'start',
+  'create',
+  'send',
+  'capture',
+  'wait',
+  'stop',
+  'kill',
+  'status',
+  'show',
+]);
 
 /**
  * Normalize remote-aplexer arguments before Commander parsing:
@@ -919,7 +1026,9 @@ export async function dispatchA(rawArgs: readonly string[]): Promise<void> {
       return;
     }
     if (HOST_VERB_NAMES.has(topic)) {
-      const sub = buildHostVerbProgram('<host>').commands.find((c) => c.name() === topic || c.aliases().includes(topic));
+      const sub = buildHostVerbProgram('<host>').commands.find(
+        (c) => c.name() === topic || c.aliases().includes(topic),
+      );
       if (sub) {
         sub.outputHelp();
         return;
@@ -937,7 +1046,9 @@ export async function dispatchA(rawArgs: readonly string[]): Promise<void> {
 
   // `psc a start --help` (verb help without a host argument)
   if (HOST_VERB_NAMES.has(first) && (filtered.includes('--help') || filtered.includes('-h'))) {
-    const sub = buildHostVerbProgram('<host>').commands.find((c) => c.name() === first || c.aliases().includes(first));
+    const sub = buildHostVerbProgram('<host>').commands.find(
+      (c) => c.name() === first || c.aliases().includes(first),
+    );
     if (sub) {
       sub.outputHelp();
       return;
@@ -953,7 +1064,9 @@ export async function dispatchA(rawArgs: readonly string[]): Promise<void> {
   const rest = [...args.slice(0, hostIndex), ...args.slice(hostIndex + 1)];
   const restWithoutJson = rest.filter((a) => a !== '--json');
   if (restWithoutJson.length === 0) {
-    throw usageError(`missing command for host ${JSON.stringify(first)} (expected connect, ls, start, send, capture, wait, stop, or status)`);
+    throw usageError(
+      `missing command for host ${JSON.stringify(first)} (expected connect, ls, start, send, capture, wait, stop, or status)`,
+    );
   }
   if (restWithoutJson.length === 1 && (restWithoutJson[0] === '--help' || restWithoutJson[0] === '-h')) {
     buildHostVerbProgram(first).outputHelp();
@@ -974,7 +1087,10 @@ export async function dispatchA(rawArgs: readonly string[]): Promise<void> {
  * - the hidden legacy alias `psc a ...`.
  * Leading `--json` is allowed (dispatchA honours it anywhere).
  */
-export function remoteAplexerArgs(args: readonly string[], topLevelCommands: ReadonlySet<string>): string[] | null {
+export function remoteAplexerArgs(
+  args: readonly string[],
+  topLevelCommands: ReadonlySet<string>,
+): string[] | null {
   const lead = args.findIndex((a) => a !== '--json');
   if (lead === -1) return null;
   const json = args.slice(0, lead);
@@ -982,10 +1098,12 @@ export function remoteAplexerArgs(args: readonly string[], topLevelCommands: Rea
   const rest = args.slice(lead + 1);
   if (first === 'a') return [...json, ...rest];
   if (first === 'hosts') {
-    if (second === undefined || second === '--check' || second === '--json') return [...json, 'hosts', ...rest];
+    if (second === undefined || second === '--check' || second === '--json')
+      return [...json, 'hosts', ...rest];
     return null;
   }
-  if (first === 'help') return second !== undefined && HOST_VERB_NAMES.has(second) ? ['--help', ...rest] : null;
+  if (first === 'help')
+    return second !== undefined && HOST_VERB_NAMES.has(second) ? ['--help', ...rest] : null;
   if (first.startsWith('-') || topLevelCommands.has(first)) return null;
   if (second !== undefined && (HOST_VERB_NAMES.has(second) || second === '--help' || second === '-h')) {
     return [...json, first, ...rest];
@@ -1000,7 +1118,9 @@ export function registerA(program: Command): void {
     .allowUnknownOption(true)
     .allowExcessArguments(true)
     .helpOption(false)
-    .description('remote aplexer: hosts, ls, start, send, capture, wait, stop, status (legacy alias of `psc <host> <verb>`)')
+    .description(
+      'remote aplexer: hosts, ls, start, send, capture, wait, stop, status (legacy alias of `psc <host> <verb>`)',
+    )
     .action(async (args: string[]) => {
       await dispatchA(args);
     });

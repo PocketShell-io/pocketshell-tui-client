@@ -8,7 +8,7 @@
  */
 import { createInterface } from 'node:readline';
 import type { Command } from 'commander';
-import { mintGatewayToken } from '../account/index.js';
+import { mintGatewayToken, mintGatewayTokenWithExpiry } from '../account/index.js';
 import { fetchDevices, type DeviceInfo } from '../gateway/devices.js';
 import { DEFAULT_SERVER, EndpointError, resolveEndpoint, validateDeviceId, type GatewayEndpoint } from '../gateway/endpoint.js';
 import {
@@ -23,6 +23,7 @@ import {
   type HostKey,
 } from '../gateway/pins.js';
 import { markerLine, recordStatus, runProxy } from '../gateway/proxy.js';
+import { writeStatusFile } from '../transport/openssh.js';
 import { emit, note, setJsonMode } from '../output.js';
 import { action, jsonOption } from './common.js';
 
@@ -171,11 +172,12 @@ export function registerGateway(program: Command): void {
         'OpenSSH ProxyCommand used by gateway hosts: bridges stdin/stdout to the device through the gateway ' +
           '(stdout carries SSH bytes only; not for interactive use)',
       )
+      .option('--lease-file <path>', 'private daemon authorization expiry receipt (contains no token)')
       .option(
         '--status-file <path>',
         'also record a pre-tunnel failure in this file (set by the client; must be inside its private runtime dir)',
       ),
-  ).action(async (deviceId: string, opts: { server?: string; insecureDev?: boolean; statusFile?: string }) => {
+  ).action(async (deviceId: string, opts: { server?: string; insecureDev?: boolean; statusFile?: string; leaseFile?: string }) => {
     let endpoint: GatewayEndpoint;
     try {
       validateDeviceId(deviceId);
@@ -189,7 +191,11 @@ export function registerGateway(program: Command): void {
     const code = await runProxy({
       deviceId,
       endpoint,
-      tokenProvider: mintGatewayToken,
+      tokenProvider: opts.leaseFile ? async () => {
+        const minted = await mintGatewayTokenWithExpiry();
+        writeStatusFile(opts.leaseFile!, `PSC_LEASE: ${minted.expiresAt}`);
+        return minted.token;
+      } : mintGatewayToken,
       stdin: process.stdin,
       stdout: process.stdout,
       ...(opts.statusFile !== undefined ? { statusFile: opts.statusFile } : {}),
