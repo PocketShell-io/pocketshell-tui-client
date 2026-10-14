@@ -43,7 +43,7 @@ foreach ($p in @($env:USERPROFILE, $env:LOCALAPPDATA, $base, $dest, $bin, $SshPa
 if (!(Test-Path -LiteralPath $SshPath -PathType Leaf) -or (Split-Path -Leaf $SshPath) -ine 'ssh.exe') {
     throw 'Win32 OpenSSH ssh.exe is required; install the Windows OpenSSH Client feature first.'
 }
-if (Test-Path -LiteralPath $dest) { throw "PSC version already exists; retain it for rollback or remove only this version before retrying: $dest" }
+$fresh = !(Test-Path -LiteralPath $dest)
 # Verify the entire offline payload before publishing it.
 $expected = @($manifest.files.PSObject.Properties.Name) | Sort-Object
 $actual = @(Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -File | ForEach-Object {
@@ -57,12 +57,29 @@ foreach ($row in $manifest.files.PSObject.Properties) {
     }
 }
 New-Item -ItemType Directory -Path $base -Force | Out-Null
-New-Item -ItemType Directory -Path $dest | Out-Null
-Protect-Item $dest
+if ($fresh) {
+    New-Item -ItemType Directory -Path $dest | Out-Null
+    Protect-Item $dest
+} else {
+    # Reinstalling the identical package is read-only for the version tree.
+    $installedNames = @($expected | Where-Object { $_ -ne 'install.ps1' }) + 'psc/dist/windows-bindings.json'
+    $installedActual = @(Get-ChildItem -LiteralPath $dest -Recurse -File | ForEach-Object {
+        $_.FullName.Substring($dest.Length + 1).Replace('\', '/')
+    } | Where-Object { $_ -ne 'package-manifest.json' })
+    if (Compare-Object ($installedNames | Sort-Object) ($installedActual | Sort-Object)) { throw 'Existing PSC version inventory differs; use a fresh version' }
+    foreach ($row in $manifest.files.PSObject.Properties) {
+        if ($row.Name -eq 'install.ps1') { continue }
+        if ((Get-FileHash -LiteralPath (Join-Path $dest $row.Name)).Hash.ToLowerInvariant() -ne $row.Value) {
+            throw "Existing PSC version differs: $($row.Name); use a fresh version"
+        }
+    }
+}
 try {
+    if ($fresh) {
     Copy-Item -LiteralPath "$PSScriptRoot\node.exe", "$PSScriptRoot\psc-security.exe", "$PSScriptRoot\psc.cmd", "$PSScriptRoot\NODE-LICENSE.txt", "$PSScriptRoot\package-manifest.json" -Destination $dest
     Copy-Item -LiteralPath "$PSScriptRoot\psc" -Destination $dest -Recurse
     Get-ChildItem -LiteralPath $dest -Recurse -Force | ForEach-Object { Protect-Item $_.FullName }
+    }
     $helper = "$dest\psc-security.exe"
     $node = "$dest\node.exe"
     $entry = "$dest\psc\dist\cli.js"
@@ -75,8 +92,16 @@ try {
         systemRoot = $env:SystemRoot; systemDrive = $env:SystemDrive; programData = $env:ProgramData
     }
     $bindingPath = "$dest\psc\dist\windows-bindings.json"
-    [IO.File]::WriteAllText($bindingPath, ($bindings | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
-    Protect-Item $bindingPath
+    if ($fresh) {
+        [IO.File]::WriteAllText($bindingPath, ($bindings | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+        Protect-Item $bindingPath
+    } else {
+        $existing = Get-Content -LiteralPath $bindingPath -Raw | ConvertFrom-Json
+        if (@($existing.PSObject.Properties).Count -ne 13) { throw 'Existing PSC binding schema differs' }
+        foreach ($key in $bindings.Keys) {
+            if ($existing.$key -cne $bindings[$key]) { throw "Existing PSC binding differs: $key; use a fresh version" }
+        }
+    }
     # Native preflight creates private state without changing existing state ACLs.
     foreach ($root in @("$env:LOCALAPPDATA\PocketShell\pocketshell-client", "$env:LOCALAPPDATA\PocketShell\pocketshell-client-account", "$env:LOCALAPPDATA\PocketShell\pocketshell-client-runtime")) {
         $reply = @{version=1; op='preflight'; root=$root} | ConvertTo-Json -Compress | & $helper
@@ -102,6 +127,6 @@ try {
     $env:Path = "$bin;$env:Path"
     Write-Host "PSC installed. Open a new terminal, then run psc login and psc hosts sync. Shim: $bin\psc.cmd"
 } catch {
-    Remove-Item -LiteralPath $dest -Recurse -Force
+    if ($fresh) { Remove-Item -LiteralPath $dest -Recurse -Force }
     throw
 }

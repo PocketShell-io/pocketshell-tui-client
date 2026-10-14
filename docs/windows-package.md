@@ -50,7 +50,8 @@ ACLs before publishing `%LOCALAPPDATA%\PocketShell\psc\bin\psc.cmd` and
 adding that directory to HKCU Environment PATH. State directories retain the
 existing Windows PSC identity under `%LOCALAPPDATA%\PocketShell`.
 
-Versions are immutable: installing the same version twice refuses. Upgrades
+Versions are immutable: reinstalling identical bytes verifies the existing
+version; changed bytes or executable bindings refuse. Upgrades
 retain previous versions and switch only the shim; account, host and pin state
 are preserved. To roll back, point `psc\bin\psc.cmd` at the retained version's
 `psc.cmd`. To uninstall, remove the PSC bin entry from the user PATH and delete

@@ -72,6 +72,8 @@ jobs:
           Expand-Archive $zip.FullName "$env:RUNNER_TEMP\psc-package"
           & "$env:RUNNER_TEMP\psc-package\install.ps1"
           if ($LASTEXITCODE -ne 0) { throw 'Install failed' }
+          & "$env:RUNNER_TEMP\psc-package\install.ps1"
+          if ($LASTEXITCODE -ne 0) { throw 'Identical reinstall failed' }
           $prefix = "$env:LOCALAPPDATA\PocketShell\psc\0.3.1"
           & "$prefix\psc.cmd" --version
           if ($LASTEXITCODE -ne 0) { throw 'Version failed' }
