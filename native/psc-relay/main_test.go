@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -8,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFrames(t *testing.T) {
@@ -76,7 +79,7 @@ func TestPeerAndSocket(t *testing.T) {
 		}
 		done <- e
 	}()
-	c, e := connect(p)
+	c, e := daemonDial(p, 10*time.Millisecond)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -85,7 +88,7 @@ func TestPeerAndSocket(t *testing.T) {
 		t.Fatal(e)
 	}
 	os.Chmod(p, 0666)
-	if c, e = connect(p); e == nil {
+	if c, e = daemonDial(p, 10*time.Millisecond); e == nil {
 		c.Close()
 		t.Fatal("loose socket accepted")
 	}

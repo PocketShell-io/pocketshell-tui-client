@@ -94,6 +94,7 @@ export class HostChannel {
   private pending = new Map<string, Pending>();
   private closed = false;
   private lease = 0;
+  private readonly accountExpires: number;
   private retirement?: NodeJS.Timeout;
   private keepalive?: NodeJS.Timeout;
   private failures = 0;
@@ -107,6 +108,7 @@ export class HostChannel {
     private readonly onRetire: (reason: unknown, established: boolean) => void,
     private readonly validatePolicy?: () => void,
   ) {
+    this.accountExpires = accountExpires;
     const config = host.gateway!;
     const dir = controlDir();
     this.statusFile = newStatusFilePath(dir);
@@ -150,15 +152,8 @@ export class HostChannel {
       .then((capabilities) => {
         trace('ssh_authenticated');
         trace('helper_ready');
-        this.lease = Math.min(expiryReceipt(this.leaseFile), accountExpires) - 30_000;
-        if (this.lease <= Date.now())
-          throw new RpcFailure('AUTH_LEASE_EXPIRED', 'gateway authorization lease expired', true);
+        this.armLease(Math.min(expiryReceipt(this.leaseFile), this.accountExpires));
         this.negotiating = false;
-        this.retirement = setTimeout(
-          () => this.close(new RpcFailure('AUTH_LEASE_EXPIRED', 'gateway authorization lease expired')),
-          this.lease - Date.now(),
-        );
-        this.retirement.unref();
         this.keepalive = setInterval(() => {
           void this.call('ping', {}, false, 10_000).then(
             () => {
@@ -176,6 +171,37 @@ export class HostChannel {
         this.close(error);
         throw error;
       });
+  }
+
+  /**
+   * Arm the retirement timer for `expiry` (30 s of grace included): at fire,
+   * re-read the lease receipt — the proxy rewrites it whenever in-band
+   * reauth renewed the token — and re-arm on a later expiry, or close as
+   * expired. The account-session expiry and policy-generation checks still
+   * close the channel regardless of the lease.
+   */
+  private armLease(expiry: number): void {
+    this.lease = expiry - 30_000;
+    if (this.lease <= Date.now()) throw new RpcFailure('AUTH_LEASE_EXPIRED', 'gateway authorization lease expired', true);
+    this.retirement = setTimeout(() => this.leaseExpired(), this.lease - Date.now());
+    this.retirement.unref();
+  }
+
+  private leaseExpired(): void {
+    if (this.closed) return;
+    let renewed = 0;
+    try {
+      renewed = expiryReceipt(this.leaseFile);
+    } catch {
+      renewed = 0; // missing/unsafe receipt: no renewal happened
+    }
+    const next = renewed === 0 ? 0 : Math.min(renewed, this.accountExpires);
+    if (next - 30_000 > Date.now()) {
+      trace('lease_renewed');
+      this.armLease(next);
+      return;
+    }
+    this.close(new RpcFailure('AUTH_LEASE_EXPIRED', 'gateway authorization lease expired'));
   }
   private async read(): Promise<void> {
     for await (const value of frames(this.child.stdout, MAX_RPC)) {

@@ -65,6 +65,12 @@ def build(args):
         env = dict(os.environ, GOOS="windows", GOARCH="amd64", CGO_ENABLED="0")
         subprocess.run([args.go, "build", "-trimpath", "-o", str(payload / "psc-security.exe"), "."],
                        cwd=ROOT / "native/psc-security", env=env, check=True)
+        # The resident relay (named-pipe daemon boundary, classic fallback).
+        # Same offline cross-build; psc.cmd invokes it, it invokes node.
+        subprocess.run([args.go, "build", "-trimpath",
+                        "-ldflags", "-X main.version=" + version,
+                        "-o", str(payload / "psc.exe"), "."],
+                       cwd=ROOT / "native/psc-relay", env=env, check=True)
         for file in ("install.ps1", "psc.cmd"):
             shutil.copyfile(ROOT / "scripts/windows" / file, payload / file)
         inventory = {p.relative_to(payload).as_posix(): digest(p) for p in sorted(payload.rglob("*")) if p.is_file()}

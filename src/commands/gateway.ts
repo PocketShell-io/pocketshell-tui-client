@@ -23,7 +23,6 @@ import {
   type HostKey,
 } from '../gateway/pins.js';
 import { markerLine, recordStatus, runProxy } from '../gateway/proxy.js';
-import { writeStatusFile } from '../transport/openssh.js';
 import { emit, note, setJsonMode } from '../output.js';
 import { action, jsonOption } from './common.js';
 
@@ -191,11 +190,20 @@ export function registerGateway(program: Command): void {
     const code = await runProxy({
       deviceId,
       endpoint,
-      tokenProvider: opts.leaseFile ? async () => {
-        const minted = await mintGatewayTokenWithExpiry();
-        writeStatusFile(opts.leaseFile!, `PSC_LEASE: ${minted.expiresAt}`);
-        return minted.token;
-      } : mintGatewayToken,
+      tokenProvider: opts.leaseFile ? async () => (await mintGatewayTokenWithExpiry()).token : mintGatewayToken,
+      // --lease-file is the daemon path: opt in to in-band reauth so the
+      // tunnel outlives each 5-minute routing token when the gateway can.
+      ...(opts.leaseFile !== undefined
+        ? {
+            reauth: {
+              leaseFile: opts.leaseFile,
+              mint: async () => {
+                const minted = await mintGatewayTokenWithExpiry();
+                return { token: minted.token, expiresAt: minted.expiresAt };
+              },
+            },
+          }
+        : {}),
       stdin: process.stdin,
       stdout: process.stdout,
       ...(opts.statusFile !== undefined ? { statusFile: opts.statusFile } : {}),

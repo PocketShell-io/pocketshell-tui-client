@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"io"
 	"net"
 	"os"
@@ -20,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -90,7 +88,7 @@ func writeFrame(w io.Writer, v any) error {
 // Only explicit client settings cross the resident process boundary. In particular,
 // ambient provider credentials, loader/preload options and TLS-disable flags do not.
 func daemonEnvironment() []string {
-	keys := []string{"HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_DATA_HOME", "APLEXER_RUNTIME_DIR", "APLEXER_STATE_DIR", "APLEXER_CONFIG", "POCKETSHELL_BROKER_URL", "NODE_EXTRA_CA_CERTS", "PSC_RPC_BINARY", "PSC_JSON", "PSC_HOST", "PSC_TRACE", "PSC_DAEMON_IDLE_MS"}
+	keys := []string{"HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_DATA_HOME", "APLEXER_RUNTIME_DIR", "APLEXER_STATE_DIR", "APLEXER_CONFIG", "POCKETSHELL_BROKER_URL", "NODE_EXTRA_CA_CERTS", "PSC_RPC_BINARY", "PSC_JSON", "PSC_HOST", "PSC_TRACE", "PSC_DAEMON_IDLE_MS", "USERPROFILE", "LOCALAPPDATA"}
 	result := make([]string, 0, len(keys))
 	for _, key := range keys {
 		if value, ok := os.LookupEnv(key); ok {
@@ -110,81 +108,6 @@ func namespace() string {
 	return hex.EncodeToString(h[:8])
 }
 
-func checkComponents(path string) error {
-	path = filepath.Clean(path)
-	if !filepath.IsAbs(path) {
-		return errors.New("absolute runtime path required")
-	}
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	p := "/"
-	for _, s := range parts {
-		p = filepath.Join(p, s)
-		st, e := os.Lstat(p)
-		if e != nil {
-			return e
-		}
-		if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-			return errors.New("runtime symlink/non-directory")
-		}
-		sys := st.Sys().(*syscall.Stat_t)
-		if sys.Uid != 0 && int(sys.Uid) != os.Geteuid() {
-			return errors.New("foreign runtime parent")
-		}
-		if st.Mode().Perm()&0022 != 0 && !(sys.Uid == 0 && st.Mode()&os.ModeSticky != 0) {
-			return errors.New("writable runtime parent")
-		}
-	}
-	return nil
-}
-func runtimePath() (string, error) {
-	base := os.Getenv("XDG_RUNTIME_DIR")
-	if base == "" {
-		base = "/tmp"
-		if runtime.GOOS == "darwin" {
-			base = "/private/tmp"
-		}
-	}
-	if e := checkComponents(base); e != nil {
-		return "", e
-	}
-	p := filepath.Join(base, fmt.Sprintf("psc-daemon-%d", os.Geteuid()))
-	e := os.Mkdir(p, 0700)
-	if e != nil && !os.IsExist(e) {
-		return "", e
-	}
-	st, e := os.Lstat(p)
-	if e != nil {
-		return "", e
-	}
-	if !st.IsDir() || st.Mode().Perm() != 0700 || int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
-		return "", errors.New("unsafe runtime directory")
-	}
-	return filepath.Join(p, namespace()+".sock"), nil
-}
-func sameUser(uid uint32, err error) bool { return err == nil && int(uid) == os.Geteuid() }
-func connect(path string) (*net.UnixConn, error) {
-	st, e := os.Lstat(path)
-	if e != nil {
-		return nil, e
-	}
-	if st.Mode()&os.ModeSocket == 0 || st.Mode().Perm() != 0600 || int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
-		return nil, errors.New("unsafe socket")
-	}
-	raw, e := (&net.Dialer{Timeout: 10 * time.Millisecond}).Dial("unix", path)
-	var c *net.UnixConn
-	if e == nil {
-		c = raw.(*net.UnixConn)
-	}
-	if e != nil {
-		return nil, e
-	}
-	uid, e := peerUID(c)
-	if !sameUser(uid, e) {
-		c.Close()
-		return nil, errors.New("foreign daemon peer")
-	}
-	return c, nil
-}
 func eligible(a []string) bool {
 	if len(a) == 0 {
 		return false
@@ -235,8 +158,43 @@ func entry(name string) string {
 	p, _ = filepath.EvalSymlinks(p)
 	return filepath.Join(filepath.Dir(p), name)
 }
+
+// jsEntry resolves a sidecar JS entry for this binary's layout: the npm
+// dist-bundle ships psc.mjs/daemon.mjs beside the relay binary, the
+// Windows package ships psc/dist/cli.js and psc/dist/daemon/main.js.
+func jsEntry(bundle, pkg string) (string, error) {
+	for _, candidate := range []string{entry(bundle), entry(pkg)} {
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("no %s beside the relay", bundle)
+}
+
+// The Node interpreter for the legacy entry and the resident daemon: a
+// bundled node beside the relay binary (the Windows package layout) wins
+// over whatever PATH the caller had.
+const bundledNodeName = "node.exe"
+
+func nodeCommand() string {
+	if bundled := entry(bundledNodeName); bundled != "" {
+		if _, err := os.Stat(bundled); err == nil {
+			return bundled
+		}
+	}
+	return "node"
+}
+
 func legacy(a []string, input []byte, consumed bool) int {
-	cmd := exec.Command("node", append([]string{entry("psc.mjs")}, a...)...)
+	js, e := jsEntry("psc.mjs", filepath.Join("psc", "dist", "cli.js"))
+	if e != nil {
+		fmt.Fprintln(os.Stderr, "psc: legacy entry unavailable")
+		return 1
+	}
+	cmd := exec.Command(nodeCommand(), append([]string{js}, a...)...)
 	if consumed {
 		cmd.Stdin = strings.NewReader(string(input))
 	} else {
@@ -244,7 +202,7 @@ func legacy(a []string, input []byte, consumed bool) int {
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	e := cmd.Run()
+	e = cmd.Run()
 	if e == nil {
 		return 0
 	}
@@ -272,11 +230,6 @@ func relayFailure(a []string, code, message string) {
 		fmt.Fprintln(os.Stderr, "psc: "+message)
 	}
 }
-// The resident daemon is the default on this platform (unix sockets only;
-// Windows keeps the classic path until a named-pipe daemon lands): an
-// explicit PSC_DAEMON=0 opts out, and every daemon failure still falls back
-// transparently to the classic entry.
-func daemonEnabled() bool { return os.Getenv("PSC_DAEMON") != "0" }
 func relay(a []string) int {
 	if len(a) == 1 && (a[0] == "--version" || a[0] == "-V") {
 		fmt.Println(version)
@@ -285,12 +238,12 @@ func relay(a []string) int {
 	if !daemonEnabled() && !(len(a) > 0 && a[0] == "daemon") || !eligible(a) {
 		return legacy(a, nil, false)
 	}
-	path, e := runtimePath()
+	addr, e := daemonAddr()
 	if e != nil {
 		relayFailure(a, "DAEMON_UNSAFE", "unsafe daemon runtime")
 		return 1
 	}
-	c, e := connect(path)
+	c, e := daemonDial(addr, 10*time.Millisecond)
 	if e != nil {
 		if len(a) > 1 && a[0] == "daemon" && (a[1] == "stop" || a[1] == "status") {
 			if a[1] == "status" {
@@ -304,14 +257,14 @@ func relay(a []string) int {
 		cmd.Stdin = nil
 		cmd.Stdout = nil
 		cmd.Stderr = nil
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		cmd.SysProcAttr = serveSpawnAttr()
 		if e = cmd.Start(); e != nil {
 			return legacy(a, nil, false)
 		}
 		go cmd.Wait()
 		end := time.Now().Add(5 * time.Second)
 		for time.Now().Before(end) {
-			c, e = connect(path)
+			c, e = daemonDial(addr, 100*time.Millisecond)
 			if e == nil {
 				break
 			}
@@ -322,7 +275,7 @@ func relay(a []string) int {
 		}
 	}
 	defer c.Close()
-	connectedSocket, _ := os.Lstat(path)
+	connected := daemonAlive(addr)
 	var input []byte
 	consumed := false
 	tty := stdinIsTTY()
@@ -357,7 +310,7 @@ func relay(a []string) int {
 		return 4
 	}
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, unix.SIGTERM)
+	signal.Notify(sigs, os.Interrupt, termSignal())
 	defer signal.Stop(sigs)
 	done := make(chan struct{})
 	defer close(done)
@@ -399,8 +352,7 @@ func relay(a []string) int {
 			if len(a) > 1 && a[0] == "daemon" && a[1] == "stop" && r.Status == 0 {
 				deadline := time.Now().Add(5 * time.Second)
 				for time.Now().Before(deadline) {
-					current, err := os.Lstat(path)
-					if os.IsNotExist(err) || err == nil && connectedSocket != nil && !os.SameFile(current, connectedSocket) {
+					if daemonGone(addr, connected) {
 						return 0
 					}
 					time.Sleep(5 * time.Millisecond)
@@ -417,66 +369,19 @@ func relay(a []string) int {
 		}
 	}
 }
-func serve() error {
-	path, e := runtimePath()
+
+// daemonCore is the transport-independent resident core: it owns the Node
+// daemon child, the request pump, the idle exit and the per-connection
+// framing. `accept` returns only peer-verified connections (peer UID on
+// unix, the connection secret on Windows); `stopListener` releases the
+// transport listener. Idle exit counts CLIENT requests only: background
+// work inside the daemon (P1 pre-warm) never reaches this process.
+func daemonCore(accept func() (net.Conn, error), stopListener func()) error {
+	daemonJs, e := jsEntry("daemon.mjs", filepath.Join("psc", "dist", "daemon", "main.js"))
 	if e != nil {
 		return e
 	}
-	lock, e := os.OpenFile(strings.TrimSuffix(path, ".sock")+".lock", os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0600)
-	if e != nil {
-		return e
-	}
-	defer lock.Close()
-	st, e := lock.Stat()
-	if e != nil || !st.Mode().IsRegular() || st.Mode().Perm() != 0600 || int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
-		return errors.New("unsafe lock")
-	}
-	if unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
-		return nil
-	}
-	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
-	if c, e := connect(path); e == nil {
-		c.Close()
-		return nil
-	}
-	if st, e := os.Lstat(path); e == nil {
-		if live, err := (&net.Dialer{Timeout: 100 * time.Millisecond}).Dial("unix", path); err == nil {
-			live.Close()
-			return errors.New("refusing live socket")
-		} else if !errors.Is(err, unix.ECONNREFUSED) && !errors.Is(err, os.ErrNotExist) {
-			return errors.New("socket liveness unknown")
-		}
-		current, err := os.Lstat(path)
-		if err != nil || !os.SameFile(current, st) {
-			return errors.New("socket changed while checking")
-		}
-		if st.Mode()&os.ModeSocket == 0 || int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
-			return errors.New("unsafe stale socket")
-		}
-		if e = os.Remove(path); e != nil {
-			return e
-		}
-	}
-	listener, e := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
-	if e != nil {
-		return e
-	}
-	listener.SetUnlinkOnClose(false)
-	defer listener.Close()
-	if e = os.Chmod(path, 0600); e != nil {
-		return e
-	}
-	boundSocket, e := os.Lstat(path)
-	if e != nil {
-		return e
-	}
-	defer func() {
-		current, err := os.Lstat(path)
-		if err == nil && os.SameFile(current, boundSocket) {
-			os.Remove(path)
-		}
-	}()
-	cmd := exec.Command("node", entry("daemon.mjs"))
+	cmd := exec.Command(nodeCommand(), daemonJs)
 	cmd.Env = append(daemonEnvironment(), "PSC_DAEMON_NAMESPACE="+namespace())
 	in, e := cmd.StdinPipe()
 	if e != nil {
@@ -492,22 +397,14 @@ func serve() error {
 	}
 	defer func() {
 		in.Close()
-		cmd.Process.Signal(unix.SIGTERM)
-		done := make(chan struct{})
-		go func() { cmd.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			cmd.Process.Kill()
-			<-done
-		}
+		terminateProcess(cmd)
 	}()
 	var mu sync.Mutex
 	var writeMu sync.Mutex
 	pending := map[string]chan response{}
 	shutdown := make(chan struct{})
 	var once sync.Once
-	stop := func() { once.Do(func() { close(shutdown); listener.Close() }) }
+	stop := func() { once.Do(func() { close(shutdown); stopListener() }) }
 	go func() {
 		for {
 			b, e := readFrame(out)
@@ -562,7 +459,7 @@ func serve() error {
 	}()
 	slots := make(chan struct{}, 64)
 	for {
-		c, e := listener.AcceptUnix()
+		c, e := accept()
 		if e != nil {
 			return nil
 		}
@@ -575,7 +472,7 @@ func serve() error {
 		mu.Lock()
 		active++
 		mu.Unlock()
-		go func(c *net.UnixConn) {
+		go func(c net.Conn) {
 			defer func() {
 				c.Close()
 				<-slots
@@ -584,10 +481,6 @@ func serve() error {
 				last = time.Now()
 				mu.Unlock()
 			}()
-			uid, e := peerUID(c)
-			if !sameUser(uid, e) {
-				return
-			}
 			c.SetDeadline(time.Now().Add(65 * time.Second))
 			b, e := readFrame(c)
 			if e != nil {
@@ -655,11 +548,22 @@ func serve() error {
 		}(c)
 	}
 }
+
+func serve() error {
+	accept, stopListener, cleanup, e := listenDaemon()
+	if e != nil {
+		return e
+	}
+	if accept == nil {
+		return nil
+	}
+	defer cleanup()
+	return daemonCore(accept, stopListener)
+}
 func main() {
-	if os.Getuid() != os.Geteuid() {
+	if runtime.GOOS != "windows" && os.Getuid() != os.Geteuid() {
 		os.Exit(1)
 	}
-	signal.Ignore(unix.SIGPIPE)
 	if len(os.Args) == 2 && os.Args[1] == "--serve" {
 		if e := serve(); e != nil {
 			os.Exit(1)

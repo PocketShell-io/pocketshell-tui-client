@@ -9,6 +9,7 @@ const fixture = vi.hoisted(() => ({
   mode: 'normal',
   leaseMs: 200000,
   argv: [] as string[],
+  leaseFile: '',
 }));
 vi.mock('../src/transport/openssh.js', async (original) => ({
   ...(await original<typeof import('../src/transport/openssh.js')>()),
@@ -24,6 +25,7 @@ vi.mock('../src/transport/gateway.js', () => ({
   sshEnvironment: () => ({}),
   buildGatewaySshArgv: (input: any) => {
     fixture.argv = ['ControlMaster=no', 'ControlPath=none', 'ControlPersist=no', input.command];
+    fixture.leaseFile = input.leaseFile;
     writeFileSync(input.leaseFile, `PSC_LEASE: ${Math.floor((Date.now() + fixture.leaseMs) / 1000)}\n`, {
       mode: 0o600,
     });
@@ -129,4 +131,20 @@ describe('persistent host channel', () => {
     expect(retired).toHaveBeenCalledWith(expect.objectContaining({ code: 'AUTH_LEASE_EXPIRED' }), false);
     expect(fixture.children[0].kill).toHaveBeenCalled();
   });
+  it('re-arms on a renewed receipt instead of closing, then closes when renewal stops', async () => {
+    // The initial lease fires the timer in ~1 s (expiry - 30 s grace).
+    fixture.leaseMs = 31_000;
+    const retired = vi.fn();
+    const c = new HostChannel(host, Date.now() + 300_000, retired);
+    await c.ready;
+    // The proxy rewrites the receipt before the timer fires (in-band reauth).
+    writeFileSync(fixture.leaseFile, `PSC_LEASE: ${Math.floor((Date.now() + 33_000) / 1000)}\n`, { mode: 0o600 });
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_500));
+    expect(retired).not.toHaveBeenCalled();
+    expect(await c.call('ping', {})).toEqual({ pong: true });
+    // No further renewal: the re-armed deadline closes the channel.
+    await new Promise<void>((resolve) => setTimeout(resolve, 4_000));
+    expect(retired).toHaveBeenCalledOnce();
+    expect(retired).toHaveBeenCalledWith(expect.objectContaining({ code: 'AUTH_LEASE_EXPIRED' }), true);
+  }, 10_000);
 });

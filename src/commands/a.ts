@@ -11,6 +11,7 @@ import { resolveEndpoint } from '../gateway/endpoint.js';
 import { loadPins } from '../gateway/pins.js';
 import { encodeSendPayload, HostClient, SessionNotFound } from '../hostClient.js';
 import { defaultHostName, friendlyHostName, listHosts, pickHost, type HostEntry } from '../hosts/store.js';
+import { noteHostUsed } from '../daemon/prewarm.js';
 import { classify, CliError, emit, EXIT, isJsonMode, setJsonMode, usageError } from '../output.js';
 import { safeLine, safeText } from '../sanitize.js';
 import { openConnection } from '../transport/index.js';
@@ -192,6 +193,7 @@ async function withResolvedHost(
     : new HostClient(await openConnection(host), host.binary, host);
   try {
     await body(client, host);
+    noteHostUsed(host);
   } finally {
     await client.connection.close();
   }

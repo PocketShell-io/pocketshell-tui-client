@@ -135,21 +135,35 @@ const PROTOCOL_VERSION = 1;
 const MAX_TOKEN_CHARS = 16384;
 const HIGH_WATER = 1 << 20;
 const LOW_WATER = 256 * 1024;
+/** In-band reauth sends the next token this long before the current one expires. */
+export const REAUTH_LEAD_MS = 60_000;
+/** How often minting is retried while a refresh is due, and the floor between refresh attempts. */
+export const REAUTH_RETRY_MS = 10_000;
+/** How long a sent reauth frame may wait for its acknowledgement. */
+export const REAUTH_REPLY_MS = 10_000;
+
+/** Atomically rewrite the daemon's lease receipt (unix seconds; same safety checks as every status file). */
+export function writeLeaseReceipt(path: string, expiresAtSeconds: number): void {
+  writeStatusFile(path, `PSC_LEASE: ${expiresAtSeconds}`);
+}
 
 // --- control frames ---------------------------------------------------------
 
 export class ControlFrameError extends Error {}
 
 export type ControlFrame =
-  | { type: 'ready'; v: 1; device_id: string; ssh_host_key: string }
+  | { type: 'ready'; v: 1; device_id: string; ssh_host_key: string; caps?: string[] }
   | { type: 'error'; v: 1; code: string; message: string };
 
 const READY_KEYS = ['device_id', 'ssh_host_key', 'type', 'v'];
 const ERROR_KEYS = ['code', 'message', 'type', 'v'];
+const REAUTH_OK_KEYS = ['expires_at', 'type', 'v'];
+const CAP_RE = /^[a-z0-9_]{1,32}$/;
 
 /**
  * Strictly parse a pre-ready TEXT frame: ≤ 16 KiB, a JSON object with no
- * duplicate keys, type ready|error with exactly its keys, `v` the integer
+ * duplicate keys, type ready|error with exactly its keys (ready may also
+ * carry an optional `caps` array of capability words), `v` the integer
  * literal 1, string fields strings.
  */
 export function parseControlFrame(text: string): ControlFrame {
@@ -175,14 +189,51 @@ export function parseControlFrame(text: string): ControlFrame {
     throw new ControlFrameError('unexpected control frame type');
   }
   const keys = Object.keys(doc).sort();
-  if (keys.length !== expected.length || keys.some((key, i) => key !== expected[i])) {
+  const hasCaps = kind === 'ready' && 'caps' in doc;
+  if (keys.length !== expected.length + (hasCaps ? 1 : 0) || keys.some((key) => key !== 'caps' && !expected.includes(key))) {
     throw new ControlFrameError(`${kind} frame has unexpected or missing fields`);
   }
   if (doc.v !== PROTOCOL_VERSION) throw new ControlFrameError(`${kind} frame has an unsupported version`);
   for (const name of strings) {
     if (typeof doc[name] !== 'string') throw new ControlFrameError(`${kind} frame field ${name} is not a string`);
   }
-  return doc as unknown as ControlFrame;
+  let caps: string[] | undefined;
+  if (hasCaps) {
+    if (!Array.isArray(doc.caps)) throw new ControlFrameError('ready frame field caps is not an array');
+    for (const cap of doc.caps) {
+      if (typeof cap !== 'string' || !CAP_RE.test(cap)) throw new ControlFrameError('ready frame has an invalid capability word');
+    }
+    caps = doc.caps as string[];
+  }
+  return caps === undefined ? (doc as unknown as ControlFrame) : ({ ...(doc as object), caps } as ControlFrame);
+}
+
+/**
+ * Strictly parse the one TEXT frame allowed after `ready`: a `reauth_ok`
+ * acknowledgement carrying the new authorization deadline as unix seconds.
+ */
+export function parseReauthOk(text: string): number {
+  if (Buffer.byteLength(text, 'utf8') > MAX_CONTROL_BYTES) throw new ControlFrameError('control frame too large');
+  let doc;
+  try {
+    doc = parseStrictJson(text);
+  } catch (error) {
+    if (error instanceof StrictJsonError) throw new ControlFrameError('control frame is not strict JSON');
+    throw error;
+  }
+  if (!isPlainObject(doc)) throw new ControlFrameError('control frame is not a JSON object');
+  const keys = Object.keys(doc).sort();
+  if (keys.length !== REAUTH_OK_KEYS.length || keys.some((key, i) => key !== REAUTH_OK_KEYS[i])) {
+    throw new ControlFrameError('reauth_ok frame has unexpected or missing fields');
+  }
+  if (doc.type !== 'reauth_ok' || doc.v !== PROTOCOL_VERSION) {
+    throw new ControlFrameError('reauth_ok frame has an unsupported type or version');
+  }
+  const expiresAt = doc.expires_at;
+  if (typeof expiresAt !== 'number' || !Number.isInteger(expiresAt) || expiresAt <= 0 || expiresAt > 2 ** 40) {
+    throw new ControlFrameError('reauth_ok frame has an invalid expires_at');
+  }
+  return expiresAt;
 }
 
 // --- the bridge -------------------------------------------------------------
@@ -190,8 +241,20 @@ export function parseControlFrame(text: string): ControlFrame {
 export interface ProxyOptions {
   deviceId: string;
   endpoint: GatewayEndpoint;
-  /** Mints the broker JWT (account layer). Throwing → exit 3. */
+  /** Mints the broker JWT (account layer). Throwing → exit 3. Used when `reauth` is absent. */
   tokenProvider: () => Promise<string>;
+  /**
+   * Opt in to in-band reauth (the daemon path, `--lease-file`): tokens come
+   * with their expiry (unix s), the receipt is rewritten on every renewal,
+   * and — when the gateway advertises the capability — a fresh token is
+   * sent over the open stream ~60 s before the current one expires so the
+   * tunnel outlives the 5-minute routing token. Old gateways (no cap)
+   * behave exactly as without this option.
+   */
+  reauth?: {
+    leaseFile: string;
+    mint: () => Promise<{ token: string; expiresAt: number }>;
+  };
   stdin: Readable;
   stdout: Writable;
   /**
@@ -202,6 +265,8 @@ export interface ProxyOptions {
   /** Also record a pre-tunnel failure here (see the module comment). */
   statusFile?: string;
   handshakeTimeoutMs?: number;
+  /** Test seam: clock for reauth scheduling (ms). */
+  now?: () => number;
 }
 
 interface Outcome {
@@ -290,21 +355,47 @@ async function bridge(options: ProxyOptions): Promise<Outcome> {
   const url = clientSshUrl(endpoint, deviceId);
 
   let token: string;
-  try {
-    token = await options.tokenProvider();
-  } catch (error) {
-    return tokenFailure(error);
+  let tokenExpiresAt = 0;
+  if (options.reauth) {
+    let minted: { token: string; expiresAt: number };
+    try {
+      minted = await options.reauth.mint();
+    } catch (error) {
+      return tokenFailure(error);
+    }
+    token = minted.token;
+    tokenExpiresAt = minted.expiresAt;
+    try {
+      writeLeaseReceipt(options.reauth.leaseFile, tokenExpiresAt);
+    } catch {
+      // Without a writable receipt the daemon cannot re-arm on renewal;
+      // the tunnel still serves its initial token lifetime as today.
+      options.reauth = undefined;
+    }
+  } else {
+    try {
+      token = await options.tokenProvider();
+    } catch (error) {
+      return tokenFailure(error);
+    }
   }
   if (typeof token !== 'string' || token.length > MAX_TOKEN_CHARS || !/^[\x21-\x7e]+$/.test(token)) {
     return { code: EXIT.NO_TOKEN, message: 'the account layer returned a malformed gateway token' };
   }
 
+  const now = options.now ?? Date.now;
   const timeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
   return new Promise<Outcome>((resolve) => {
     let phase: 'connecting' | 'auth' | 'error-frame' | 'ready' | 'done' = 'connecting';
     let stdinEof = false;
     let refused: Outcome | null = null;
     let errorWait: NodeJS.Timeout | undefined;
+    // In-band reauth state: armed only after `ready` advertised the cap.
+    let reauthSupported = false;
+    let reauthTimer: NodeJS.Timeout | undefined;
+    let reauthReplyTimer: NodeJS.Timeout | undefined;
+    let reauthPending = false;
+    let reauthBroken = false;
 
     // A fresh agent per connection: never the global agent, which Node may
     // configure from HTTP(S)_PROXY (NODE_USE_ENV_PROXY). The token goes to
@@ -354,6 +445,8 @@ async function bridge(options: ProxyOptions): Promise<Outcome> {
       phase = 'done';
       clearTimeout(deadline);
       if (errorWait) clearTimeout(errorWait);
+      if (reauthTimer) clearTimeout(reauthTimer);
+      if (reauthReplyTimer) clearTimeout(reauthReplyTimer);
       stdin.off('data', onStdinData);
       stdin.off('end', onStdinEnd);
       stdin.off('error', onStdinEnd);
@@ -370,6 +463,46 @@ async function bridge(options: ProxyOptions): Promise<Outcome> {
         /* not open */
       }
       finish({ code: EXIT.PROTOCOL, message });
+    }
+
+    /** Arm the next in-band refresh: ~60 s before the current token expires. */
+    function scheduleReauth(expiresAtSeconds: number): void {
+      if (!options.reauth || !reauthSupported || reauthBroken) return;
+      const at = expiresAtSeconds * 1000 - REAUTH_LEAD_MS;
+      const delay = Math.max(at - now(), 0);
+      if (reauthTimer) clearTimeout(reauthTimer);
+      reauthTimer = setTimeout(() => void renew(), delay);
+    }
+
+    async function renew(): Promise<void> {
+      if (phase !== 'ready' || !options.reauth || !reauthSupported || reauthBroken || reauthPending) return;
+      let minted: { token: string; expiresAt: number };
+      try {
+        minted = await options.reauth.mint();
+      } catch {
+        // No fresh token (broker unreachable, logged out): retry until the
+        // current token expires; the gateway then closes the stream.
+        if (reauthTimer) clearTimeout(reauthTimer);
+        reauthTimer = setTimeout(() => void renew(), REAUTH_RETRY_MS);
+        return;
+      }
+      if (minted.expiresAt * 1000 <= now() + REAUTH_LEAD_MS) {
+        // A token that is already within the refresh window cannot push the
+        // deadline out; retry shortly rather than spinning.
+        if (reauthTimer) clearTimeout(reauthTimer);
+        reauthTimer = setTimeout(() => void renew(), REAUTH_RETRY_MS);
+        return;
+      }
+      reauthPending = true;
+      tokenExpiresAt = minted.expiresAt;
+      if (reauthReplyTimer) clearTimeout(reauthReplyTimer);
+      reauthReplyTimer = setTimeout(() => {
+        // No acknowledgement: stop renewing and let the stream die at expiry.
+        reauthPending = false;
+        reauthBroken = true;
+      }, REAUTH_REPLY_MS);
+      ws.send(JSON.stringify({ type: 'reauth', v: PROTOCOL_VERSION, token: minted.token }));
+      minted = { token: '', expiresAt: 0 };
     }
 
     ws.on('unexpected-response', (req, res) => {
@@ -389,7 +522,9 @@ async function bridge(options: ProxyOptions): Promise<Outcome> {
     ws.on('open', () => {
       if (phase !== 'connecting') return;
       phase = 'auth';
-      ws.send(JSON.stringify({ type: 'auth', v: PROTOCOL_VERSION, token, device_id: deviceId }));
+      const auth: Record<string, unknown> = { type: 'auth', v: PROTOCOL_VERSION, token, device_id: deviceId };
+      if (options.reauth) auth.caps = ['reauth'];
+      ws.send(JSON.stringify(auth));
       token = '';
     });
 
@@ -398,6 +533,31 @@ async function bridge(options: ProxyOptions): Promise<Outcome> {
       const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
       if (phase === 'ready') {
         if (!isBinary) {
+          // The single TEXT frame allowed after ready is the reauth
+          // acknowledgement, and only while one is outstanding.
+          if (reauthPending) {
+            let expiresAt: number;
+            try {
+              expiresAt = parseReauthOk(buf.toString('utf8'));
+            } catch {
+              reauthPending = false;
+              reauthBroken = true;
+              protocolViolation('bad reauth_ok', `gateway sent an invalid reauth acknowledgement (protocol violation)`);
+              return;
+            }
+            if (reauthReplyTimer) clearTimeout(reauthReplyTimer);
+            reauthPending = false;
+            tokenExpiresAt = expiresAt;
+            try {
+              writeLeaseReceipt(options.reauth!.leaseFile, expiresAt);
+              scheduleReauth(expiresAt);
+            } catch {
+              // The receipt could not be rewritten: the daemon will treat
+              // the lease as expired; keep the tunnel but stop renewing.
+              reauthBroken = true;
+            }
+            return;
+          }
           protocolViolation('text after ready', 'gateway sent a text message after ready (protocol violation); connection aborted');
           return;
         }
@@ -445,6 +605,8 @@ async function bridge(options: ProxyOptions): Promise<Outcome> {
       phase = 'ready';
       trace('wss_ready');
       clearTimeout(deadline);
+      reauthSupported = Boolean(options.reauth) && (frame.caps ?? []).includes('reauth');
+      if (reauthSupported && tokenExpiresAt > 0) scheduleReauth(tokenExpiresAt);
       stdout.on('error', onStdoutError);
       stdin.on('data', onStdinData);
       stdin.on('end', onStdinEnd);

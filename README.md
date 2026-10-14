@@ -163,10 +163,39 @@ unset, e.g. for non-interactive agents), and never holds ambient
 credentials.
 
 - `PSC_DAEMON=0` opts out and runs every command on the classic path.
-- On Windows the default stays the classic path (a named-pipe daemon is P1).
+- On Windows the default is the classic path; `PSC_DAEMON=1` opts in to the
+  named-pipe daemon (below).
 - Every daemon failure falls back transparently to the classic path: an
   unsafe or refused socket, a spawn failure, or a host helper without
   `a rpc` (the request is then served `transport: legacy`).
+
+A resident channel outlives its routing token: the daemon's proxy opts into
+in-band reauth (`caps: ["reauth"]`), and when the gateway supports it, mints
+a fresh token and sends it over the open stream ~60 s before the current one
+expires, rewriting its lease receipt on every acknowledgement. Without the
+capability (an older gateway) the channel still closes at token expiry and
+the daemon reconnects as before.
+
+The daemon also **pre-warms** the hosts you used in the last 24 h: on start
+and whenever the network changes underneath it, channels are opened in the
+background (bounded concurrency, the usual offline negative cache and
+backoff). Usage is recorded in
+`~/.config/pocketshell-tui-client/daemon-usage.json` (0600, pruned after a
+week; in-memory only on Windows). Pre-warm traffic does not keep the daemon
+alive — idle exit still counts only real client requests.
+
+### Windows named-pipe daemon (opt-in)
+
+`PSC_DAEMON=1` on Windows routes the same commands through a resident daemon
+over `\\.\pipe\psc-…`, named for the user SID (or profile identity) and the
+daemon namespace. The listener is the native relay binary, not Node: the
+pipe carries an explicit owner-only security descriptor (remote and other
+local principals are denied by the DACL), and every connection must
+additionally present a 256-bit secret from
+`%LOCALAPPDATA%\PocketShell\psc-daemon-….secret` (created exclusively,
+inheriting the profile ACL, compared in constant time). Any failure — the
+secret unreadable, the pipe refused, the daemon not starting — falls back to
+the classic path.
 
 The classic path itself is one connection per command wherever possible:
 
@@ -254,10 +283,12 @@ psc -H box sessions list --json                # agentState: working / waiting /
 | --- | --- |
 | `~/.config/pocketshell-tui-client/hosts.json` | saved hosts |
 | `~/.config/pocketshell-tui-client/backend-cache.json` | per-host session-backend verdicts (24 h TTL) |
+| `~/.config/pocketshell-tui-client/daemon-usage.json` | hosts used recently, for pre-warm (24 h window) |
 | `~/.config/pocketshell/credentials.json` | login session, shared with the `pocketshell` CLI |
 | `~/.config/pocketshell/gateway_known_hosts` | gateway host-key pins, shared with the `pocketshell` CLI |
 | `$XDG_RUNTIME_DIR/pocketshell-tui-client/` | OpenSSH control sockets |
 | `$XDG_RUNTIME_DIR/psc-daemon-<uid>/` | resident daemon socket (0700, peer-UID checked) |
+| `%LOCALAPPDATA%\PocketShell\psc-daemon-….secret` | Windows pipe connection secret (owner-only) |
 
 ## Development
 
