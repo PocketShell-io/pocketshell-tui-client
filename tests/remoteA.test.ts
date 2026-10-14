@@ -620,4 +620,21 @@ describe('confirmPromptDelivery', () => {
     expect(await confirmPromptDelivery(client, row, 'a\nb\nc', opts)).toBe('entered');
     expect(sent).toEqual(['']);
   });
+
+  it('readOnly observes without ever writing', async () => {
+    const working = fake([{ state: 'working', screen: '' }]);
+    expect(await confirmPromptDelivery(working.client, row, 'hello', { ...opts, readOnly: true })).toBe('working');
+    expect(working.sent).toEqual([]);
+    const visible = fake([{ screen: '› line   one' }]);
+    expect(await confirmPromptDelivery(visible.client, row, 'line one', { ...opts, readOnly: true })).toBe('visible');
+    expect(visible.sent).toEqual([]);
+  });
+
+  it('readOnly reports unconfirmed instead of resending a swallowed prompt', async () => {
+    const { client, sent } = fake([{ screen: '› Ask Codex to do anything' }]);
+    expect(await confirmPromptDelivery(client, row, 'line one\nline two', { ...opts, readOnly: true })).toBe(
+      'unconfirmed',
+    );
+    expect(sent).toEqual([]);
+  });
 });

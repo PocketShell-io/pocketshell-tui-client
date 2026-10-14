@@ -16,6 +16,7 @@ import { classify, CliError, emit, EXIT, isJsonMode, setJsonMode, usageError } f
 import { safeLine, safeText } from '../sanitize.js';
 import { openConnection } from '../transport/index.js';
 import { action, jsonOption, parsePositiveInt, parseSeconds } from './common.js';
+import { trace } from '../trace.js';
 import { describeHost } from './hosts.js';
 import { table } from './sessions.js';
 
@@ -305,11 +306,22 @@ export async function confirmPromptDelivery(
   client: Pick<HostClient, 'listSessions' | 'capture' | 'send'>,
   row: SessionRow,
   promptText: string,
-  options: { windowS?: number; pollMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
-): Promise<'working' | 'resent' | 'entered' | 'visible'> {
+  options: {
+    windowS?: number;
+    pollMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+    /**
+     * Observe only: never resend or press Enter, so the check is safe to run
+     * in the background after a `send` returned. Returns 'unconfirmed' when
+     * delivery cannot be proven without writing.
+     */
+    readOnly?: boolean;
+  } = {},
+): Promise<'working' | 'resent' | 'entered' | 'visible' | 'unconfirmed'> {
   const windowS = options.windowS ?? 15;
   const pollMs = options.pollMs ?? 1000;
   const pause = options.sleepFn ?? sleep;
+  const readOnly = options.readOnly ?? false;
   const firstLine = promptText.split('\n').find((line) => line.trim() !== '') ?? '';
   const probe = collapse(firstLine).slice(0, 40);
   const polls = Math.max(1, Math.ceil((windowS * 1000) / pollMs));
@@ -327,10 +339,12 @@ export async function confirmPromptDelivery(
     }
     if (visible) {
       if (resent) return 'resent';
+      if (readOnly) return 'visible';
       await client.send(row, '', { enter: true });
       return 'entered';
     }
     if (resent || probe === '') return resent ? 'resent' : 'visible';
+    if (readOnly) return 'unconfirmed';
     await client.send(row, promptText, { enter: true });
     resent = true;
   }
@@ -727,15 +741,28 @@ export function buildHostVerbProgram(hostSelector: string): Command {
         'send and SUBMIT (Enter is default; --no-enter to just type). Multi-line text is sent via bracketed paste as one message.',
       )
       .option('--enter', 'press Enter after the text (default)')
-      .option('--no-enter', 'type the text without pressing Enter'),
+      .option('--no-enter', 'type the text without pressing Enter')
+      .option('--wait', 'confirm prompt delivery synchronously before returning (reads the local replica when live)'),
   ).action(
-    action(async (selector: string, text: string | undefined, opts: { enter?: boolean; json?: boolean }) => {
+    action(async (selector: string, text: string | undefined, opts: { enter?: boolean; json?: boolean; wait?: boolean }) => {
       if (opts.json) setJsonMode(true);
       const payload = await resolveSendText(text);
       const enter = opts.enter ?? true;
       const encoded = encodeSendPayload(payload, { enter });
       await withResolvedHost(hostSelector, async (client, host) => {
         const row = await client.sendSelected(selector, payload, { enter });
+        // Delivery confirmation reads the local replica/mirror when live
+        // (zero round trips) and never writes in the background: only
+        // --wait performs the full synchronous confirm, which may resend.
+        let delivery: Awaited<ReturnType<typeof confirmPromptDelivery>> | undefined;
+        if (opts.wait) {
+          delivery = await confirmPromptDelivery(client, row, payload);
+        } else if (requests.getStore()?.transportPath === 'resident') {
+          void confirmPromptDelivery(client, row, payload, { readOnly: true }).then(
+            (outcome) => trace(outcome === 'unconfirmed' ? 'send_unconfirmed' : 'send_observed'),
+            () => trace('send_unconfirmed'),
+          );
+        }
         emit(
           {
             ok: true,
@@ -744,6 +771,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
             bytes: Buffer.byteLength(payload),
             enter,
             bracketed: encoded.bracketed,
+            ...(delivery !== undefined ? { delivery } : {}),
           },
           () => '',
         );

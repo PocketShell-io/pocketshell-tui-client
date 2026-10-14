@@ -20,6 +20,12 @@ interface Replica {
   seq: number;
   generation: string;
   receivedAt: number;
+  /**
+   * A heartbeat with `gap:true` (no data) voided the freshness proof: the
+   * topic is not live until one live round trip refreshes it. A snapshot
+   * with data always clears this (full state replaces).
+   */
+  stale: boolean;
 }
 
 interface ScreenMirror {
@@ -30,6 +36,8 @@ interface ScreenMirror {
   seq: number;
   receivedAt: number;
   lastCapturedAt: number;
+  /** Same gap-heartbeat rule as the sessions topic, per mirror. */
+  stale: boolean;
 }
 
 interface Slot {
@@ -68,16 +76,27 @@ function routeEvent(hostName: string, channel: HostChannel, frame: EventFrame): 
     if (frame.topic === 'sessions') {
       if (frame.subscription !== slot.sessionsSubscription) return;
       if (frame.event === 'snapshot') {
-        // Full state, gap or not: replace, never merge.
+        // Full state, gap or not: replace, never merge; a data frame also
+        // clears a gap-heartbeat mark (fresh full state again).
         slot.replica = {
           listing: parseHostSessionsList(JSON.stringify(frame.data)),
           seq: frame.seq,
           generation: frame.generation ?? slot.replica?.generation ?? '',
           receivedAt: Date.now(),
+          stale: false,
         };
       } else if (frame.event === 'heartbeat' && slot.replica) {
-        if (frame.generation && slot.replica.generation && frame.generation !== slot.replica.generation) {
-          slot.replica = undefined; // a different helper generation: retire the replica
+        if (frame.generation) {
+          if (!slot.replica.generation) slot.replica.generation = frame.generation;
+          else if (frame.generation !== slot.replica.generation) {
+            slot.replica = undefined; // a different helper generation: retire the replica
+            return;
+          }
+        }
+        if (frame.gap) {
+          // No data: the freshness proof is void. Mark not-live; the next
+          // read does one live refresh before serving from it again.
+          slot.replica.stale = true;
           return;
         }
         slot.replica.receivedAt = Date.now();
@@ -92,7 +111,16 @@ function routeEvent(hostName: string, channel: HostChannel, frame: EventFrame): 
         slot.screens.delete(mirror.uuid);
         return;
       }
-      // snapshot frames are full state: replace (gap or not).
+      if (frame.event === 'heartbeat') {
+        if (frame.gap) {
+          mirror.stale = true;
+          return;
+        }
+        mirror.receivedAt = Date.now();
+        mirror.seq = frame.seq;
+        return;
+      }
+      // Screen data frames are full state: replace (gap or not).
       if (frame.event === 'screen') {
         const data = frame.data as { text?: unknown } | undefined;
         if (!data || typeof data.text !== 'string') return;
@@ -103,8 +131,9 @@ function routeEvent(hostName: string, channel: HostChannel, frame: EventFrame): 
           /* keep the last known row */
         }
         mirror.seq = frame.seq;
+        mirror.stale = false;
+        mirror.receivedAt = Date.now();
       }
-      mirror.receivedAt = Date.now();
     }
   } catch {
     /* a malformed frame never tears the channel down */
@@ -246,8 +275,18 @@ class RpcHostClient extends HostClient {
 
   /** The established slot for this host, when its channel is still usable. */
   private async liveSlot(): Promise<Slot | undefined> {
+    // Re-check policy on every read, including replica reads: an unsafe or
+    // deleted credential must refuse before dispatch even when the answer
+    // could come from the local replica.
+    let policy;
+    try {
+      policy = gatewayPolicy(this.host!);
+    } catch (error) {
+      slots.get(this.host!.name)?.channel.close();
+      throw error;
+    }
     const slot = slots.get(this.host!.name);
-    if (!slot) return undefined;
+    if (!slot || slot.generation !== policy.generation) return undefined;
     try {
       await slot.channel.ready;
       return slot;
@@ -257,12 +296,34 @@ class RpcHostClient extends HostClient {
   }
 
   private static replicaLive(slot: Slot): boolean {
-    return Boolean(slot.replica && Date.now() - slot.replica.receivedAt <= REPLICA_LIVE_WINDOW_MS);
+    return Boolean(
+      slot.replica && !slot.replica.stale && Date.now() - slot.replica.receivedAt <= REPLICA_LIVE_WINDOW_MS,
+    );
   }
 
   private static mirrorLive(slot: Slot, uuid: string): boolean {
     const mirror = slot.screens.get(uuid);
-    return Boolean(mirror && Date.now() - mirror.receivedAt <= REPLICA_LIVE_WINDOW_MS);
+    return Boolean(mirror && !mirror.stale && Date.now() - mirror.receivedAt <= REPLICA_LIVE_WINDOW_MS);
+  }
+
+  /**
+   * One live round trip that also refreshes the stored replica: the answer
+   * after a gap mark, an expiry, or `--fresh`. Never serves silently stale
+   * data; the refreshed replica serves subsequent reads.
+   */
+  private async refreshReplica(): Promise<SessionsListing> {
+    const fresh = listing(await request(this.host!, 'list', { format: 'psc' }));
+    const slot = slots.get(this.host!.name);
+    if (slot) {
+      slot.replica = {
+        listing: fresh,
+        seq: slot.replica?.seq ?? 0,
+        generation: slot.replica?.generation ?? '',
+        receivedAt: Date.now(),
+        stale: false,
+      };
+    }
+    return fresh;
   }
 
   /** Record the source of the answer for the command's JSON meta. */
@@ -293,6 +354,9 @@ class RpcHostClient extends HostClient {
       return slot.replica.listing;
     }
     RpcHostClient.noteRead(context, { source: 'live' });
+    // Every live listing through a live slot refreshes the stored replica
+    // (`--fresh` included): the next read is served locally again.
+    if (slot) return this.refreshReplica();
     return listing(await request(this.host!, 'list', { format: 'psc' }));
   }
 
@@ -307,6 +371,12 @@ class RpcHostClient extends HostClient {
         ageMs: Date.now() - slot.replica.receivedAt,
       });
       return row;
+    }
+    // One live refresh (a full listing, not a single status) so the stored
+    // replica is current again before anything is served from it.
+    if (slot && !options.fresh) {
+      RpcHostClient.noteRead(context, { source: 'live' });
+      return pickSession((await this.refreshReplica()).sessions, selector);
     }
     RpcHostClient.noteRead(context, { source: 'live' });
     return selected(await request(this.host!, 'status', { selector, selectorMode: 'psc' }));
@@ -377,7 +447,14 @@ class RpcHostClient extends HostClient {
     ensureSweeper();
     const existing = slot.screens.get(uuid);
     if (existing) {
+      // A live round trip after a gap mark or expiry re-primes the mirror:
+      // the subscription is still valid helper-side, only the content and
+      // the freshness proof needed renewal.
+      existing.row = initial.row;
+      existing.text = initial.text;
+      existing.receivedAt = Date.now();
       existing.lastCapturedAt = Date.now();
+      existing.stale = false;
       return;
     }
     if (slot.channel.negotiated.protocol !== 2) return;
@@ -402,6 +479,7 @@ class RpcHostClient extends HostClient {
         seq: 0,
         receivedAt: Date.now(),
         lastCapturedAt: Date.now(),
+        stale: false,
       });
     } catch {
       /* mirror unavailable: later captures keep round-tripping */

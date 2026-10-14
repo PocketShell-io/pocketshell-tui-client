@@ -204,6 +204,33 @@ backoff). Usage is recorded in
 week; in-memory only on Windows). Pre-warm traffic does not keep the daemon
 alive — idle exit still counts only real client requests.
 
+### The local replica (reads under 10 ms)
+
+When the host helper speaks PSC-RPC-2 (`a rpc --stdio --protocol 2`), the
+daemon subscribes to its push stream and answers `ls` and `status` from a
+local replica instead of a network round trip: typically 1–5 ms on any
+host, at any distance. `capture` answers from a screen mirror subscribed on
+first capture (unsubscribed after 10 minutes idle); `--lines` slicing stays
+local and exact.
+
+- JSON output gains `meta: { source: "replica" | "live", seq, ageMs }`.
+  The replica is live while its channel is up and the last frame (snapshot
+  or heartbeat) arrived within 6 s; activity-derived fields (agent activity
+  state, CPU/process counts) may be up to 5 s old by helper design.
+- `--fresh` on `ls`, `status` and `capture` forces a live round trip (and
+  refreshes the replica).
+- A gap mark with data replaces wholesale; a gap mark on a heartbeat voids
+  that topic's freshness, and the next read does one live refresh first.
+  If the replica is not live — stream down, heartbeat late, auth closing —
+  reads fall back to a live round trip and never serve stale data silently.
+  After an auth close the replica is dropped immediately.
+- Writes stay request/response (exactly one round trip) and are never
+  replayed when uncertain. `send` returns after the helper acknowledges;
+  `--wait` additionally confirms prompt delivery synchronously (against the
+  replica when live) and reports the outcome, while without it the daemon
+  only observes delivery in the background (PSC_TRACE stages
+  `send_observed`/`send_unconfirmed`) and never resends.
+
 ### Windows named-pipe daemon (opt-in)
 
 `PSC_DAEMON=1` on Windows routes the same commands through a resident daemon
