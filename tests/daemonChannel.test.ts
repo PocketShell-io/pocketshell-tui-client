@@ -126,6 +126,7 @@ describe('persistent host channel', () => {
     const c = new HostChannel(host, Date.now() + 300000, retired);
     await expect(c.ready).rejects.toMatchObject({ code: 'AUTH_LEASE_EXPIRED' });
     expect(retired).toHaveBeenCalledOnce();
+    expect(retired).toHaveBeenCalledWith(expect.objectContaining({ code: 'AUTH_LEASE_EXPIRED' }), false);
     expect(fixture.children[0].kill).toHaveBeenCalled();
   });
 });
