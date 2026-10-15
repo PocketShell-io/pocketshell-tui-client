@@ -9,7 +9,7 @@ export class WindowsSecurityError extends Error {
   constructor() { super('Windows protected state or executable binding refused'); }
 }
 export interface WindowsBindings { version: 2; sshFamily: 'win32-openssh'; helper: string; helperSha256: string; ssh: string; sshSha256: string; node: string; nodeSha256: string; entry: string; entrySha256: string; systemRoot: string; systemDrive: string; programData: string; }
-export type Kind = 'credentials' | 'pins' | 'hosts' | 'empty' | 'status';
+export type Kind = 'credentials' | 'pins' | 'hosts' | 'empty' | 'status' | 'vault';
 export interface NativeRequest { op: 'preflight' | 'read' | 'write' | 'remove' | 'exists' | 'check-executable' | 'check-identity'; root: string; kind?: Kind; name?: string; data?: string; path?: string; }
 export interface NativeReply { version: 1; ok: boolean; code?: string; present?: boolean; data?: string; }
 export function windowsAbsolute(value: string): string {

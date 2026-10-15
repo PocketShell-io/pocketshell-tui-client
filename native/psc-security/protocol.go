@@ -13,6 +13,7 @@ import (
 const maxRequest = 1500000
 
 var statusName = regexp.MustCompile(`^st-[0-9a-f]{24}$`)
+var vaultName = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 type Request struct {
 	Version int    `json:"version"`
@@ -42,6 +43,11 @@ func fileName(r Request) (string, int, error) {
 		return "hosts.json", 1048576, nil
 	case "empty":
 		return "known_hosts_empty", 0, nil
+	case "vault":
+		// The remembered vault DEK record, one per account hash; DPAPI-sealed like credentials.
+		if vaultName.MatchString(r.Name) {
+			return "vault-" + r.Name + ".dpapi", 4096, nil
+		}
 	case "status":
 		if statusName.MatchString(r.Name) {
 			return r.Name, 4096, nil
@@ -126,7 +132,7 @@ func decode(in io.Reader) (Request, error) {
 		}
 	case "read", "write", "remove", "exists":
 		_, limit, e := fileName(r)
-		if e != nil || r.Path != "" || (r.Kind != "status" && r.Name != "") {
+		if e != nil || r.Path != "" || (r.Kind != "status" && r.Kind != "vault" && r.Name != "") {
 			return r, refused
 		}
 		if r.Op == "write" {
