@@ -1,27 +1,34 @@
 /**
- * The vault holder: keeps an unlocked vault available to later psc
- * invocations without storing anything, like ssh-agent does for keys.
+ * The vault holder: keeps an unlocked vault for later psc invocations
+ * without storing anything, and acts as their ssh-agent.
  *
- * `psc vault unlock` (without --remember) starts one detached process that
- * holds the remember record (DEK + AUTH) in memory only and serves it on a
- * 0600 socket inside the private 0700 runtime dir, to this user only. It
- * exits, wiping the record, on `psc vault lock`, after an idle period with
- * no request (default 30 min, PSC_VAULT_IDLE_MINUTES), or on SIGTERM. It is
- * not written to disk at any point; the record reaches it on a pipe.
+ * `psc vault unlock` (without --remember) starts one detached psc process
+ * that unlocks its own KeyVaultStore from the remember record (handed over
+ * on a pipe, never argv, env or disk) and keeps it in memory. It answers
+ * this user on a 0600 socket inside the private 0700 control dir, and it
+ * never hands out the DEK, AUTH or a private key: a connect asks for a
+ * host's credential and gets the path of an agent socket the holder serves
+ * for that key (signing only), or, for a vault password, an SSH_ASKPASS
+ * helper that the holder answers. Index metadata (key names, types,
+ * bindings) is served for `psc vault status`.
  *
- * Windows has no equivalent owner-only socket here: the holder is POSIX
- * only, and Windows users remember with DPAPI instead.
+ * It wipes everything and exits on `psc vault lock`, after an idle period
+ * with no request (default 30 min, PSC_VAULT_IDLE_MINUTES), or on a signal.
+ * POSIX only; Windows remembers with DPAPI instead.
  */
 import { spawn } from 'node:child_process';
 import { chmodSync, lstatSync, mkdirSync, rmSync } from 'node:fs';
 import { connect, createServer, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
+import type { HostKeyBinding, KeyVaultStore, VaultKeyEntry } from '@pocketshell/core';
 import { cliInvocation } from '../transport/gateway.js';
 import { controlDir } from '../transport/openssh.js';
+import { startCredential, type SshCredential } from './agent.js';
+import { VaultError, type GatewayAuth } from './format.js';
 import type { RememberRecord } from './remember.js';
 
 export const DEFAULT_IDLE_MINUTES = 30;
-const MAX_LINE = 4096;
+const MAX_LINE = 64 * 1024;
 
 export function holderSupported(): boolean {
   return process.platform !== 'win32';
@@ -38,82 +45,136 @@ export function idleMs(env: NodeJS.ProcessEnv = process.env): number {
   return minutes * 60_000;
 }
 
-interface HeldRecord {
-  account: string;
-  record: RememberRecord;
+export interface HolderStatus {
+  vaultId: string | null;
+  epoch: number | null;
+  keys: VaultKeyEntry[];
+  bindings: Record<string, HostKeyBinding>;
 }
 
-function parseHeld(text: string): HeldRecord | null {
-  try {
-    const doc = JSON.parse(text) as HeldRecord;
-    const r = doc.record;
-    if (
-      typeof doc.account !== 'string' ||
-      typeof r?.vaultId !== 'string' ||
-      typeof r.dek !== 'string' ||
-      typeof r.epoch !== 'number' ||
-      (r.auth !== undefined && typeof r.auth !== 'string')
-    ) {
-      return null;
-    }
-    return { account: doc.account, record: { v: 1, vaultId: r.vaultId, epoch: r.epoch, dek: r.dek, ...(r.auth ? { auth: r.auth } : {}) } };
-  } catch {
-    return null;
-  }
+/** A credential served by the holder: the caller only points ssh at it. */
+export interface HeldCredential {
+  credential: SshCredential;
+  gatewayAuth: GatewayAuth;
+  keyId: string;
 }
 
-/** One request/answer line over the holder socket; null when no holder answers. */
-function ask(line: string, timeoutMs = 2000): Promise<string | null> {
+type Request =
+  | { op: 'ping' }
+  | { op: 'lock' }
+  | { op: 'status'; account: string }
+  | { op: 'credential'; account: string; alias?: string | null; keyId?: string; gatewayAuth?: GatewayAuth };
+
+/** One request/answer over the holder socket; null when no holder answers. */
+function ask(request: Request, timeoutMs = 15_000): Promise<Record<string, unknown> | null> {
   if (!holderSupported()) return Promise.resolve(null);
   return new Promise((resolve) => {
-    let socket: Socket;
+    let socket: Socket | undefined;
     let out = '';
     let done = false;
-    const finish = (value: string | null): void => {
+    const finish = (value: Record<string, unknown> | null): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      socket.destroy();
+      socket?.destroy();
       resolve(value);
     };
     const timer = setTimeout(() => finish(null), timeoutMs);
+    let s: Socket;
     try {
-      socket = connect(holderSocket());
+      s = connect(holderSocket());
     } catch {
-      // no safe runtime dir: no holder
-      clearTimeout(timer);
-      resolve(null);
+      finish(null); // no safe runtime dir: no holder
       return;
     }
-    socket.on('connect', () => socket.write(`${line}\n`));
-    socket.on('data', (d: Buffer) => {
+    socket = s;
+    s.on('connect', () => s.write(`${JSON.stringify(request)}\n`));
+    s.on('data', (d: Buffer) => {
       out += d.toString('utf8');
-      if (out.length > MAX_LINE * 4) finish(null);
+      if (out.length > MAX_LINE) finish(null);
     });
-    socket.on('end', () => finish(out));
-    socket.on('error', () => finish(null));
+    s.on('end', () => {
+      try {
+        finish(JSON.parse(out) as Record<string, unknown>);
+      } catch {
+        finish(null);
+      }
+    });
+    s.on('error', () => finish(null));
   });
 }
 
-/** The record the holder keeps for `account`, or null (no holder, other account, locked). */
-export async function heldRecord(account: string): Promise<RememberRecord | null> {
-  const answer = await ask(`get ${account}`);
-  if (!answer) return null;
-  return parseHeld(answer.trim())?.record ?? null;
+function holderError(answer: Record<string, unknown>): VaultError | null {
+  const error = answer.error as { code?: unknown; message?: unknown; exitCode?: unknown } | undefined;
+  if (!error) return null;
+  return new VaultError(
+    typeof error.message === 'string' ? error.message : 'the vault holder refused',
+    typeof error.code === 'string' ? error.code : 'VAULT_ERROR',
+    typeof error.exitCode === 'number' ? error.exitCode : 1,
+  );
+}
+
+export async function holderRunning(): Promise<boolean> {
+  return (await ask({ op: 'ping' }, 2000))?.pong === true;
 }
 
 /** Tell the holder to wipe and exit. True when one was running. */
 export async function stopHolder(): Promise<boolean> {
-  return (await ask('lock')) !== null;
+  return (await ask({ op: 'lock' }, 5000)) !== null;
 }
 
-export async function holderRunning(): Promise<boolean> {
-  return (await ask('ping')) === 'pong\n';
+/** Non-secret index metadata from the holder for `account`; null when none holds it. */
+export async function holderStatus(account: string): Promise<HolderStatus | null> {
+  const answer = await ask({ op: 'status', account }, 5000);
+  if (answer === null || answer.unlocked !== true) return null;
+  return {
+    vaultId: typeof answer.vaultId === 'string' ? answer.vaultId : null,
+    epoch: typeof answer.epoch === 'number' ? answer.epoch : null,
+    keys: Array.isArray(answer.keys) ? (answer.keys as VaultKeyEntry[]) : [],
+    bindings: typeof answer.bindings === 'object' && answer.bindings !== null ? (answer.bindings as Record<string, HostKeyBinding>) : {},
+  };
+}
+
+/**
+ * The holder-served credential for a host: `undefined` when no holder holds
+ * this account, `null` when the vault says the host uses its own keys (no
+ * binding, or policy `host`).
+ */
+export async function holderCredential(
+  account: string,
+  binding: { alias: string | null; keyId?: string; gatewayAuth?: GatewayAuth },
+): Promise<HeldCredential | null | undefined> {
+  const answer = await ask({
+    op: 'credential',
+    account,
+    alias: binding.alias,
+    ...(binding.keyId ? { keyId: binding.keyId, gatewayAuth: binding.gatewayAuth ?? 'managed' } : {}),
+  });
+  if (answer === null || answer.held === false) return undefined;
+  const error = holderError(answer);
+  if (error) throw error;
+  if (answer.none === true) return null;
+  const c = answer.credential as { identityFile?: unknown; agentSocket?: unknown; options?: unknown; env?: unknown; password?: unknown };
+  if (!c || !Array.isArray(c.options) || typeof answer.keyId !== 'string') return undefined;
+  return {
+    keyId: answer.keyId,
+    gatewayAuth: answer.gatewayAuth as GatewayAuth,
+    credential: {
+      ...(typeof c.identityFile === 'string' ? { identityFile: c.identityFile } : {}),
+      ...(typeof c.agentSocket === 'string' ? { agentSocket: c.agentSocket } : {}),
+      options: c.options.filter((o): o is string => typeof o === 'string'),
+      env: (typeof c.env === 'object' && c.env !== null ? c.env : {}) as Record<string, string>,
+      password: c.password === true,
+      // The holder owns the agent; it lives until the holder locks.
+      close: async () => {},
+    },
+  };
 }
 
 /**
  * Start (or replace) the holder with `record`. The record goes over the
- * child's stdin, never argv or the environment; resolves once it listens.
+ * child's stdin, never argv or the environment; resolves once it listens
+ * with the vault unlocked.
  */
 export async function startHolder(account: string, record: RememberRecord): Promise<boolean> {
   if (!holderSupported()) return false;
@@ -125,7 +186,7 @@ export async function startHolder(account: string, record: RememberRecord): Prom
     env: { ...process.env, PSC_DAEMON: '0' },
   });
   const ready = new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(false), 10_000);
+    const timer = setTimeout(() => resolve(false), 30_000);
     child.stdout!.once('data', (d: Buffer) => {
       clearTimeout(timer);
       resolve(d.toString().startsWith('ready'));
@@ -135,6 +196,7 @@ export async function startHolder(account: string, record: RememberRecord): Prom
       resolve(false);
     });
   });
+  child.stdin!.on('error', () => {}); // a holder that failed early: `ready` already says false
   child.stdin!.end(`${JSON.stringify({ account, record })}\n`);
   const ok = await ready;
   child.stdout!.destroy();
@@ -142,14 +204,29 @@ export async function startHolder(account: string, record: RememberRecord): Prom
   return ok;
 }
 
-/** The holder process body (`psc vault __hold`): read the record from stdin, serve it. */
-export async function runHolder(): Promise<void> {
+/** The holder process body (`psc vault __hold`). `open` builds the store for its account. */
+export async function runHolder(open: (account: string) => KeyVaultStore | null): Promise<void> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-  const text = Buffer.concat(chunks).toString('utf8');
-  let held = parseHeld(text.trim());
+  let parsed: { account?: unknown; record?: RememberRecord } | null = null;
+  try {
+    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { account?: unknown; record?: RememberRecord };
+  } catch {
+    parsed = null;
+  }
   chunks.forEach((c) => c.fill(0));
-  if (held === null) process.exit(2);
+  const account = typeof parsed?.account === 'string' ? parsed.account : null;
+  const record = parsed?.record;
+  const opened = account ? open(account) : null;
+  if (!account || !record || !opened) process.exit(2);
+  const store: KeyVaultStore = opened;
+  const dek = new Uint8Array(Buffer.from(record.dek, 'base64url'));
+  const auth = record.auth ? new Uint8Array(Buffer.from(record.auth, 'base64url')) : null;
+  const unlocked = await store.unlockWithRememberedDek({ vaultId: record.vaultId, epoch: record.epoch, dek, ...(auth ? { auth } : {}) });
+  dek.fill(0);
+  auth?.fill(0);
+  parsed = null;
+  if (unlocked.kind !== 'ok') process.exit(3);
 
   const path = holderSocket();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -159,18 +236,70 @@ export async function runHolder(): Promise<void> {
   } catch {
     /* none */
   }
+  const served = new Map<string, Promise<SshCredential>>();
   const idle = idleMs();
-  let timer: NodeJS.Timeout;
-  const wipeAndExit = (): void => {
-    held = null;
+  let timer: NodeJS.Timeout | undefined;
+  const wipeAndExit = async (): Promise<void> => {
+    store.lock();
     server.close();
+    await Promise.all([...served.values()].map(async (c) => (await c.catch(() => null))?.close()));
     rmSync(path, { force: true });
     process.exit(0);
   };
   const touch = (): void => {
     clearTimeout(timer);
-    timer = setTimeout(wipeAndExit, idle);
+    timer = setTimeout(() => void wipeAndExit(), idle);
   };
+
+  const credential = async (request: Extract<Request, { op: 'credential' }>): Promise<Record<string, unknown>> => {
+    const binding: HostKeyBinding | null = request.keyId
+      ? { keyId: request.keyId, gatewayAuth: request.gatewayAuth ?? 'managed' }
+      : request.alias
+        ? store.getHostBinding(request.alias)
+        : null;
+    if (binding === null || binding.gatewayAuth === 'host') return { none: true };
+    let pending = served.get(binding.keyId);
+    if (!pending) {
+      pending = (async () => {
+        const secret = await store.decryptKey(binding.keyId);
+        if (secret.kind === 'key' || secret.kind === 'password') return startCredential(secret);
+        const relock = secret.kind === 'gated' || secret.kind === 'locked';
+        throw new VaultError(
+          secret.kind === 'missingKey'
+            ? `The vault key this host uses (${binding.keyId}) is not on your account any more; re-upload it or rebind the host on the web.`
+            : relock
+              ? 'The server wants the vault passphrase again; run `psc vault unlock`.'
+              : 'A vault key could not be decrypted; run `psc vault unlock` again.',
+          secret.kind === 'missingKey' ? 'VAULT_KEY_MISSING' : relock ? 'VAULT_LOCKED' : 'VAULT_RESET',
+          secret.kind === 'missingKey' ? 1 : 3,
+        );
+      })();
+      served.set(binding.keyId, pending);
+      pending.catch(() => served.delete(binding.keyId));
+    }
+    const c = await pending;
+    return {
+      keyId: binding.keyId,
+      gatewayAuth: binding.gatewayAuth,
+      credential: { identityFile: c.identityFile, agentSocket: c.agentSocket, options: c.options, env: c.env, password: c.password },
+    };
+  };
+
+  const handle = async (request: Request): Promise<Record<string, unknown>> => {
+    if (request.op === 'ping') return { pong: true };
+    if (request.op === 'lock' || request.account !== account) return { held: false };
+    touch();
+    if (request.op === 'status') {
+      return { unlocked: true, vaultId: store.vaultId, epoch: store.epoch, keys: store.listKeys(), bindings: store.listHostBindings() };
+    }
+    try {
+      return await credential(request);
+    } catch (error) {
+      const e = error as VaultError;
+      return { error: { code: e.code ?? 'VAULT_ERROR', message: e.message, exitCode: e.exitCode ?? 1 } };
+    }
+  };
+
   const server = createServer((socket) => {
     let line = '';
     socket.on('error', () => socket.destroy());
@@ -179,21 +308,21 @@ export async function runHolder(): Promise<void> {
       if (line.length > MAX_LINE) return void socket.destroy();
       const nl = line.indexOf('\n');
       if (nl < 0) return;
-      const [verb, account] = line.slice(0, nl).split(' ');
-      if (verb === 'ping') return void socket.end('pong\n');
-      if (verb === 'lock') {
-        socket.end('ok\n', wipeAndExit);
+      let request: Request;
+      try {
+        request = JSON.parse(line.slice(0, nl)) as Request;
+      } catch {
+        return void socket.destroy();
+      }
+      if (request.op === 'lock') {
+        socket.end('{"ok":true}', () => void wipeAndExit());
         return;
       }
-      if (verb === 'get' && held !== null && account === held.account) {
-        touch();
-        return void socket.end(`${JSON.stringify(held)}\n`);
-      }
-      socket.end('');
+      void handle(request).then((answer) => socket.end(JSON.stringify(answer)));
     });
   });
-  process.on('SIGTERM', wipeAndExit);
-  process.on('SIGINT', wipeAndExit);
+  process.on('SIGTERM', () => void wipeAndExit());
+  process.on('SIGINT', () => void wipeAndExit());
   process.on('SIGHUP', () => {});
   await new Promise<void>((resolve) => server.listen(path, resolve));
   chmodSync(path, 0o600);

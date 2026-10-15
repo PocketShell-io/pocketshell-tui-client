@@ -33,7 +33,7 @@ export function sshKeygen(type: 'ed25519' | 'rsa' | 'ecdsa', bits?: number): { p
   }
 }
 
-export const TEST_KDF_COST = { m: 32 * 1024, t: 1, p: 1 };
+export const TEST_KDF_COST = { m: 32 * 1024, t: 3, p: 1 };
 
 /** Writable in-memory settings API (the web's side, for building fixtures). */
 export class SlotServer implements VaultSlotTransport {

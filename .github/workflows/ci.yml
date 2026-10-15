@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: PocketShell-io/pocketshell-core
-          ref: 281890d6f904e67517fe37613504442c026c1b07
+          ref: 1d9f08c6daed0fee25407ebe63d9fa773dea88c7
           path: pocketshell-core
       - uses: actions/setup-node@v4
         with:

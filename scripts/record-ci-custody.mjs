@@ -11,7 +11,7 @@ const walk = (dir, root = dir) => readdirSync(dir).flatMap(name => {
     sha256: createHash('sha256').update(readFileSync(p)).digest('hex')}];
 }).sort((a,b) => a.path.localeCompare(b.path));
 const git = (cwd, ...args) => execFileSync('git', args, {cwd, encoding:'utf8'}).trim();
-const core = '../pocketshell-core', expected = '281890d6f904e67517fe37613504442c026c1b07';
+const core = '../pocketshell-core', expected = '1d9f08c6daed0fee25407ebe63d9fa773dea88c7';
 if (git(core,'rev-parse','HEAD') !== expected) throw new Error('Core source pin mismatch');
 writeFileSync('ci-custody.json', JSON.stringify({clientHead:git('.','rev-parse','HEAD'),
   clientTree:git('.','rev-parse','HEAD^{tree}'), coreHead:expected,

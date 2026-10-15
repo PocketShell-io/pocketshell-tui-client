@@ -12,7 +12,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { save } from '../src/account/credentials.js';
-import { holderRunning, stopHolder } from '../src/vault/holder.js';
+import { connect } from 'node:net';
+import { spawn as spawnChild } from 'node:child_process';
+import { holderCredential, holderRunning, holderSocket, stopHolder } from '../src/vault/holder.js';
+import { accountKey } from '../src/vault/remember.js';
 import { buildVault, sshKeygen, type BuiltVault } from './vaultFixture.js';
 
 const ROOT = resolve(__dirname, '..');
@@ -24,6 +27,7 @@ let base = '';
 let slots = new Map<string, string>();
 let hits: string[] = [];
 let verifyAnswer: { status: number; body: unknown } | null = null;
+let routeMissing = false;
 
 beforeAll(async () => {
   const k = sshKeygen('ed25519');
@@ -38,7 +42,7 @@ beforeAll(async () => {
       };
       if (req.headers.authorization !== `Bearer ${TOKEN}`) return send(401, { error: 'invalid_token' });
       const m = /^\/cli\/settings\/([A-Za-z0-9_-]+)$/.exec(req.url ?? '');
-      if (req.method === 'GET' && m) {
+      if (req.method === 'GET' && m && !routeMissing) {
         const data = slots.get(m[1]!);
         return data === undefined ? send(404, { error: 'not_found' }) : send(200, { slot: m[1], version: 1, updatedAt: 'x', size: data.length, data });
       }
@@ -69,6 +73,7 @@ beforeEach(() => {
   slots = new Map(built.slots);
   hits = [];
   verifyAnswer = null;
+  routeMissing = false;
   save({ brokerUrl: base, accessToken: TOKEN, tokenId: 'tok_v', email: 'you@example.com', expiresAt: Math.floor(Date.now() / 1000) + 86400, label: 'me@box' });
 });
 afterEach(async () => {
@@ -150,6 +155,32 @@ describe('psc vault', () => {
     expect(json((await psc(['vault', 'status', '--json'])).stdout)).toMatchObject({ unlocked: false });
   }, 120_000);
 
+  it('the holder acts as the agent: a signing socket per key, never the DEK, AUTH or private key', async () => {
+    const r = await psc(['vault', 'unlock', '--json'], PASS);
+    expect(json(r.stdout)).toMatchObject({ held: true });
+    const id = accountKey(base, 'you@example.com');
+    const held = await holderCredential(id, { alias: 'box' });
+    expect(held).toMatchObject({ gatewayAuth: 'managed', credential: { password: false } });
+    const listed = await new Promise<string>((done) => {
+      const c = spawnChild('ssh-add', ['-L'], { env: { ...process.env, SSH_AUTH_SOCK: held!.credential.agentSocket! } });
+      let out = '';
+      c.stdout.on('data', (d: Buffer) => (out += d.toString()));
+      c.on('close', () => done(out));
+    });
+    expect(listed).toMatch(/^ssh-ed25519 /);
+    expect(await holderCredential(id, { alias: 'unbound-host' })).toBeNull();
+    expect(await holderCredential('other-account', { alias: 'box' })).toBeUndefined();
+    const raw = await new Promise<string>((done) => {
+      const s = connect(holderSocket(), () => s.write(`${JSON.stringify({ op: 'status', account: id })}\n`));
+      let out = '';
+      s.on('data', (d: Buffer) => (out += d.toString()));
+      s.on('end', () => done(out));
+    });
+    expect(JSON.parse(raw)).toMatchObject({ unlocked: true, keys: [{ name: 'box key' }] });
+    expect(raw).not.toMatch(/"dek"|"auth"|PRIVATE KEY/);
+    expect(statSync(holderSocket()).mode & 0o777).toBe(0o600);
+  }, 120_000);
+
   it('the holder locks itself after the idle timeout', async () => {
     process.env.PSC_VAULT_IDLE_MINUTES = '0.02';
     const r = await psc(['vault', 'unlock', '--json'], PASS);
@@ -195,6 +226,17 @@ describe('psc vault', () => {
     expect(r.code).toBe(1);
     expect(json(r.stdout)).toMatchObject({ ok: false, error: { code: 'VAULT_RATE_LIMITED' } });
     expect(hits).toContain('POST /cli/vault/verify');
+  }, 60_000);
+
+  it('typed transport failures survive: a dead login is NOT_LOGGED_IN (exit 3), a missing route VAULT_UNAVAILABLE', async () => {
+    save({ brokerUrl: base, accessToken: `psc_${'C'.repeat(43)}`, tokenId: 'tok_x', email: 'you@example.com', expiresAt: Math.floor(Date.now() / 1000) + 86400, label: 'me@box' });
+    const dead = await psc(['vault', 'status', '--json']);
+    expect(dead.code).toBe(3);
+    expect(json(dead.stdout)).toMatchObject({ ok: false, error: { code: 'NOT_LOGGED_IN' } });
+    save({ brokerUrl: base, accessToken: TOKEN, tokenId: 'tok_v', email: 'you@example.com', expiresAt: Math.floor(Date.now() / 1000) + 86400, label: 'me@box' });
+    routeMissing = true;
+    const missing = await psc(['vault', 'status', '--json']);
+    expect(json(missing.stdout)).toMatchObject({ ok: false, error: { code: 'VAULT_UNAVAILABLE' } });
   }, 60_000);
 
   it('vault bind sets and clears a local override on a saved host', async () => {

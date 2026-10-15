@@ -12,18 +12,19 @@ import {
   cliAccount,
   holdVault,
   hostKey,
+  KeyVaultStore,
   lockVault,
   refreshBindings,
+  resultError,
   rememberVault,
   storeFor,
   unlockRemembered,
   VaultError,
   type CachedBinding,
-  type KeyVaultStore,
   type VaultAccount,
 } from '../vault/index.js';
 import { PASSPHRASE_FD_ENV } from '../vault/passphrase.js';
-import { idleMs, runHolder } from '../vault/holder.js';
+import { holderStatus, idleMs, runHolder, type HolderStatus } from '../vault/holder.js';
 import { keychain, loadRemembered, rememberFile } from '../vault/remember.js';
 import { KEYS_URL, RESET_URL, unlockInteractively } from '../vault/session.js';
 import { action, jsonOption } from './common.js';
@@ -60,7 +61,11 @@ function accountOrExplain(): VaultAccount {
   return cliAccount();
 }
 
-function describeBinding(store: KeyVaultStore | null, binding: CachedBinding): Record<string, unknown> {
+interface KeyLookup {
+  getKey(keyId: string): { name: string; type: string } | null;
+}
+
+function describeBinding(store: KeyLookup | null, binding: CachedBinding): Record<string, unknown> {
   const key = store?.getKey(binding.keyId) ?? null;
   return {
     keyId: binding.keyId,
@@ -71,7 +76,7 @@ function describeBinding(store: KeyVaultStore | null, binding: CachedBinding): R
   };
 }
 
-function hostRows(store: KeyVaultStore | null, accountId: string, hosts: readonly HostEntry[]): Array<Record<string, unknown>> {
+function hostRows(store: KeyLookup | null, accountId: string, hosts: readonly HostEntry[]): Array<Record<string, unknown>> {
   return hosts
     .filter((h) => h.mode !== 'local')
     .map((h) => {
@@ -85,7 +90,10 @@ export function registerVault(program: Command): void {
 
   // The memory-only holder process (started by `vault unlock`); not for direct use.
   vault.command('__hold', { hidden: true }).action(async () => {
-    await runHolder();
+    await runHolder((id) => {
+      const account = cliAccount();
+      return account.id === id ? new KeyVaultStore({ transport: account.transport, verifier: account.verifier }) : null;
+    });
   });
 
   jsonOption(
@@ -182,24 +190,28 @@ export function registerVault(program: Command): void {
         );
         return;
       }
-      if (probe.kind === 'corrupt') throw new VaultError('The vault on your account is malformed.', 'VAULT_MALFORMED');
+      if (probe.kind === 'corrupt' || probe.kind === 'unsupportedVersion' || probe.kind === 'error') throw resultError(probe);
       let remembered: string | null = null;
       try {
         remembered = await unlockRemembered(account, store);
       } catch (error) {
         process.stderr.write(`warning: ${(error as Error).message}\n`);
       }
-      const unlocked = store.state === 'unlocked';
+      const held: HolderStatus | null = store.state === 'unlocked' ? null : await holderStatus(account.id);
+      if (held !== null) remembered = 'holder';
+      const unlocked = store.state === 'unlocked' || held !== null;
       const hosts = listHosts();
-      if (unlocked) await refreshBindings(account, store, hosts);
-      const keys = store.listKeys().map((k) => ({
+      if (store.state === 'unlocked') await refreshBindings(account, store, hosts);
+      const keyList = held?.keys ?? store.listKeys();
+      const keys = keyList.map((k) => ({
         keyId: k.keyId,
         name: cleanText(k.name),
         type: k.type,
         fingerprint: k.fingerprint ?? null,
         createdAt: k.createdAt ?? null,
       }));
-      const rows = hostRows(unlocked ? store : null, account.id, hosts);
+      const lookup = { getKey: (id: string) => keyList.find((k) => k.keyId === id) ?? null };
+      const rows = hostRows(unlocked ? lookup : null, account.id, hosts);
       emit(
         {
           ok: true,
@@ -262,10 +274,12 @@ export function registerVault(program: Command): void {
             // A key name needs the unlocked index to resolve.
             const account = accountOrExplain();
             const store = storeFor(account);
-            if (store.state !== 'unlocked' && (await unlockRemembered(account, store)) === null) {
-              await unlockInteractively(store);
+            let keyList = store.state === 'unlocked' ? store.listKeys() : (await holderStatus(account.id))?.keys ?? null;
+            if (keyList === null) {
+              if ((await unlockRemembered(account, store)) === null) await unlockInteractively(store);
+              keyList = store.listKeys();
             }
-            const matches = store.listKeys().filter((k) => k.name === opts.key || k.keyId === opts.key);
+            const matches = keyList.filter((k) => k.name === opts.key || k.keyId === opts.key);
             if (matches.length !== 1) {
               throw new VaultError(
                 matches.length === 0 ? `no vault key named ${JSON.stringify(opts.key)} (see \`psc vault status\`)` : `${matches.length} vault keys are named ${JSON.stringify(opts.key)}; pass the key id`,

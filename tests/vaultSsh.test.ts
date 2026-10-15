@@ -36,6 +36,7 @@ function run(file: string, args: string[], options: { env?: NodeJS.ProcessEnv; i
     child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
     child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
     child.on('close', (status) => resolve({ status, stdout, stderr }));
+    child.stdin.on('error', () => {}); // the child may exit without reading
     child.stdin.end(options.input ?? '');
   });
 }

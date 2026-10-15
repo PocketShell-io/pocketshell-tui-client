@@ -31,7 +31,7 @@ import {
   type VaultSlotTransport,
 } from '@pocketshell/core';
 import { isKeyId, VaultError, type GatewayAuth, type VaultSecret } from './format.js';
-import { heldRecord, startHolder, stopHolder } from './holder.js';
+import { startHolder, stopHolder } from './holder.js';
 import { accountKey, forgetRemembered, loadRemembered, saveRemembered, type RememberBackend, type RememberRecord } from './remember.js';
 import { decryptSyncEnvelope, parseAccountHosts, type AccountHost } from './syncEnvelope.js';
 
@@ -47,6 +47,9 @@ export type {
 export { VaultError, type GatewayAuth, type VaultSecret } from './format.js';
 
 const READ_ONLY = 'psc reads the vault only; manage keys on the web';
+
+/** The last typed transport failure (NOT_LOGGED_IN, VAULT_UNAVAILABLE, ...), so its code survives core's result. */
+let lastPullError: Error | null = null;
 
 /** The account a store belongs to, plus how to reach its slots. */
 export interface VaultAccount {
@@ -69,6 +72,7 @@ export function cliAccount(options: broker.HttpOptions = {}): VaultAccount {
           return got === null ? { kind: 'absent' } : { kind: 'ok', version: got.version, data: got.data };
         } catch (error) {
           if ((error as { code?: unknown }).code === 'VAULT_VERIFY_REQUIRED') return { kind: 'gated' };
+          lastPullError = error as Error; // core folds it into {kind:'error'}; resultError restores it
           throw error;
         }
       },
@@ -111,9 +115,6 @@ export function storeFor(account: VaultAccount): KeyVaultStore {
   return store;
 }
 
-/** Where an unlocked vault came from without a passphrase. */
-export type UnlockSource = RememberBackend | 'holder';
-
 async function unlockWithRecord(store: KeyVaultStore, record: RememberRecord): Promise<'ok' | 'stale'> {
   const dek = new Uint8Array(Buffer.from(record.dek, 'base64url'));
   const auth = record.auth ? new Uint8Array(Buffer.from(record.auth, 'base64url')) : null;
@@ -128,25 +129,25 @@ async function unlockWithRecord(store: KeyVaultStore, record: RememberRecord): P
         1,
       );
     }
-    if (result.kind === 'corrupt') throw new VaultError('The vault on your account is malformed.', 'VAULT_MALFORMED');
-    throw new VaultError(`Could not unlock with the remembered key: ${result.message}`, 'VAULT_ERROR');
+    throw resultError(result);
   } finally {
     dek.fill(0);
     auth?.fill(0);
   }
 }
 
-/**
- * Unlock without a passphrase: from the vault holder (an earlier `psc
- * vault unlock` in this login), else this device's remembered record. A
- * stale source is dropped. Null when neither opens the vault.
- */
-export async function unlockRemembered(account: VaultAccount, store: KeyVaultStore): Promise<UnlockSource | null> {
-  const held = await heldRecord(account.id);
-  if (held !== null) {
-    if ((await unlockWithRecord(store, held)) === 'ok') return 'holder';
-    await stopHolder();
+/** Errors for the unlock outcomes every path shares. */
+export function resultError(result: { kind: string; message?: string }): Error {
+  if (result.kind === 'error' && lastPullError !== null && result.message?.includes(lastPullError.message)) return lastPullError;
+  if (result.kind === 'unsupportedVersion') {
+    return new VaultError('Your vault uses a newer format than this psc understands; update psc (npm i -g @pocketshell/tui-client).', 'VAULT_UNSUPPORTED', 1);
   }
+  if (result.kind === 'corrupt') return new VaultError('The vault on your account is malformed.', 'VAULT_MALFORMED', 1);
+  return new VaultError(`Could not unlock the vault: ${result.message ?? result.kind}`, 'VAULT_ERROR', 1);
+}
+
+/** Unlock from this device's remembered record (no passphrase); a stale one is deleted. */
+export async function unlockRemembered(account: VaultAccount, store: KeyVaultStore): Promise<RememberBackend | null> {
   const remembered = loadRemembered(account.id);
   if (remembered === null) return null;
   if ((await unlockWithRecord(store, remembered.record)) === 'ok') return remembered.backend;

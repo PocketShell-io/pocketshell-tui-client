@@ -6,6 +6,7 @@
 import { requests } from '../daemon/context.js';
 import { listHosts, type HostEntry } from '../hosts/store.js';
 import { startCredential, type SshCredential } from './agent.js';
+import { holderCredential } from './holder.js';
 import { VaultError, type GatewayAuth } from './format.js';
 import {
   bindingFor,
@@ -13,6 +14,7 @@ import {
   cliAccount,
   holdVault,
   refreshBindings,
+  resultError,
   secretOrThrow,
   storeFor,
   unlockRemembered,
@@ -39,12 +41,19 @@ export interface UnlockFlowOptions {
 
 const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+let terminalPromptAllowed = true;
+
+/** The TUI owns the terminal: a locked connect there reports VAULT_LOCKED instead of prompting. */
+export function setTerminalPromptAllowed(allowed: boolean): void {
+  terminalPromptAllowed = allowed;
+}
+
 /** The default passphrase source for this process, or null when there is none. */
 export function defaultPassphraseSource(): { read: (attempt: number) => Promise<string>; retry: boolean } | null {
   const fd = passphraseFd();
   if (fd !== null) return { read: async () => readPassphraseFd(fd), retry: false };
-  // Never prompt from inside the resident daemon (no terminal there).
-  if (requests.getStore() === undefined && canPrompt()) {
+  // Never prompt from inside the resident daemon (no terminal there) or under the TUI.
+  if (terminalPromptAllowed && requests.getStore() === undefined && canPrompt()) {
     return {
       read: (attempt) => promptPassphrase(attempt === 0 ? 'Vault passphrase: ' : 'Vault passphrase (try again): '),
       retry: true,
@@ -92,9 +101,9 @@ export async function unlockInteractively(store: KeyVaultStore, options: UnlockF
           1,
         );
       case 'corrupt':
-        throw new VaultError('The vault on your account is malformed.', 'VAULT_MALFORMED', 1);
       case 'error':
-        throw new VaultError(`Could not unlock the vault: ${result.message}`, 'VAULT_ERROR', 1);
+      case 'unsupportedVersion':
+        throw resultError(result);
       case 'rateLimited':
         throw new VaultError(
           `Too many wrong passphrases; the vault is locked for ${Math.ceil(result.retryAfterMs / 1000)}s. Try again later. ${FORGOT}`,
@@ -146,6 +155,14 @@ export interface VaultConnectCredential {
   keyId: string;
 }
 
+function passwordOnGateway(host: HostEntry): VaultError {
+  return new VaultError(
+    `${host.name} is bound to a vault password, but gateway connections use SSH keys only; bind a key on the web.`,
+    'VAULT_PASSWORD_UNSUPPORTED',
+    2,
+  );
+}
+
 function accountOrNull(): VaultAccount | null {
   try {
     return cliAccount();
@@ -170,17 +187,21 @@ export async function vaultCredentialFor(
   if (account === null) {
     throw new VaultError(`${host.name} uses a key from your PocketShell vault; log in first (\`psc login\`).`, 'NOT_LOGGED_IN', 3);
   }
+  // An unlock held by the holder: it serves the agent; no key enters this process.
+  const held = await holderCredential(account.id, {
+    alias: cached.alias,
+    ...(host.vault?.keyId ? { keyId: host.vault.keyId, ...(host.vault.gatewayAuth ? { gatewayAuth: host.vault.gatewayAuth } : {}) } : {}),
+  });
+  if (held === null) return null;
+  if (held !== undefined) {
+    if (held.credential.password && host.mode === 'gateway') throw passwordOnGateway(host);
+    return held;
+  }
   const store = await obtainUnlockedStore(account, options.unlock);
   // The index is authoritative over the cache: the binding may have moved.
   const binding = bindingFor(host, store, cached.alias);
   if (binding === null || binding.gatewayAuth === 'host') return null;
   const secret = secretOrThrow(await store.decryptKey(binding.keyId));
-  if (secret.kind === 'password' && host.mode === 'gateway') {
-    throw new VaultError(
-      `${host.name} is bound to a vault password, but gateway connections use SSH keys only; bind a key on the web.`,
-      'VAULT_PASSWORD_UNSUPPORTED',
-      2,
-    );
-  }
+  if (secret.kind === 'password' && host.mode === 'gateway') throw passwordOnGateway(host);
   return { credential: await startCredential(secret), gatewayAuth: binding.gatewayAuth, keyId: binding.keyId };
 }
