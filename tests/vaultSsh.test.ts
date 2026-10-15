@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startCredential } from '../src/vault/agent.js';
 import { parsePrivateKey, publicKeyLine } from '../src/vault/sshKey.js';
-import { buildSshArgv } from '../src/transport/ssh.js';
+import { buildSshArgv, OpenSshConnection } from '../src/transport/ssh.js';
 import { expectedPasswordPrompt, parseSshG } from '../src/vault/sshPrompt.js';
 import { findSsh, runSshCaptured } from '../src/transport/openssh.js';
 import { sshKeygen } from './vaultFixture.js';
@@ -105,7 +105,9 @@ describe('askpass helper', () => {
   it('answers only the exact host prompt, and only once', async () => {
     const cred = await startCredential({ kind: 'password', password: 'pw for tests' }, { expectPrompt: PROMPT });
     try {
-      const askpass = cred.env.SSH_ASKPASS!;
+      expect(cred.env).toEqual({});
+      const helper = await cred.forSpawn!();
+      const askpass = helper.env.SSH_ASKPASS!;
       const hostKey = await run(askpass, ['Are you sure you want to continue connecting (yes/no/[fingerprint])?']);
       expect(hostKey.status).not.toBe(0);
       const jump = await run(askpass, ["u@jump.example's password: "]);
@@ -117,6 +119,13 @@ describe('askpass helper', () => {
       const again = await run(askpass, [PROMPT]);
       expect(again.status).not.toBe(0);
       expect(again.stdout).toBe('');
+      // The next ssh spawn gets its own fresh helper.
+      const next = await cred.forSpawn!();
+      expect(next.env.SSH_ASKPASS).not.toBe(askpass);
+      expect((await run(next.env.SSH_ASKPASS!, [PROMPT])).stdout).toBe('pw for tests\n');
+      await next.done();
+      await helper.done();
+      expect(existsSync(askpass)).toBe(false);
       expect(cred.options).toEqual(expect.arrayContaining(['PreferredAuthentications=password', 'KbdInteractiveAuthentication=no', 'ForwardAgent=no']));
     } finally {
       await cred.close();
@@ -214,30 +223,48 @@ describe.skipIf(!sshdUsable)('end to end: a private sshd accepts the vault key',
     expect(out.stdout.trim()).toBe('not-forwarded');
   }, 30_000);
 
-  it("a vault password is offered to this host's real prompt (computed with ssh -G)", async () => {
+  it("a vault password answers this host's real prompt on every ssh spawn (no master)", async () => {
     const user = process.env.USER ?? 'nobody';
     const config = { destination: '127.0.0.1', port, user };
     const expectPrompt = await expectedPasswordPrompt(config);
     expect(expectPrompt).toBe(`${user}@127.0.0.1's password: `);
     const cred = await startCredential({ kind: 'password', password: 'wrong-on-purpose' }, { expectPrompt });
+    // Record, before each helper is cleaned up, whether ssh spent its one answer.
+    const spent: boolean[] = [];
+    const mint = cred.forSpawn!.bind(cred);
+    cred.forSpawn = async () => {
+      const helper = await mint();
+      return {
+        env: helper.env,
+        done: async () => {
+          spent.push((await run(helper.env.SSH_ASKPASS!, [expectPrompt])).stdout === '');
+          await helper.done();
+        },
+      };
+    };
+    const known = join(dir, 'known_hosts');
+    // An OpenSshConnection without a control socket: every exec is a fresh ssh that must authenticate.
+    const connection = new OpenSshConnection('pw-host', config, findSsh(), null, {
+      credential: cred,
+      gatewayAuth: 'managed',
+      keyId: 'cHdkLWVudHJ5LTAwMDAwMA',
+    });
+    const hermetic = connection.argv.bind(connection);
+    connection.argv = (kind, command) => {
+      const argv = hermetic(kind, command);
+      argv.splice(argv.indexOf('--'), 0, '-F', 'none', '-o', `UserKnownHostsFile=${known}`, '-o', 'GlobalKnownHostsFile=/dev/null');
+      return argv;
+    };
     try {
-      const argv = buildSshArgv({
-        config,
-        controlPath: null,
-        kind: 'exec',
-        command: 'true',
-        vault: { options: cred.options, password: true, keepOwnIdentity: false },
-      });
-      argv.splice(argv.indexOf('--'), 0, '-F', 'none', '-o', `UserKnownHostsFile=${join(dir, 'known_hosts')}`, '-o', 'GlobalKnownHostsFile=/dev/null');
-      const out = await runSshCaptured(findSsh(), argv, { timeoutMs: 20_000, env: { ...process.env, ...cred.env } });
-      // Non-root sshd cannot check passwords: the attempt fails, but it was made.
-      expect(out.exitCode).toBe(255);
-      const again = await run(cred.env.SSH_ASKPASS!, [expectPrompt]);
-      expect(again.stdout).toBe(''); // the one answer was spent on ssh's real prompt
+      for (let i = 0; i < 2; i++) {
+        // Non-root sshd cannot check passwords: auth fails, but each spawn really offered one.
+        await expect(connection.exec('true', { timeoutMs: 20_000 })).rejects.toBeTruthy();
+      }
+      expect(spent).toEqual([true, true]);
     } finally {
-      await cred.close();
+      await connection.close();
     }
-  }, 30_000);
+  }, 60_000);
 
   it('a key the host does not know is refused', async () => {
     const out = await login(other.pem);

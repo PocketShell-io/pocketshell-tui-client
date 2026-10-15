@@ -20,6 +20,7 @@ import {
 } from './openssh.js';
 import { runInteractive } from './process.js';
 import type { VaultConnectCredential } from '../vault/session.js';
+import { spawnHelper } from '../vault/agent.js';
 import { ConnectionError, type AttachOptions, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
 
 export interface SshArgvInput {
@@ -115,8 +116,11 @@ export class OpenSshConnection implements Connection {
     };
   }
 
-  private env(): NodeJS.ProcessEnv {
-    return this.vault ? { ...process.env, ...this.vault.credential.env } : process.env;
+  /** The env for one ssh spawn (a fresh one-shot password helper when needed) and its cleanup. */
+  private async spawnEnv(): Promise<{ env: NodeJS.ProcessEnv; done: () => Promise<void> }> {
+    if (!this.vault) return { env: process.env, done: async () => {} };
+    const helper = await spawnHelper(this.vault.credential);
+    return { env: { ...process.env, ...helper.env }, done: helper.done };
   }
 
   argv(kind: 'exec' | 'attach', command: string): string[] {
@@ -124,7 +128,13 @@ export class OpenSshConnection implements Connection {
   }
 
   async exec(command: string, options: ExecOptions): Promise<ExecOutcome> {
-    const outcome = await runSshCaptured(this.sshPath, this.argv('exec', command), { ...options, env: this.env() });
+    const spawn = await this.spawnEnv();
+    let outcome: ExecOutcome;
+    try {
+      outcome = await runSshCaptured(this.sshPath, this.argv('exec', command), { ...options, env: spawn.env });
+    } finally {
+      await spawn.done();
+    }
     const failure = await explainSshExit(
       outcome,
       {
@@ -141,8 +151,13 @@ export class OpenSshConnection implements Connection {
     return outcome;
   }
 
-  attachInteractive(command: string, options: AttachOptions = {}): Promise<number | null> {
-    return runInteractive(this.sshPath, this.argv('attach', command), this.env(), options);
+  async attachInteractive(command: string, options: AttachOptions = {}): Promise<number | null> {
+    const spawn = await this.spawnEnv();
+    try {
+      return await runInteractive(this.sshPath, this.argv('attach', command), spawn.env, options);
+    } finally {
+      await spawn.done();
+    }
   }
 
   async close(): Promise<void> {

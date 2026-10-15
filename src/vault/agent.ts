@@ -99,7 +99,24 @@ export interface SshCredential {
   env: Record<string, string>;
   /** Password auth needs prompts: the caller must drop BatchMode. */
   password: boolean;
+  /**
+   * Passwords: a fresh one-shot askpass helper for ONE ssh spawn (its env,
+   * and `done` once that ssh exits). Every exec/attach mints its own, so a
+   * re-authentication (master expired, no control dir, racing execs) works.
+   */
+  forSpawn?(): Promise<SpawnHelper>;
   close(): Promise<void>;
+}
+
+export interface SpawnHelper {
+  env: Record<string, string>;
+  done(): Promise<void>;
+}
+
+/** The env for one ssh spawn with `credential`, and its cleanup. */
+export async function spawnHelper(credential: SshCredential | undefined): Promise<SpawnHelper> {
+  if (credential?.forSpawn) return credential.forSpawn();
+  return { env: credential?.env ?? {}, done: async () => {} };
 }
 
 /** POSIX single-quoted shell word. */
@@ -170,28 +187,39 @@ export async function startCredential(secret: VaultSecret, options: { expectProm
     if (!options.expectPrompt || /[\x00-\x1f\x7f]/.test(options.expectPrompt)) {
       throw new VaultError('a vault password needs the exact host prompt to answer', 'VAULT_PASSWORD_UNSUPPORTED', 2);
     }
-    let password: string | null = secret.password;
-    const sock = join(dir, `ap-${randomBytes(8).toString('hex')}.sock`);
-    // One answer, then the helper is gone: NumberOfPasswordPrompts=1 means
-    // ssh never asks twice, and nothing else gets the password later.
-    const server = createServer((socket) => {
-      socket.on('error', () => socket.destroy());
-      const answer = password;
-      password = null;
-      socket.end(answer ?? '');
-      server.close();
-    });
-    servers.push(server);
-    await listen(server, sock);
-    chmodSync(sock, 0o600);
-    const expiry = setTimeout(() => {
-      password = null;
-      server.close();
-    }, PASSWORD_HELPER_TTL_MS);
-    expiry.unref();
     if (/["$`\\]/.test(process.execPath)) throw new VaultError('cannot build the askpass helper for this node path', 'VAULT_UNSUPPORTED_PLATFORM', 2);
-    const script = join(dir, 'askpass');
-    writeFileSync(script, ASKPASS_SCRIPT(process.execPath, sock, options.expectPrompt), { mode: 0o700 });
+    const expectPrompt = options.expectPrompt;
+    // Held for this Connection (until close), handed out only through
+    // one-shot helpers: one answer per ssh spawn, then that helper is gone.
+    let password: string | null = secret.password;
+    const mint = async (): Promise<SpawnHelper> => {
+      if (password === null) throw new VaultError('The vault password is no longer held; run `psc vault unlock`.', 'VAULT_LOCKED', 3);
+      const id = randomBytes(8).toString('hex');
+      const sock = join(dir, `ap-${id}.sock`);
+      const script = join(dir, `askpass-${id}`);
+      let answer: string | null = password;
+      const server = createServer((socket) => {
+        socket.on('error', () => socket.destroy());
+        const value = answer;
+        answer = null;
+        socket.end(value ?? '');
+        server.close();
+      });
+      servers.push(server);
+      await listen(server, sock);
+      chmodSync(sock, 0o600);
+      writeFileSync(script, ASKPASS_SCRIPT(process.execPath, sock, expectPrompt), { mode: 0o700 });
+      const done = async (): Promise<void> => {
+        answer = null;
+        clearTimeout(expiry);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        rmSync(script, { force: true });
+        rmSync(sock, { force: true });
+      };
+      const expiry = setTimeout(() => void done(), PASSWORD_HELPER_TTL_MS);
+      expiry.unref();
+      return { env: { SSH_ASKPASS: script, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: process.env.DISPLAY ?? ':0' }, done };
+    };
     return {
       options: [
         // Password only: keyboard-interactive prompts come from the server
@@ -202,9 +230,13 @@ export async function startCredential(secret: VaultSecret, options: { expectProm
         'NumberOfPasswordPrompts=1',
         'ForwardAgent=no',
       ],
-      env: { SSH_ASKPASS: script, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: process.env.DISPLAY ?? ':0' },
+      env: {},
       password: true,
-      close,
+      forSpawn: mint,
+      close: async () => {
+        password = null;
+        await close();
+      },
     };
   } catch (error) {
     await close();

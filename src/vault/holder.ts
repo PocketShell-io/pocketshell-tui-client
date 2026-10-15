@@ -24,7 +24,7 @@ import { dirname, join } from 'node:path';
 import type { HostKeyBinding, KeyVaultStore, VaultKeyEntry } from '@pocketshell/core';
 import { cliInvocation } from '../transport/gateway.js';
 import { controlDir } from '../transport/openssh.js';
-import { startCredential, type SshCredential } from './agent.js';
+import { PASSWORD_HELPER_TTL_MS, startCredential, type SshCredential } from './agent.js';
 import { VaultError, type GatewayAuth } from './format.js';
 import type { RememberRecord } from './remember.js';
 
@@ -160,6 +160,10 @@ export async function holderCredential(
   if (answer.none === true) return null;
   const c = answer.credential as { identityFile?: unknown; agentSocket?: unknown; options?: unknown; env?: unknown; password?: unknown };
   if (!c || !Array.isArray(c.options) || typeof answer.keyId !== 'string') return undefined;
+  const envOf = (value: unknown): Record<string, string> => (typeof value === 'object' && value !== null ? (value as Record<string, string>) : {});
+  const password = c.password === true;
+  // The first spawn uses the helper this answer minted; every later spawn asks again.
+  let first: Record<string, string> | null = password ? envOf(c.env) : null;
   return {
     keyId: answer.keyId,
     gatewayAuth: answer.gatewayAuth as GatewayAuth,
@@ -167,9 +171,25 @@ export async function holderCredential(
       ...(typeof c.identityFile === 'string' ? { identityFile: c.identityFile } : {}),
       ...(typeof c.agentSocket === 'string' ? { agentSocket: c.agentSocket } : {}),
       options: c.options.filter((o): o is string => typeof o === 'string'),
-      env: (typeof c.env === 'object' && c.env !== null ? c.env : {}) as Record<string, string>,
-      password: c.password === true,
-      // The holder owns the agent; it lives until the holder locks.
+      env: password ? {} : envOf(c.env),
+      password,
+      ...(password
+        ? {
+            forSpawn: async () => {
+              let env = first;
+              first = null;
+              if (env === null) {
+                const again = await holderCredential(account, binding);
+                if (!again?.credential.password || !again.credential.forSpawn) {
+                  throw new VaultError('The vault is locked; run `psc vault unlock`.', 'VAULT_LOCKED', 3);
+                }
+                return again.credential.forSpawn();
+              }
+              return { env, done: async () => {} };
+            },
+          }
+        : {}),
+      // The holder owns agents and helpers; they live until it locks or they expire.
       close: async () => {},
     },
   };
@@ -279,7 +299,13 @@ export async function runHolder(
       const secret = await store.decryptKey(binding.keyId);
       if (secret.kind === 'key') return startCredential(secret);
       // A password helper is one-shot and per request: it is never cached here.
-      if (secret.kind === 'password') return startCredential(secret, request.expectPrompt ? { expectPrompt: request.expectPrompt } : {});
+      if (secret.kind === 'password') {
+        const cred = await startCredential(secret, request.expectPrompt ? { expectPrompt: request.expectPrompt } : {});
+        const helper = await cred.forSpawn!();
+        // The credential (and the password in it) goes when its single helper does.
+        setTimeout(() => void cred.close(), PASSWORD_HELPER_TTL_MS + 1000).unref();
+        return { ...cred, env: helper.env };
+      }
       const relock = secret.kind === 'gated' || secret.kind === 'locked';
       throw new VaultError(
         secret.kind === 'missingKey'

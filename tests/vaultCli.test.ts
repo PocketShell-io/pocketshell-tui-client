@@ -32,7 +32,12 @@ let unconfigured = false;
 
 beforeAll(async () => {
   const k = sshKeygen('ed25519');
-  built = await buildVault({ passphrase: PASS, keys: [{ name: 'box key', pem: k.pem }], hosts: { box: { key: 'box key', gatewayAuth: 'managed' } } });
+  built = await buildVault({
+    passphrase: PASS,
+    keys: [{ name: 'box key', pem: k.pem }],
+    passwords: [{ name: 'nas password', password: 'nas-pw-for-tests' }],
+    hosts: { box: { key: 'box key', gatewayAuth: 'managed' }, nasbox: { key: 'nas password', gatewayAuth: 'managed' } },
+  });
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
     req.resume();
     req.on('end', () => {
@@ -126,7 +131,7 @@ describe('psc vault', () => {
   it('unlock --remember-file --json, then status without a passphrase, then lock', async () => {
     const r = await psc(['vault', 'unlock', '--remember-file', '--json'], PASS);
     expect(r.code, r.stderr).toBe(0);
-    expect(json(r.stdout)).toMatchObject({ ok: true, unlocked: true, remembered: 'file', keys: 1 });
+    expect(json(r.stdout)).toMatchObject({ ok: true, unlocked: true, remembered: 'file', keys: 2 });
     expect(r.stdout + r.stderr).not.toContain(PASS);
     expect(r.stderr).toMatch(/0600/);
     const file = join(xdg, 'pocketshell-tui-client', 'vault-remember.json');
@@ -135,7 +140,7 @@ describe('psc vault', () => {
 
     const s = await psc(['vault', 'status', '--json']);
     expect(s.code, s.stderr).toBe(0);
-    expect(json(s.stdout)).toMatchObject({ ok: true, vault: true, unlocked: true, remembered: 'file', keys: [{ name: 'box key', type: 'ssh-ed25519' }] });
+    expect(json(s.stdout)).toMatchObject({ ok: true, vault: true, unlocked: true, remembered: 'file', keys: expect.arrayContaining([expect.objectContaining({ name: 'box key', type: 'ssh-ed25519' })]) });
 
     const l = await psc(['vault', 'lock', '--json']);
     expect(json(l.stdout)).toMatchObject({ ok: true, locked: true, forgot: 'file' });
@@ -179,7 +184,7 @@ describe('psc vault', () => {
       s.on('data', (d: Buffer) => (out += d.toString()));
       s.on('end', () => done(out));
     });
-    expect(JSON.parse(raw)).toMatchObject({ unlocked: true, keys: [{ name: 'box key' }] });
+    expect(JSON.parse(raw)).toMatchObject({ unlocked: true, keys: expect.arrayContaining([expect.objectContaining({ name: 'box key' })]) });
     expect(raw).not.toMatch(/"dek"|"auth"|PRIVATE KEY/);
     expect(statSync(holderSocket()).mode & 0o777).toBe(0o600);
   }, 120_000);
@@ -198,6 +203,27 @@ describe('psc vault', () => {
     });
     expect(await holderRunning()).toBe(false);
     expect(left.trim()).toBe('');
+  }, 120_000);
+
+  it('holder passwords: a fresh one-shot helper for every ssh spawn', async () => {
+    expect(json((await psc(['vault', 'unlock', '--json'], PASS)).stdout)).toMatchObject({ held: true });
+    const id = accountKey(base, 'you@example.com');
+    const prompt = "u@nas.example's password: ";
+    const held = await holderCredential(id, { alias: 'nasbox', expectPrompt: prompt });
+    expect(held!.credential.password).toBe(true);
+    const ask = (askpass: string): Promise<string> =>
+      new Promise((done) => {
+        const c = spawnChild(askpass, [prompt]);
+        let out = '';
+        c.stdout.on('data', (d: Buffer) => (out += d.toString()));
+        c.on('close', () => done(out));
+      });
+    for (let i = 0; i < 3; i++) {
+      const helper = await held!.credential.forSpawn!();
+      expect(await ask(helper.env.SSH_ASKPASS!)).toBe('nas-pw-for-tests\n');
+      expect(await ask(helper.env.SSH_ASKPASS!)).toBe(''); // one-shot
+      await helper.done();
+    }
   }, 120_000);
 
   it('the holder locks itself after the idle timeout', async () => {
