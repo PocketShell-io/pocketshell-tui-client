@@ -46,6 +46,12 @@ interface Slot {
   replica?: Replica;
   sessionsSubscription?: string;
   screens: Map<string, ScreenMirror>;
+  /**
+   * Applied push frames (any topic). A live round trip records this before
+   * dispatch and stores its answer only when unchanged afterwards, so a
+   * newer pushed state is never overwritten by an older response.
+   */
+  pushCount: number;
 }
 const slots = new Map<string, Slot>();
 const unsupported = new Map<string, { generation: string; until: number }>();
@@ -85,11 +91,13 @@ function routeEvent(hostName: string, channel: HostChannel, frame: EventFrame): 
           receivedAt: Date.now(),
           stale: false,
         };
+        slot.pushCount++;
       } else if (frame.event === 'heartbeat' && slot.replica) {
         if (frame.generation) {
           if (!slot.replica.generation) slot.replica.generation = frame.generation;
           else if (frame.generation !== slot.replica.generation) {
             slot.replica = undefined; // a different helper generation: retire the replica
+            slot.pushCount++;
             return;
           }
         }
@@ -97,10 +105,12 @@ function routeEvent(hostName: string, channel: HostChannel, frame: EventFrame): 
           // No data: the freshness proof is void. Mark not-live; the next
           // read does one live refresh before serving from it again.
           slot.replica.stale = true;
+          slot.pushCount++;
           return;
         }
         slot.replica.receivedAt = Date.now();
         slot.replica.seq = frame.seq;
+        slot.pushCount++;
       }
       return;
     }
@@ -109,15 +119,18 @@ function routeEvent(hostName: string, channel: HostChannel, frame: EventFrame): 
       if (!mirror || mirror.subscription !== frame.subscription) return;
       if (frame.event === 'ended') {
         slot.screens.delete(mirror.uuid);
+        slot.pushCount++;
         return;
       }
       if (frame.event === 'heartbeat') {
         if (frame.gap) {
           mirror.stale = true;
+          slot.pushCount++;
           return;
         }
         mirror.receivedAt = Date.now();
         mirror.seq = frame.seq;
+        slot.pushCount++;
         return;
       }
       // Screen data frames are full state: replace (gap or not).
@@ -133,6 +146,7 @@ function routeEvent(hostName: string, channel: HostChannel, frame: EventFrame): 
         mirror.seq = frame.seq;
         mirror.stale = false;
         mirror.receivedAt = Date.now();
+        slot.pushCount++;
       }
     }
   } catch {
@@ -208,7 +222,7 @@ async function channelFor(host: HostEntry): Promise<HostChannel> {
       ),
   );
   channel.onEvent = (frame) => routeEvent(host.name, channel, frame);
-  slots.set(host.name, { generation: policy.generation, channel, screens: new Map() });
+  slots.set(host.name, { generation: policy.generation, channel, screens: new Map(), pushCount: 0 });
   try {
     await channel.ready;
     backoff.delete(host.name);
@@ -295,30 +309,59 @@ class RpcHostClient extends HostClient {
     }
   }
 
+  /**
+   * The push stream is usable: the channel negotiated protocol 2 and the
+   * sessions subscription is active (subscribed, not torn down). Without
+   * pushes, a stored listing is a cache, not a replica: it is never served
+   * and never refreshed into.
+   */
+  private static pushActive(slot: Slot): boolean {
+    return slot.channel.negotiated.protocol === 2 && slot.sessionsSubscription !== undefined;
+  }
+
   private static replicaLive(slot: Slot): boolean {
     return Boolean(
-      slot.replica && !slot.replica.stale && Date.now() - slot.replica.receivedAt <= REPLICA_LIVE_WINDOW_MS,
+      RpcHostClient.pushActive(slot) &&
+        slot.replica &&
+        !slot.replica.stale &&
+        Date.now() - slot.replica.receivedAt <= REPLICA_LIVE_WINDOW_MS,
     );
   }
 
   private static mirrorLive(slot: Slot, uuid: string): boolean {
     const mirror = slot.screens.get(uuid);
-    return Boolean(mirror && !mirror.stale && Date.now() - mirror.receivedAt <= REPLICA_LIVE_WINDOW_MS);
+    return Boolean(
+      slot.channel.negotiated.protocol === 2 &&
+        mirror &&
+        !mirror.stale &&
+        Date.now() - mirror.receivedAt <= REPLICA_LIVE_WINDOW_MS,
+    );
   }
 
   /**
    * One live round trip that also refreshes the stored replica: the answer
    * after a gap mark, an expiry, or `--fresh`. Never serves silently stale
-   * data; the refreshed replica serves subsequent reads.
+   * data; the refreshed replica serves subsequent reads. The answer is
+   * stored only when no push frame was applied while it was in flight and
+   * the push stream is still active (otherwise the pushed state wins); the
+   * response itself is always returned to the caller.
    */
   private async refreshReplica(): Promise<SessionsListing> {
-    const fresh = listing(await request(this.host!, 'list', { format: 'psc' }));
     const slot = slots.get(this.host!.name);
-    if (slot) {
-      slot.replica = {
+    const channel = slot?.channel;
+    const mark = slot?.pushCount ?? 0;
+    const fresh = listing(await request(this.host!, 'list', { format: 'psc' }));
+    const current = slots.get(this.host!.name);
+    if (
+      current &&
+      current.channel === channel &&
+      RpcHostClient.pushActive(current) &&
+      current.pushCount === mark
+    ) {
+      current.replica = {
         listing: fresh,
-        seq: slot.replica?.seq ?? 0,
-        generation: slot.replica?.generation ?? '',
+        seq: current.replica?.seq ?? 0,
+        generation: current.replica?.generation ?? '',
         receivedAt: Date.now(),
         stale: false,
       };
@@ -373,8 +416,9 @@ class RpcHostClient extends HostClient {
       return row;
     }
     // One live refresh (a full listing, not a single status) so the stored
-    // replica is current again before anything is served from it.
-    if (slot && !options.fresh) {
+    // replica is current again before anything is served from it. Plain
+    // status requests (fresh, protocol 1, or no usable slot) never touch it.
+    if (!options.fresh && slot && RpcHostClient.pushActive(slot)) {
       RpcHostClient.noteRead(context, { source: 'live' });
       return pickSession((await this.refreshReplica()).sessions, selector);
     }
@@ -417,6 +461,9 @@ class RpcHostClient extends HostClient {
         return { row: mirror.row, text: mirror.text };
       }
     }
+    // The push counter before the round trip: a push frame applied while
+    // it was in flight wins over re-priming the mirror below.
+    const mark = slot?.pushCount;
     const value = await request(this.host!, 'capture', {
       selector,
       selectorMode: 'psc',
@@ -434,27 +481,32 @@ class RpcHostClient extends HostClient {
     const captured = selected(value);
     RpcHostClient.noteRead(context, { source: 'live' });
     if (options.mode === 'screen' && captured.id && slot)
-      await RpcHostClient.ensureMirror(slot, captured.id, { row: captured, text });
+      await RpcHostClient.ensureMirror(slot, captured.id, { row: captured, text }, mark);
     return { row: captured, text };
   }
 
-  /** Subscribe (or refresh) the screen mirror for a just-captured session. */
+  /**
+   * Subscribe (or refresh) the screen mirror for a just-captured session.
+   * `mark` is the slot push counter from before the live request: when a
+   * push frame landed meanwhile, the pushed state wins and the response
+   * only counts as usage (the caller still gets the live answer).
+   */
   private static async ensureMirror(
     slot: Slot,
     uuid: string,
     initial: { row: SessionRow; text: string },
+    mark?: number,
   ): Promise<void> {
     ensureSweeper();
     const existing = slot.screens.get(uuid);
     if (existing) {
-      // A live round trip after a gap mark or expiry re-primes the mirror:
-      // the subscription is still valid helper-side, only the content and
-      // the freshness proof needed renewal.
-      existing.row = initial.row;
-      existing.text = initial.text;
-      existing.receivedAt = Date.now();
       existing.lastCapturedAt = Date.now();
-      existing.stale = false;
+      if (mark === undefined || slot.pushCount === mark) {
+        existing.row = initial.row;
+        existing.text = initial.text;
+        existing.receivedAt = Date.now();
+        existing.stale = false;
+      }
       return;
     }
     if (slot.channel.negotiated.protocol !== 2) return;
