@@ -27,5 +27,7 @@ describe('public client core entrypoint', () => {
     const pending = await core.startDevice('https://broker.example.com', 'MCP test', { fetch });
     expect(pending.userCode).toBe('BCDF-GHJK');
     expect(pending.interval).toBe(5);
+    const presentation = core.pendingDeviceLogin({ ...pending, verificationUri: 'https://broker.example.com/device', verificationUriComplete: 'https://broker.example.com/device?code=BCDF-GHJK' }, 'https://approval.example.com');
+    expect(presentation.verificationUriComplete).toBe('https://approval.example.com/device?code=BCDF-GHJK');
   });
 });

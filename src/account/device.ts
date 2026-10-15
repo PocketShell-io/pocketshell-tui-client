@@ -114,6 +114,32 @@ export function rewriteVerificationUri(rawUri: string, targetOrigin: string): st
   return `${target.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
+/** Shared validation and trusted-origin presentation for terminal and OAuth adapters. */
+export function pendingDeviceLogin(
+  start: broker.DeviceStart,
+  origin: string,
+  onWarning?: (message: string) => void,
+): PendingLogin {
+  const userCode = start.userCode;
+  if (typeof userCode !== 'string' || !USER_CODE_RE.test(userCode)) {
+    // Never echo it: an unexpected code could carry terminal escapes.
+    throw new AccountError(`The broker returned a malformed user code. ${AGAIN}`);
+  }
+  const rewrite = (uri: unknown): string | null =>
+    typeof uri === 'string' ? rewriteVerificationUri(uri, origin) : null;
+  let verificationUri = trusted(rewrite(start.verificationUri), origin);
+  let completeUri = trusted(rewrite(start.verificationUriComplete), origin);
+  if (verificationUri === null) {
+    onWarning?.(
+      `the broker sent a verification URL outside ${origin}; it was not shown or opened.`,
+    );
+    verificationUri = `${origin}/device`;
+    completeUri = null;
+  }
+  if (completeUri !== `${verificationUri}?code=${userCode}`) completeUri = null;
+  return { userCode, verificationUri, verificationUriComplete: completeUri, expiresIn: start.expiresIn };
+}
+
 const defaultSleep = (seconds: number, signal?: AbortSignal): Promise<void> =>
   delay(seconds * 1000, undefined, { signal });
 const defaultMonotonic = (): number => performance.now() / 1000;
@@ -138,24 +164,7 @@ export async function deviceLogin(options: DeviceLoginOptions): Promise<Credenti
   try {
     const origin = webOrigin();
     const start = await broker.startDevice(baseUrl, label, http);
-    const userCode = start.userCode;
-    if (typeof userCode !== 'string' || !USER_CODE_RE.test(userCode)) {
-      // Never echo it: an unexpected code could carry terminal escapes.
-      throw new AccountError(`The broker returned a malformed user code. ${AGAIN}`);
-    }
-    const rewrite = (uri: unknown): string | null =>
-      typeof uri === 'string' ? rewriteVerificationUri(uri, origin) : null;
-    let verificationUri = trusted(rewrite(start.verificationUri), origin);
-    let completeUri = trusted(rewrite(start.verificationUriComplete), origin);
-    if (verificationUri === null) {
-      options.onWarning?.(
-        `the broker sent a verification URL outside ${origin}; it was not shown or opened.`,
-      );
-      verificationUri = `${origin}/device`;
-      completeUri = null;
-    }
-    if (completeUri !== `${verificationUri}?code=${userCode}`) completeUri = null;
-    options.onPending({ userCode, verificationUri, verificationUriComplete: completeUri, expiresIn: start.expiresIn });
+    options.onPending(pendingDeviceLogin(start, origin, options.onWarning));
 
     const token = await poll(baseUrl, start, sleep, monotonic, http);
     try {

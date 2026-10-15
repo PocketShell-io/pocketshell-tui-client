@@ -17,7 +17,7 @@ export {
   mintGatewayToken, request, errorCode, describeFailure,
   type DeviceStart, type DeviceToken, type SessionInfo, type HttpOptions,
 } from './account/broker.js';
-export { deviceLogin, USER_CODE_RE, validateLabel, type PendingLogin } from './account/device.js';
+export { deviceLogin, pendingDeviceLogin, rewriteVerificationUri, USER_CODE_RE, validateLabel, type PendingLogin } from './account/device.js';
 export { validateBrokerUrl, sameOrigin } from './account/config.js';
 export { fetchDevices, type DeviceInfo } from './gateway/devices.js';
 export { resolveEndpoint, type GatewayEndpoint } from './gateway/endpoint.js';
