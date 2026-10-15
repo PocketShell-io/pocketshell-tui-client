@@ -99,10 +99,19 @@ func TestEligibility(t *testing.T) {
 			t.Fatal(a)
 		}
 	}
-	for _, a := range [][]string{nil, {"box", "connect"}, {"box", "start", "x"}, {"gateway", "proxy", "id"}, {"box", "send", "--help"}} {
+	for _, a := range [][]string{nil, {"box", "connect"}, {"box", "start", "x"}, {"gateway", "proxy", "id"}, {"box", "send", "--help"},
+		// `psc vault status` is a top-level command, not `<host> status`.
+		{"vault", "status"}, {"vault", "status", "--json"}, {"--json", "vault", "status"}} {
 		if eligible(a) {
 			t.Fatal(a)
 		}
+	}
+}
+
+func TestVaultHostViaA(t *testing.T) {
+	// The explicit remote form still reaches a host literally named "vault".
+	if !eligible([]string{"a", "vault", "status", "s1"}) {
+		t.Fatal("a vault status s1")
 	}
 }
 

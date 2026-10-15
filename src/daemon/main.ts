@@ -50,6 +50,8 @@ function reply(id: string, kind: string, data = '', status = 0, fallback = false
 }
 function supported(argv: string[]): boolean {
   const a = argv.filter((v) => v !== '--json');
+  // `psc vault status` is the local vault command, never `<host> status` (an older relay may still send it).
+  if (a[0] === 'vault') return false;
   if (a[0] === 'a') a.shift();
   return a[0] === 'hosts'
     ? a.length === 1 || a[1] === '--check' || a[1] === 'check'
