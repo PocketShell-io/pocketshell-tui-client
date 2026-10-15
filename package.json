@@ -46,5 +46,8 @@
   },
   "bundleDependencies": [
     "@pocketshell/core"
-  ]
+  ],
+  "exports": {
+    "./core": "./dist/clientCore.js"
+  }
 }
