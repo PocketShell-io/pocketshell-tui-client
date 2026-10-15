@@ -3,6 +3,8 @@ export interface RequestContext {
   json: boolean;
   transportPath?: 'resident' | 'legacy';
   presenceAgeMs?: number | null;
+  /** How the last read was served: the local replica/mirror or a live round trip. */
+  replicaMeta?: { source: 'replica' | 'live'; seq?: number; ageMs?: number };
   freshness?: { generation: string; ageMs: number; processAgeMs?: number };
   stdin: string;
   tty: boolean;

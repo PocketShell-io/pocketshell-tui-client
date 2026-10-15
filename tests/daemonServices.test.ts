@@ -39,6 +39,8 @@ vi.mock('../src/daemon/channel.js', async (original) => {
   return {
     ...actual,
     HostChannel: class {
+      negotiated = { protocol: 1 };
+      onEvent: unknown = undefined;
       ready = Promise.resolve({
         pscSchema: state.capable ? 3 : null,
         selectorModes: ['psc'],
@@ -103,6 +105,7 @@ describe('daemon atomic operations and policy retirement', () => {
   it('uses one helper request per selector operation and validates schema3 output', async () => {
     const client = await daemonClient(host);
     expect((await client.listSessions()).sessions[0]?.name).toBe('fixture:tag');
+    // Protocol-1 helpers keep no replica: every read is a live round trip.
     expect((await client.resolveSession('tag')).id).toBe(row.id);
     expect((await client.captureSelected('tag', { mode: 'screen' })).text).toBe('fixture capture');
     expect((await client.sendSelected('tag', 'hello', { enter: false })).id).toBe(row.id);

@@ -16,10 +16,17 @@ import { classify, CliError, emit, EXIT, isJsonMode, setJsonMode, usageError } f
 import { safeLine, safeText } from '../sanitize.js';
 import { openConnection } from '../transport/index.js';
 import { action, jsonOption, parsePositiveInt, parseSeconds } from './common.js';
+import { trace } from '../trace.js';
 import { describeHost } from './hosts.js';
 import { table } from './sessions.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The read-source meta of the last operation, when a resident transport served it. */
+function replicaMeta(): { meta?: { source: 'replica' | 'live'; seq?: number; ageMs?: number } } {
+  const meta = requests.getStore()?.replicaMeta;
+  return meta ? { meta } : {};
+}
 
 export const A_HELP = `Usage: psc [options] <host> <command>
        psc hosts [--check]
@@ -299,11 +306,22 @@ export async function confirmPromptDelivery(
   client: Pick<HostClient, 'listSessions' | 'capture' | 'send'>,
   row: SessionRow,
   promptText: string,
-  options: { windowS?: number; pollMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
-): Promise<'working' | 'resent' | 'entered' | 'visible'> {
+  options: {
+    windowS?: number;
+    pollMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+    /**
+     * Observe only: never resend or press Enter, so the check is safe to run
+     * in the background after a `send` returned. Returns 'unconfirmed' when
+     * delivery cannot be proven without writing.
+     */
+    readOnly?: boolean;
+  } = {},
+): Promise<'working' | 'resent' | 'entered' | 'visible' | 'unconfirmed'> {
   const windowS = options.windowS ?? 15;
   const pollMs = options.pollMs ?? 1000;
   const pause = options.sleepFn ?? sleep;
+  const readOnly = options.readOnly ?? false;
   const firstLine = promptText.split('\n').find((line) => line.trim() !== '') ?? '';
   const probe = collapse(firstLine).slice(0, 40);
   const polls = Math.max(1, Math.ceil((windowS * 1000) / pollMs));
@@ -321,10 +339,12 @@ export async function confirmPromptDelivery(
     }
     if (visible) {
       if (resent) return 'resent';
+      if (readOnly) return 'visible';
       await client.send(row, '', { enter: true });
       return 'entered';
     }
     if (resent || probe === '') return resent ? 'resent' : 'visible';
+    if (readOnly) return 'unconfirmed';
     await client.send(row, promptText, { enter: true });
     resent = true;
   }
@@ -619,13 +639,14 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     hostCmd
       .command('ls')
       .alias('list')
-      .description('sessions on <host> (name, engine, state, workspace) — plain table'),
+      .description('sessions on <host> (name, engine, state, workspace) — plain table')
+      .option('--fresh', 'force a live round trip instead of the local replica (when live)'),
   ).action(
-    action(async (opts: { json?: boolean }) => {
+    action(async (opts: { json?: boolean; fresh?: boolean }) => {
       if (opts.json) setJsonMode(true);
       await withResolvedHost(hostSelector, async (client, host) => {
-        const listing = await client.listSessions();
-        emit({ ok: true, host: host.name, ...listing }, () => {
+        const listing = await client.listSessions({ fresh: opts.fresh });
+        emit({ ok: true, host: host.name, ...listing, ...replicaMeta() }, () => {
           const lines: string[] = [];
           if (listing.sessions.length === 0) {
             lines.push(`no sessions on ${host.name}`);
@@ -720,15 +741,28 @@ export function buildHostVerbProgram(hostSelector: string): Command {
         'send and SUBMIT (Enter is default; --no-enter to just type). Multi-line text is sent via bracketed paste as one message.',
       )
       .option('--enter', 'press Enter after the text (default)')
-      .option('--no-enter', 'type the text without pressing Enter'),
+      .option('--no-enter', 'type the text without pressing Enter')
+      .option('--wait', 'confirm prompt delivery synchronously before returning (reads the local replica when live)'),
   ).action(
-    action(async (selector: string, text: string | undefined, opts: { enter?: boolean; json?: boolean }) => {
+    action(async (selector: string, text: string | undefined, opts: { enter?: boolean; json?: boolean; wait?: boolean }) => {
       if (opts.json) setJsonMode(true);
       const payload = await resolveSendText(text);
       const enter = opts.enter ?? true;
       const encoded = encodeSendPayload(payload, { enter });
       await withResolvedHost(hostSelector, async (client, host) => {
         const row = await client.sendSelected(selector, payload, { enter });
+        // Delivery confirmation reads the local replica/mirror when live
+        // (zero round trips) and never writes in the background: only
+        // --wait performs the full synchronous confirm, which may resend.
+        let delivery: Awaited<ReturnType<typeof confirmPromptDelivery>> | undefined;
+        if (opts.wait) {
+          delivery = await confirmPromptDelivery(client, row, payload);
+        } else if (requests.getStore()?.transportPath === 'resident') {
+          void confirmPromptDelivery(client, row, payload, { readOnly: true }).then(
+            (outcome) => trace(outcome === 'unconfirmed' ? 'send_unconfirmed' : 'send_observed'),
+            () => trace('send_unconfirmed'),
+          );
+        }
         emit(
           {
             ok: true,
@@ -737,6 +771,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
             bytes: Buffer.byteLength(payload),
             enter,
             bracketed: encoded.bracketed,
+            ...(delivery !== undefined ? { delivery } : {}),
           },
           () => '',
         );
@@ -752,7 +787,8 @@ export function buildHostVerbProgram(hostSelector: string): Command {
       .option('--wait-for <regex>', 'poll (~every 500 ms) until the capture matches this regex (multiline)')
       .option('--timeout <seconds>', 'with --wait-for: give up after this long (exit 124)', parseSeconds, 30)
       .option('--raw', 'recent raw output bytes instead of the rendered screen')
-      .option('--bytes <n>', 'with --raw: how many history bytes', parsePositiveInt),
+      .option('--bytes <n>', 'with --raw: how many history bytes', parsePositiveInt)
+      .option('--fresh', 'force a live round trip instead of the screen mirror (when live)'),
   ).action(
     action(
       async (
@@ -764,6 +800,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
           raw?: boolean;
           bytes?: number;
           json?: boolean;
+          fresh?: boolean;
         },
       ) => {
         if (opts.json) setJsonMode(true);
@@ -771,7 +808,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
         const pattern = opts.waitFor === undefined ? null : compileRegex(opts.waitFor);
         await withResolvedHost(hostSelector, async (client, host) => {
           const mode = opts.raw ? 'raw' : 'screen';
-          const captureOptions = { mode, bytes: opts.bytes } as const;
+          const captureOptions = { mode, bytes: opts.bytes, fresh: opts.fresh } as const;
           const row = pattern ? await client.resolveSession(selector) : null;
           if (pattern && row) {
             const deadline = Date.now() + opts.timeout * 1000;
@@ -790,6 +827,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
                     ...(opts.lines !== undefined ? { lines: opts.lines } : {}),
                     matched: true,
                     match: match[0],
+                    ...replicaMeta(),
                   },
                   () => text,
                 );
@@ -818,6 +856,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
               mode,
               text,
               ...(opts.lines !== undefined ? { lines: opts.lines } : {}),
+              ...replicaMeta(),
             },
             () => text,
           );
@@ -935,14 +974,15 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     hostCmd
       .command('status <session>')
       .alias('show')
-      .description("one session's row (state, agent state, engine, created)"),
+      .description("one session's row (state, agent state, engine, created)")
+      .option('--fresh', 'force a live round trip instead of the local replica (when live)'),
   ).action(
-    action(async (selector: string, opts: { json?: boolean }) => {
+    action(async (selector: string, opts: { json?: boolean; fresh?: boolean }) => {
       if (opts.json) setJsonMode(true);
       await withResolvedHost(hostSelector, async (client, host) => {
-        const row = await client.resolveSession(selector);
+        const row = await client.resolveSession(selector, { fresh: opts.fresh });
         const createdIso = row.createdEpoch ? new Date(row.createdEpoch * 1000).toISOString() : '-';
-        emit({ ok: true, host: host.name, session: row }, () =>
+        emit({ ok: true, host: host.name, session: row, ...replicaMeta() }, () =>
           table(
             ['NAME', 'STATE', 'AGENT STATE', 'ENGINE', 'CREATED', 'WORKSPACE'],
             [

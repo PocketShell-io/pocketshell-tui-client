@@ -1,15 +1,57 @@
-import { requests } from './context.js';
-import { HostClient } from '../hostClient.js';
+import { requests, type RequestContext } from './context.js';
+import { HostClient, pickSession } from '../hostClient.js';
 import { noteResidentCapability } from '../hostCapability.js';
 import { trace } from '../trace.js';
 import { parseHostSessionsList, type SessionRow, type SessionsListing } from '@pocketshell/core';
 import type { HostEntry } from '../hosts/store.js';
 import { openConnection } from '../transport/index.js';
-import { HostChannel, RpcFailure } from './channel.js';
+import { HostChannel, RpcFailure, type EventFrame } from './channel.js';
 import { gatewayPolicy } from './policy.js';
+
+/** A replica answer is served only while the last push frame is this fresh. */
+export const REPLICA_LIVE_WINDOW_MS = 6_000;
+/** A screen mirror nobody captured for this long is unsubscribed. */
+const MIRROR_IDLE_MS = 10 * 60_000;
+/** Client-side screen-mirror cap (the helper allows 16; keep headroom). */
+const MAX_SCREENS = 8;
+
+interface Replica {
+  listing: SessionsListing;
+  seq: number;
+  generation: string;
+  receivedAt: number;
+  /**
+   * A heartbeat with `gap:true` (no data) voided the freshness proof: the
+   * topic is not live until one live round trip refreshes it. A snapshot
+   * with data always clears this (full state replaces).
+   */
+  stale: boolean;
+}
+
+interface ScreenMirror {
+  subscription: string;
+  uuid: string;
+  row: SessionRow;
+  text: string;
+  seq: number;
+  receivedAt: number;
+  lastCapturedAt: number;
+  /** Same gap-heartbeat rule as the sessions topic, per mirror. */
+  stale: boolean;
+}
+
 interface Slot {
   generation: string;
   channel: HostChannel;
+  replica?: Replica;
+  sessionsSubscription?: string;
+  screens: Map<string, ScreenMirror>;
+  /**
+   * Applied push frames (any topic). A live round trip records this before
+   * dispatch and stores its answer only when unchanged afterwards, so a
+   * newer pushed state is never overwritten by an older response.
+   */
+  pushCount: number;
 }
 const slots = new Map<string, Slot>();
 const unsupported = new Map<string, { generation: string; until: number }>();
@@ -30,6 +72,115 @@ export function closeChannels(): void {
   unsupported.clear();
   backoff.clear();
   offline.clear();
+}
+
+/** Route one protocol-2 push frame into the host's replica state. */
+function routeEvent(hostName: string, channel: HostChannel, frame: EventFrame): void {
+  const slot = slots.get(hostName);
+  if (!slot || slot.channel !== channel) return;
+  try {
+    if (frame.topic === 'sessions') {
+      if (frame.subscription !== slot.sessionsSubscription) return;
+      if (frame.event === 'snapshot') {
+        // Full state, gap or not: replace, never merge; a data frame also
+        // clears a gap-heartbeat mark (fresh full state again).
+        slot.replica = {
+          listing: parseHostSessionsList(JSON.stringify(frame.data)),
+          seq: frame.seq,
+          generation: frame.generation ?? slot.replica?.generation ?? '',
+          receivedAt: Date.now(),
+          stale: false,
+        };
+        slot.pushCount++;
+      } else if (frame.event === 'heartbeat' && slot.replica) {
+        if (frame.generation) {
+          if (!slot.replica.generation) slot.replica.generation = frame.generation;
+          else if (frame.generation !== slot.replica.generation) {
+            slot.replica = undefined; // a different helper generation: retire the replica
+            slot.pushCount++;
+            return;
+          }
+        }
+        if (frame.gap) {
+          // No data: the freshness proof is void. Mark not-live; the next
+          // read does one live refresh before serving from it again.
+          slot.replica.stale = true;
+          slot.pushCount++;
+          return;
+        }
+        slot.replica.receivedAt = Date.now();
+        slot.replica.seq = frame.seq;
+        slot.pushCount++;
+      }
+      return;
+    }
+    if (frame.topic.startsWith('screen:')) {
+      const mirror = slot.screens.get(frame.topic.slice('screen:'.length));
+      if (!mirror || mirror.subscription !== frame.subscription) return;
+      if (frame.event === 'ended') {
+        slot.screens.delete(mirror.uuid);
+        slot.pushCount++;
+        return;
+      }
+      if (frame.event === 'heartbeat') {
+        if (frame.gap) {
+          mirror.stale = true;
+          slot.pushCount++;
+          return;
+        }
+        mirror.receivedAt = Date.now();
+        mirror.seq = frame.seq;
+        slot.pushCount++;
+        return;
+      }
+      // Screen data frames are full state: replace (gap or not).
+      if (frame.event === 'screen') {
+        const data = frame.data as { text?: unknown } | undefined;
+        if (!data || typeof data.text !== 'string') return;
+        mirror.text = data.text;
+        try {
+          mirror.row = selected(data);
+        } catch {
+          /* keep the last known row */
+        }
+        mirror.seq = frame.seq;
+        mirror.stale = false;
+        mirror.receivedAt = Date.now();
+        slot.pushCount++;
+      }
+    }
+  } catch {
+    /* a malformed frame never tears the channel down */
+  }
+}
+
+/** Subscribe the sessions push stream once a protocol-2 channel is ready. */
+async function primeReplica(hostName: string, channel: HostChannel): Promise<void> {
+  if (channel.negotiated.protocol !== 2) return;
+  try {
+    const { subscription } = await channel.subscribe(['sessions'], { format: 'psc' });
+    const slot = slots.get(hostName);
+    if (slot?.channel === channel) slot.sessionsSubscription = subscription;
+  } catch {
+    /* no push stream: reads simply stay request/response */
+  }
+}
+
+/** Retire screen mirrors nobody captured recently. */
+let sweeper: NodeJS.Timeout | undefined;
+function ensureSweeper(): void {
+  if (sweeper) return;
+  sweeper = setInterval(() => {
+    for (const slot of slots.values()) {
+      for (const [uuid, mirror] of slot.screens) {
+        if (Date.now() - mirror.lastCapturedAt > MIRROR_IDLE_MS) {
+          slot.screens.delete(uuid);
+          void slot.channel.unsubscribe(mirror.subscription).catch(() => {});
+        }
+      }
+    }
+  }, 60_000);
+  sweeper.unref();
 }
 async function channelFor(host: HostEntry): Promise<HostChannel> {
   let policy;
@@ -70,11 +221,13 @@ async function channelFor(host: HostEntry): Promise<HostChannel> {
         },
       ),
   );
-  slots.set(host.name, { generation: policy.generation, channel });
+  channel.onEvent = (frame) => routeEvent(host.name, channel, frame);
+  slots.set(host.name, { generation: policy.generation, channel, screens: new Map(), pushCount: 0 });
   try {
     await channel.ready;
     backoff.delete(host.name);
     offline.delete(host.name);
+    void primeReplica(host.name, channel);
     return channel;
   } catch (error) {
     if (error instanceof RpcFailure && OFFLINE_CODES.has(error.code)) {
@@ -133,6 +286,94 @@ class RpcHostClient extends HostClient {
       host,
     );
   }
+
+  /** The established slot for this host, when its channel is still usable. */
+  private async liveSlot(): Promise<Slot | undefined> {
+    // Re-check policy on every read, including replica reads: an unsafe or
+    // deleted credential must refuse before dispatch even when the answer
+    // could come from the local replica.
+    let policy;
+    try {
+      policy = gatewayPolicy(this.host!);
+    } catch (error) {
+      slots.get(this.host!.name)?.channel.close();
+      throw error;
+    }
+    const slot = slots.get(this.host!.name);
+    if (!slot || slot.generation !== policy.generation) return undefined;
+    try {
+      await slot.channel.ready;
+      return slot;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The push stream is usable: the channel negotiated protocol 2 and the
+   * sessions subscription is active (subscribed, not torn down). Without
+   * pushes, a stored listing is a cache, not a replica: it is never served
+   * and never refreshed into.
+   */
+  private static pushActive(slot: Slot): boolean {
+    return slot.channel.negotiated.protocol === 2 && slot.sessionsSubscription !== undefined;
+  }
+
+  private static replicaLive(slot: Slot): boolean {
+    return Boolean(
+      RpcHostClient.pushActive(slot) &&
+        slot.replica &&
+        !slot.replica.stale &&
+        Date.now() - slot.replica.receivedAt <= REPLICA_LIVE_WINDOW_MS,
+    );
+  }
+
+  private static mirrorLive(slot: Slot, uuid: string): boolean {
+    const mirror = slot.screens.get(uuid);
+    return Boolean(
+      slot.channel.negotiated.protocol === 2 &&
+        mirror &&
+        !mirror.stale &&
+        Date.now() - mirror.receivedAt <= REPLICA_LIVE_WINDOW_MS,
+    );
+  }
+
+  /**
+   * One live round trip that also refreshes the stored replica: the answer
+   * after a gap mark, an expiry, or `--fresh`. Never serves silently stale
+   * data; the refreshed replica serves subsequent reads. The answer is
+   * stored only when no push frame was applied while it was in flight and
+   * the push stream is still active (otherwise the pushed state wins); the
+   * response itself is always returned to the caller.
+   */
+  private async refreshReplica(): Promise<SessionsListing> {
+    const slot = slots.get(this.host!.name);
+    const channel = slot?.channel;
+    const mark = slot?.pushCount ?? 0;
+    const fresh = listing(await request(this.host!, 'list', { format: 'psc' }));
+    const current = slots.get(this.host!.name);
+    if (
+      current &&
+      current.channel === channel &&
+      RpcHostClient.pushActive(current) &&
+      current.pushCount === mark
+    ) {
+      current.replica = {
+        listing: fresh,
+        seq: current.replica?.seq ?? 0,
+        generation: current.replica?.generation ?? '',
+        receivedAt: Date.now(),
+        stale: false,
+      };
+    }
+    return fresh;
+  }
+
+  /** Record the source of the answer for the command's JSON meta. */
+  private static noteRead(context: RequestContext | undefined, meta: RequestContext['replicaMeta']): void {
+    if (context) context.replicaMeta = meta;
+  }
+
   override async probe(): Promise<{ pocketshell: string | null; aplexer: string | null }> {
     await request(this.host!, 'ping', {});
     const channel = await channelFor(this.host!);
@@ -143,12 +384,48 @@ class RpcHostClient extends HostClient {
       aplexer: typeof versions?.aplexer === 'string' ? versions.aplexer : null,
     };
   }
-  override async listSessions(): Promise<SessionsListing> {
+
+  override async listSessions(options: { fresh?: boolean } = {}): Promise<SessionsListing> {
+    const context = requests.getStore();
+    const slot = await this.liveSlot();
+    if (!options.fresh && slot && RpcHostClient.replicaLive(slot) && slot.replica) {
+      RpcHostClient.noteRead(context, {
+        source: 'replica',
+        seq: slot.replica.seq,
+        ageMs: Date.now() - slot.replica.receivedAt,
+      });
+      return slot.replica.listing;
+    }
+    RpcHostClient.noteRead(context, { source: 'live' });
+    // Every live listing through a live slot refreshes the stored replica
+    // (`--fresh` included): the next read is served locally again.
+    if (slot) return this.refreshReplica();
     return listing(await request(this.host!, 'list', { format: 'psc' }));
   }
-  override async resolveSession(selector: string): Promise<SessionRow> {
+
+  override async resolveSession(selector: string, options: { fresh?: boolean } = {}): Promise<SessionRow> {
+    const context = requests.getStore();
+    const slot = await this.liveSlot();
+    if (!options.fresh && slot && RpcHostClient.replicaLive(slot) && slot.replica) {
+      const row = pickSession(slot.replica.listing.sessions, selector);
+      RpcHostClient.noteRead(context, {
+        source: 'replica',
+        seq: slot.replica.seq,
+        ageMs: Date.now() - slot.replica.receivedAt,
+      });
+      return row;
+    }
+    // One live refresh (a full listing, not a single status) so the stored
+    // replica is current again before anything is served from it. Plain
+    // status requests (fresh, protocol 1, or no usable slot) never touch it.
+    if (!options.fresh && slot && RpcHostClient.pushActive(slot)) {
+      RpcHostClient.noteRead(context, { source: 'live' });
+      return pickSession((await this.refreshReplica()).sessions, selector);
+    }
+    RpcHostClient.noteRead(context, { source: 'live' });
     return selected(await request(this.host!, 'status', { selector, selectorMode: 'psc' }));
   }
+
   override async sendSelected(
     selector: string,
     text: string,
@@ -163,10 +440,30 @@ class RpcHostClient extends HostClient {
       ),
     );
   }
+
   override async captureSelected(
     selector: string,
-    options: { mode: 'screen' | 'raw'; bytes?: number },
+    options: { mode: 'screen' | 'raw'; bytes?: number; fresh?: boolean },
   ): Promise<{ row: SessionRow; text: string }> {
+    const context = requests.getStore();
+    const slot = await this.liveSlot();
+    // The mirror carries rendered screens only; raw history always round-trips.
+    if (!options.fresh && options.mode === 'screen' && slot && RpcHostClient.replicaLive(slot) && slot.replica) {
+      const resolved = pickSession(slot.replica.listing.sessions, selector);
+      if (resolved.id && RpcHostClient.mirrorLive(slot, resolved.id)) {
+        const mirror = slot.screens.get(resolved.id)!;
+        mirror.lastCapturedAt = Date.now();
+        RpcHostClient.noteRead(context, {
+          source: 'replica',
+          seq: mirror.seq,
+          ageMs: Date.now() - mirror.receivedAt,
+        });
+        return { row: mirror.row, text: mirror.text };
+      }
+    }
+    // The push counter before the round trip: a push frame applied while
+    // it was in flight wins over re-priming the mirror below.
+    const mark = slot?.pushCount;
     const value = await request(this.host!, 'capture', {
       selector,
       selectorMode: 'psc',
@@ -181,8 +478,66 @@ class RpcHostClient extends HostClient {
           ? Buffer.from(result.data, 'base64').toString('utf8')
           : null;
     if (text === null) throw new RpcFailure('RPC_PROTOCOL', 'capture text missing');
-    return { row: selected(value), text };
+    const captured = selected(value);
+    RpcHostClient.noteRead(context, { source: 'live' });
+    if (options.mode === 'screen' && captured.id && slot)
+      await RpcHostClient.ensureMirror(slot, captured.id, { row: captured, text }, mark);
+    return { row: captured, text };
   }
+
+  /**
+   * Subscribe (or refresh) the screen mirror for a just-captured session.
+   * `mark` is the slot push counter from before the live request: when a
+   * push frame landed meanwhile, the pushed state wins and the response
+   * only counts as usage (the caller still gets the live answer).
+   */
+  private static async ensureMirror(
+    slot: Slot,
+    uuid: string,
+    initial: { row: SessionRow; text: string },
+    mark?: number,
+  ): Promise<void> {
+    ensureSweeper();
+    const existing = slot.screens.get(uuid);
+    if (existing) {
+      existing.lastCapturedAt = Date.now();
+      if (mark === undefined || slot.pushCount === mark) {
+        existing.row = initial.row;
+        existing.text = initial.text;
+        existing.receivedAt = Date.now();
+        existing.stale = false;
+      }
+      return;
+    }
+    if (slot.channel.negotiated.protocol !== 2) return;
+    if (slot.screens.size >= MAX_SCREENS) {
+      // Evict the least recently captured mirror to stay inside the budget.
+      let oldest: string | undefined;
+      for (const [key, mirror] of slot.screens)
+        if (oldest === undefined || mirror.lastCapturedAt < slot.screens.get(oldest)!.lastCapturedAt) oldest = key;
+      if (oldest !== undefined) {
+        const evicted = slot.screens.get(oldest)!;
+        slot.screens.delete(oldest);
+        void slot.channel.unsubscribe(evicted.subscription).catch(() => {});
+      }
+    }
+    try {
+      const { subscription } = await slot.channel.subscribe([`screen:${uuid}`], { selectorMode: 'psc' });
+      slot.screens.set(uuid, {
+        subscription,
+        uuid,
+        row: initial.row,
+        text: initial.text,
+        seq: 0,
+        receivedAt: Date.now(),
+        lastCapturedAt: Date.now(),
+        stale: false,
+      });
+    } catch {
+      /* mirror unavailable: later captures keep round-tripping */
+    }
+  }
+
   override async capture(
     row: SessionRow,
     options: { mode: 'screen' | 'raw'; bytes?: number },

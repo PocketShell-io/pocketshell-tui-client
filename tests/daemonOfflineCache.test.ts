@@ -27,6 +27,8 @@ vi.mock('../src/daemon/channel.js', async (original) => {
   return {
     ...actual,
     HostChannel: class {
+      negotiated = { protocol: 1 };
+      onEvent: unknown = undefined;
       ready: Promise<unknown>;
       constructor(host: any, _expiry: any, retire: (e: unknown, established: boolean) => void) {
         state.constructions++;
