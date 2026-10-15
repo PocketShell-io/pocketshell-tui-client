@@ -19,6 +19,7 @@ import {
   validateDestination,
 } from './openssh.js';
 import { runInteractive } from './process.js';
+import type { VaultConnectCredential } from '../vault/session.js';
 import { ConnectionError, type AttachOptions, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
 
 export interface SshArgvInput {
@@ -27,6 +28,20 @@ export interface SshArgvInput {
   /** `exec`: captured, -T, BatchMode. `attach`: -t on this terminal. */
   kind: 'exec' | 'attach';
   command: string;
+  /** Vault credential routing (src/vault/agent.ts); absent → the user's own key resolution. */
+  vault?: VaultArgv;
+}
+
+/** What a vault credential changes on the ssh command line. */
+export interface VaultArgv {
+  /** The public key file the in-process agent signs for. */
+  identityFile?: string;
+  /** Extra `-o` options (IdentityAgent, password auth). */
+  options: readonly string[];
+  /** Password auth: prompts go to SSH_ASKPASS, so BatchMode must stay off. */
+  password: boolean;
+  /** Policy `both`: also offer the host entry's own identity file. */
+  keepOwnIdentity: boolean;
 }
 
 function validatePort(port: number | undefined): void {
@@ -37,11 +52,11 @@ function validatePort(port: number | undefined): void {
 }
 
 /** The ssh argv (without argv[0]) for one call. Pure; exported for tests. */
-export function buildSshArgv({ config, controlPath, kind, command }: SshArgvInput): string[] {
+export function buildSshArgv({ config, controlPath, kind, command, vault }: SshArgvInput): string[] {
   const destination = validateDestination(config.destination);
   validatePort(config.port);
   const argv: string[] = [];
-  if (kind === 'exec') argv.push('-o', 'BatchMode=yes');
+  if (kind === 'exec' && !vault?.password) argv.push('-o', 'BatchMode=yes');
   argv.push(
     '-o', 'ConnectTimeout=15',
     '-o', 'ServerAliveInterval=15',
@@ -53,7 +68,13 @@ export function buildSshArgv({ config, controlPath, kind, command }: SshArgvInpu
   if (controlPath) argv.push(...multiplexOptions(controlPath));
   if (config.port !== undefined) argv.push('-p', String(config.port));
   if (config.user !== undefined) argv.push('-l', validateArgValue('ssh user', config.user));
-  if (config.identityFile !== undefined) {
+  if (vault !== undefined) {
+    for (const option of vault.options) argv.push('-o', validateArgValue('vault ssh option', option));
+    if (vault.identityFile !== undefined) argv.push('-i', validateArgValue('vault identity', vault.identityFile));
+    if (vault.keepOwnIdentity && config.identityFile !== undefined) {
+      argv.push('-i', validateArgValue('identity file', config.identityFile));
+    }
+  } else if (config.identityFile !== undefined) {
     argv.push('-i', validateArgValue('identity file', config.identityFile), '-o', 'IdentitiesOnly=yes');
   }
   argv.push(kind === 'exec' ? '-T' : '-t');
@@ -75,16 +96,32 @@ export class OpenSshConnection implements Connection {
     private readonly config: SshHostConfig,
     private readonly sshPath: string,
     controlPath: string | null,
+    private readonly vault?: VaultConnectCredential,
   ) {
     this.controlPath = controlPath;
   }
 
+  private vaultArgv(): VaultArgv | undefined {
+    if (!this.vault) return undefined;
+    const { credential, gatewayAuth } = this.vault;
+    return {
+      ...(credential.identityFile !== undefined ? { identityFile: credential.identityFile } : {}),
+      options: credential.options,
+      password: credential.password,
+      keepOwnIdentity: gatewayAuth === 'both',
+    };
+  }
+
+  private env(): NodeJS.ProcessEnv {
+    return this.vault ? { ...process.env, ...this.vault.credential.env } : process.env;
+  }
+
   argv(kind: 'exec' | 'attach', command: string): string[] {
-    return buildSshArgv({ config: this.config, controlPath: this.controlPath, kind, command });
+    return buildSshArgv({ config: this.config, controlPath: this.controlPath, kind, command, vault: this.vaultArgv() });
   }
 
   async exec(command: string, options: ExecOptions): Promise<ExecOutcome> {
-    const outcome = await runSshCaptured(this.sshPath, this.argv('exec', command), options);
+    const outcome = await runSshCaptured(this.sshPath, this.argv('exec', command), { ...options, env: this.env() });
     const failure = await explainSshExit(
       outcome,
       {
@@ -102,24 +139,28 @@ export class OpenSshConnection implements Connection {
   }
 
   attachInteractive(command: string, options: AttachOptions = {}): Promise<number | null> {
-    return runInteractive(this.sshPath, this.argv('attach', command), process.env, options);
+    return runInteractive(this.sshPath, this.argv('attach', command), this.env(), options);
   }
 
   async close(): Promise<void> {
     // The master is deliberately left to expire via ControlPersist: the
     // next CLI call (an agent's next command) reuses it and is fast.
+    // A vault agent only serves authentication, so it stops here.
+    await this.vault?.credential.close();
   }
 }
 
-export async function openSshConnection(hostName: string, config: SshHostConfig): Promise<Connection> {
+export async function openSshConnection(hostName: string, config: SshHostConfig, vault?: VaultConnectCredential): Promise<Connection> {
   validateDestination(config.destination);
   validatePort(config.port);
   const sshPath = findSsh();
   let controlPath: string | null = null;
   try {
-    controlPath = controlPathFor('s', [config.destination, config.port ?? null, config.user ?? null, config.identityFile ?? null]);
+    // A vault key's agent dir is per process; the master is keyed by its key id.
+    const identity = vault ? `vault:${vault.keyId}:${vault.gatewayAuth}` : config.identityFile ?? null;
+    controlPath = controlPathFor('s', [config.destination, config.port ?? null, config.user ?? null, identity]);
   } catch {
     controlPath = null; // no safe socket dir: work without multiplexing
   }
-  return new OpenSshConnection(hostName, config, sshPath, controlPath);
+  return new OpenSshConnection(hostName, config, sshPath, controlPath, vault);
 }

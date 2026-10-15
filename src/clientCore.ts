@@ -25,3 +25,27 @@ export { loadPins, requirePinEntry, parseHostKey, fingerprint } from './gateway/
 export { HostClient, pickSession, encodeSendPayload } from './hostClient.js';
 export { openConnection } from './transport/index.js';
 export { validateHostEntry, pickHost, type HostEntry } from './hosts/store.js';
+/**
+ * Key vault (W7: pocketshell-mcp unlocks at OAuth consent). The store is
+ * core's KeyVaultStore API; `cliAccount()` is this machine's CLI session,
+ * a headless adapter passes its own VaultSlotTransport/VaultServerVerifier.
+ * decryptKeyForHost(alias) → {kind:'key',pem} | {kind:'password',password}
+ * | locked | unbound | missingKey | corrupt | error. Secrets stay in memory.
+ */
+export {
+  KeyVaultStore,
+  cliAccount,
+  secretOrThrow,
+  type VaultSecretResult,
+  type HostKeyBinding,
+  type VaultAccount,
+  type VaultRememberRecord,
+  type VaultServerVerifier,
+  type VaultSlotTransport,
+  type VaultUnlockResult,
+  type VaultSecret,
+  VaultError,
+} from './vault/index.js';
+export { unlockInteractively, vaultCredentialFor, WRONG_PASSPHRASE, RESET_URL } from './vault/session.js';
+export { startCredential, type SshCredential } from './vault/agent.js';
+export { parsePrivateKey, publicKeyLine, type SshKey } from './vault/sshKey.js';

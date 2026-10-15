@@ -10,6 +10,7 @@ import { dispatchA, registerA, remoteAplexerArgs } from './commands/a.js';
 import { registerAccount } from './commands/account.js';
 import { registerGateway } from './commands/gateway.js';
 import { registerHosts } from './commands/hosts.js';
+import { registerVault } from './commands/vault.js';
 import { registerCatalog, registerExec, registerSessions, registerWorkspaces } from './commands/sessions.js';
 import { fail, setJsonMode, usageError } from './output.js';
 const runTui = async (options: { host?: string }) => (await import('./tui/index.js')).runTui(options);
@@ -43,7 +44,10 @@ program
       '  psc <host> wait <session>           until the agent is idle again\n' +
       '  psc <host> capture <session>        plain-text screen\n' +
       '  psc <host> status|stop <session>\n' +
-      '  psc help <verb>                     options of one verb (e.g. `psc help start`)\n',
+      '  psc help <verb>                     options of one verb (e.g. `psc help start`)\n' +
+      '\nKey vault (keys uploaded on the web, held only in memory here):\n' +
+      '  psc vault unlock [--remember]       unlock with your vault passphrase\n' +
+      '  psc vault status | lock             what is unlocked/remembered; forget it\n',
   )
   .option('-H, --host <name>', 'saved host for every subcommand (same as the per-command -H)')
   .option('--json', 'machine-readable output for every subcommand')
@@ -71,6 +75,7 @@ registerCatalog(program);
 registerExec(program);
 registerAccount(program);
 registerGateway(program);
+registerVault(program);
 
 /**
  * Usage errors (unknown option or command, missing or invalid argument) are

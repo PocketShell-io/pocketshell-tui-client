@@ -41,6 +41,17 @@ export interface HostEntry {
   binary?: string;
   /** Trusted local provisioning, bound to the gateway ID and accepted SSH shell transport. */
   nativeWindowsCli?: NativeWindowsCliPolicy;
+  /** Local key-vault binding override (`psc vault bind`); non-secret ids only. */
+  vault?: HostVaultBinding;
+}
+
+export interface HostVaultBinding {
+  /** The account host alias whose vault binding applies (default: matched automatically). */
+  alias?: string;
+  /** A vault key id used directly; wins over the account binding. */
+  keyId?: string;
+  /** Gateway policy for a local keyId binding (default `managed`). */
+  gatewayAuth?: 'host' | 'managed' | 'both';
 }
 
 interface HostsFileShape {
@@ -115,6 +126,7 @@ export function validateHostEntry(entry: HostEntry): HostEntry {
     }
   }
   if (entry.binary !== undefined) validateBinary(entry.binary);
+  if (entry.vault !== undefined) validateVaultBinding(entry.name, entry.vault);
   if (entry.mode === 'ssh') {
     if (!entry.ssh) throw new HostStoreError(`host ${entry.name}: ssh mode needs ssh settings`);
     validateSshDestination(entry.ssh.destination);
@@ -126,6 +138,33 @@ export function validateHostEntry(entry: HostEntry): HostEntry {
     validateGatewayDeviceId(entry.gateway.deviceId);
   }
   return entry;
+}
+
+const VAULT_KEY_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+
+export function validateVaultBinding(name: string, vault: HostVaultBinding): HostVaultBinding {
+  const keys = Object.keys(vault);
+  if (
+    typeof vault !== 'object' || vault === null ||
+    keys.some((k) => !['alias', 'keyId', 'gatewayAuth'].includes(k)) ||
+    (vault.alias !== undefined && (typeof vault.alias !== 'string' || !vault.alias || vault.alias.length > 256 || /[\x00-\x1f\x7f]/.test(vault.alias))) ||
+    (vault.keyId !== undefined && (typeof vault.keyId !== 'string' || !VAULT_KEY_ID_RE.test(vault.keyId))) ||
+    (vault.gatewayAuth !== undefined && !['host', 'managed', 'both'].includes(vault.gatewayAuth))
+  ) {
+    throw new HostStoreError(`host ${name}: invalid vault binding`);
+  }
+  return vault;
+}
+
+/** Set (or with null clear) a saved host's local vault binding. */
+export function setHostVault(name: string, vault: HostVaultBinding | null): HostEntry {
+  const data = read();
+  const host = data.hosts.find((entry) => entry.name === name);
+  if (!host) throw new HostStoreError(`no saved host named ${JSON.stringify(name)} (see \`hosts list\`)`);
+  if (vault === null) delete host.vault;
+  else host.vault = validateVaultBinding(name, vault);
+  write(data);
+  return host;
 }
 
 export function localHost(): HostEntry {
