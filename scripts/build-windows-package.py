@@ -49,7 +49,7 @@ def build(args):
         for file in ("package.json", "LICENSE"):
             if (ROOT / file).is_file():
                 shutil.copyfile(ROOT / file, psc / file)
-        for name in ("commander", "ws"):
+        for name in ("commander", "ws", "hash-wasm"):
             shutil.copytree(ROOT / "node_modules" / name, psc / "node_modules" / name)
         target = psc / "node_modules/@pocketshell/core"
         shutil.copytree(core / "dist", target / "dist")
