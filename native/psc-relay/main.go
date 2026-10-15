@@ -132,8 +132,14 @@ func eligible(a []string) bool {
 	if b[0] == "--json" {
 		b = b[1:]
 	}
-	if len(b) > 0 && b[0] == "a" {
+	explicitRemote := len(b) > 0 && b[0] == "a"
+	if explicitRemote {
 		b = b[1:]
+	}
+	// Local top-level commands whose second word looks like a host verb
+	// (`psc vault status`) never go to the daemon.
+	if !explicitRemote && len(b) > 0 && b[0] == "vault" {
+		return false
 	}
 	if len(b) == 0 {
 		return false
