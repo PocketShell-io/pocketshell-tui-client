@@ -63,7 +63,7 @@ directories if you want to retain login and pins.
 
 Build from a clean checkout with Node dependencies installed, Go from
 `native/psc-security/go.mod`, and Core commit
-`8f7b178c3116ffca1996abb99ed86d9561ccb690` emitted next to the client:
+`93db1bc082a806ecdf2d96641d30edf5afba585d` emitted next to the client:
 
 ```sh
 python3 scripts/build-windows-package.py --go /usr/local/go/bin/go
