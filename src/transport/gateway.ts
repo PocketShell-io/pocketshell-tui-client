@@ -38,6 +38,7 @@ import {
   SSH_FAILURE_EXIT,
 } from './openssh.js';
 import { runInteractive } from './process.js';
+import type { VaultConnectCredential } from '../vault/session.js';
 import { ConnectionError, type AttachOptions, type Connection, type ExecOptions, type ExecOutcome } from './types.js';
 
 /** Hardening options, including an unconditional gateway no-reuse policy. */
@@ -190,6 +191,8 @@ export interface GatewayArgvInput {
   statusFile?: string | null;
   /** Daemon-only expiry receipt; legacy invocations omit it. */
   leaseFile?: string;
+  /** Vault key (src/vault/agent.ts): agent socket + public key file. */
+  vault?: { agentSocket: string; publicKeyFile: string; keepOwnIdentity: boolean };
 }
 
 /** The hardened ssh argv (without argv[0]). Pure apart from the identity-file existence check. */
@@ -213,7 +216,13 @@ export function buildGatewaySshArgv(input: GatewayArgvInput): string[] {
     if (!USER_RE.test(input.user)) throw usage(`invalid login name ${JSON.stringify(input.user).slice(0, 80)}`);
     argv.push('-l', input.user);
   }
-  if (input.identityFile !== undefined) {
+  if (input.vault !== undefined) {
+    argv.push(
+      '-o', `IdentityAgent=${checkSshPath(input.vault.agentSocket, 'vault agent socket')}`,
+      '-i', checkSshPath(input.vault.publicKeyFile, 'vault public key'),
+    );
+  }
+  if (input.identityFile !== undefined && (input.vault === undefined || input.vault.keepOwnIdentity)) {
     const raw = input.identityFile.startsWith('~/') ? join(homedir(), input.identityFile.slice(2)) : input.identityFile;
     const ident = checkSshPath(resolvePath(raw), 'identity file');
     if(process.platform==='win32') callNative({op:'check-identity',root:runtimeDir(),path:ident});
@@ -277,6 +286,7 @@ export class GatewayConnection implements Connection {
     readonly hostName: string,
     private readonly sshPath: string,
     private readonly argvInput: Omit<GatewayArgvInput, 'kind' | 'command' | 'statusFile'>,
+    private readonly vaultCredential?: VaultConnectCredential,
   ) {}
 
   argv(kind: 'exec' | 'attach', command: string, statusFile?: string | null): string[] {
@@ -338,6 +348,7 @@ export class GatewayConnection implements Connection {
 
   async close(): Promise<void> {
     // No persistent SSH master or reusable control socket is created.
+    await this.vaultCredential?.credential.close();
   }
 }
 
@@ -357,7 +368,11 @@ function checkLogin(): void {
   }
 }
 
-export async function openGatewayConnection(hostName: string, config: GatewayHostConfig): Promise<Connection> {
+export async function openGatewayConnection(
+  hostName: string,
+  config: GatewayHostConfig,
+  vault?: VaultConnectCredential,
+): Promise<Connection> {
   let endpoint: GatewayEndpoint;
   try {
     validateDeviceId(config.deviceId);
@@ -393,8 +408,17 @@ export async function openGatewayConnection(hostName: string, config: GatewayHos
     ...(config.identityFile !== undefined ? { identityFile: config.identityFile } : {}),
     statusDir,
     invocation: cliInvocation(),
+    ...(vault?.credential.agentSocket !== undefined && vault.credential.identityFile !== undefined
+      ? {
+          vault: {
+            agentSocket: vault.credential.agentSocket,
+            publicKeyFile: vault.credential.identityFile,
+            keepOwnIdentity: vault.gatewayAuth === 'both',
+          },
+        }
+      : {}),
   };
   // Validate the whole argv now so a bad config fails before the first exec.
   buildGatewaySshArgv({ ...input, kind: 'exec', command: 'true' });
-  return new GatewayConnection(hostName, sshPath, input);
+  return new GatewayConnection(hostName, sshPath, input, vault);
 }

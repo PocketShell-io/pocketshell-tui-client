@@ -76,6 +76,53 @@ session expires after 30 days, or after 14 days without use; `psc logout`
 revokes it, and every session can be listed and revoked from the web
 (`psc whoami` prints the URL).
 
+## Key vault (`psc vault`)
+
+SSH keys and host passwords are uploaded once on the web
+(https://app.pocketshell.io/keys) into your account's end-to-end encrypted
+key vault, unlocked by one account vault passphrase. psc only reads it: the
+server never sees the passphrase or a plaintext key, and psc never writes a
+private key to disk.
+
+```bash
+psc vault unlock                 # no-echo passphrase prompt
+psc vault unlock --remember      # also keep the vault key in the OS keychain
+psc vault status [--json]        # locked/unlocked, keys, which hosts use them (no secrets)
+psc vault lock                   # wipe it here and forget the remembered key
+psc vault bind <host> --alias <account-host> | --key <name|keyId> | --clear
+```
+
+- **Connect.** A saved host whose account host (same name, same gateway
+  device, or a unique `user@host:port` match in your synced host list) is
+  bound to a vault key connects with that key: psc decrypts it into memory,
+  serves it to OpenSSH from an in-process ssh-agent on a private 0700 socket,
+  and writes only the public key next to it. Vault passwords use an
+  `SSH_ASKPASS` helper on the same private socket (ssh mode only; gateway
+  connections are key-only). Gateway policy `host`, or no binding, keeps the
+  usual key resolution (`-i`, ssh-agent, `~/.ssh`).
+- **Locked.** A connect to a vault-bound host while locked asks for the
+  passphrase on a terminal; without one it fails `VAULT_LOCKED` (exit 3).
+  Unbound hosts never touch the vault.
+- **Scripts.** Pass the passphrase on an inherited file descriptor and name
+  it in `PSC_VAULT_PASSPHRASE_FD` (the variable holds the fd number, never the
+  passphrase): `PSC_VAULT_PASSPHRASE_FD=3 psc vault unlock 3< <(pass show pocketshell/vault)`.
+- **Remember on this device.** `--remember` stores the vault data key (not the
+  passphrase) in the OS keychain: Secret Service via `secret-tool` on Linux,
+  the login keychain on macOS, current-user DPAPI on Windows. Without a
+  keychain it is refused; `--remember-file` keeps it in a `0600` file instead,
+  which anyone able to read that file (root, a backup, malware running as you)
+  can use to decrypt every key in the vault. Without either, nothing is
+  stored: like ssh-agent, a small psc process holds the unlock in memory for
+  this login (owner-only socket in the private runtime dir; it signs for ssh
+  and never hands out the vault key) until 30 idle minutes pass
+  (`PSC_VAULT_IDLE_MINUTES`), 12 hours at most, or `psc vault lock`; after that the
+  next connect asks again. On Windows use `--remember` (DPAPI).
+- **Wrong passphrase.** "That passphrase didn't unlock your vault." and a
+  retry, waiting 1 s, 2 s, 4 s… (up to 30 s) after the third miss; the server
+  may lock unlocking for a while after repeated misses. A forgotten passphrase
+  cannot be recovered: reset the vault at https://app.pocketshell.io/keys?reset=1
+  and upload the keys again.
+
 ## Remote aplexer (`psc a`)
 
 `psc a` is a short, predictable command family for non-interactively driving
@@ -331,9 +378,11 @@ psc -H box sessions list --json                # agentState: working / waiting /
 | `~/.config/pocketshell-tui-client/hosts.json` | saved hosts |
 | `~/.config/pocketshell-tui-client/backend-cache.json` | per-host session-backend verdicts (24 h TTL) |
 | `~/.config/pocketshell-tui-client/daemon-usage.json` | hosts used recently, for pre-warm (24 h window) |
+| `~/.config/pocketshell-tui-client/vault-bindings.json` | which saved host uses which vault key id (0600, no secrets) |
+| `~/.config/pocketshell-tui-client/vault-remember.json` | only with `psc vault unlock --remember-file`: the vault data key (0600) |
 | `~/.config/pocketshell/credentials.json` | login session, shared with the `pocketshell` CLI |
 | `~/.config/pocketshell/gateway_known_hosts` | gateway host-key pins, shared with the `pocketshell` CLI |
-| `$XDG_RUNTIME_DIR/pocketshell-tui-client/` | OpenSSH control sockets |
+| `$XDG_RUNTIME_DIR/pocketshell-tui-client/` | OpenSSH control sockets, the vault holder socket, per-connect vault agent dirs |
 | `$XDG_RUNTIME_DIR/psc-daemon-<uid>/` | resident daemon socket (0700, peer-UID checked) |
 | `%LOCALAPPDATA%\PocketShell\psc-daemon-….secret` | Windows pipe connection secret (owner-only) |
 

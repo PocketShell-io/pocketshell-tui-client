@@ -4,9 +4,10 @@ import { noteResidentCapability } from '../hostCapability.js';
 import { trace } from '../trace.js';
 import { parseHostSessionsList, type SessionRow, type SessionsListing } from '@pocketshell/core';
 import type { HostEntry } from '../hosts/store.js';
-import { openConnection } from '../transport/index.js';
+import { ConnectionError, openConnection } from '../transport/index.js';
 import { HostChannel, RpcFailure, type EventFrame } from './channel.js';
 import { gatewayPolicy } from './policy.js';
+import { isVaultBound } from '../vault/session.js';
 
 /** A replica answer is served only while the last push frame is this fresh. */
 export const REPLICA_LIVE_WINDOW_MS = 6_000;
@@ -183,6 +184,10 @@ function ensureSweeper(): void {
   sweeper.unref();
 }
 async function channelFor(host: HostEntry): Promise<HostChannel> {
+  if (isVaultBound(host)) {
+    // Its ssh would authenticate with the user's own keys, not the vault key.
+    throw new ConnectionError(`${host.name} uses a vault key; it is served on the classic path, not a resident channel`, 'VAULT_RESIDENT_UNSUPPORTED', 4);
+  }
   let policy;
   try {
     policy = gatewayPolicy(host);
@@ -551,7 +556,9 @@ export async function daemonClient(host: HostEntry): Promise<HostClient> {
     if (context) context.transportPath = 'legacy';
     return new HostClient(await openConnection(host), host.binary, host);
   };
-  if (host.mode !== 'gateway' || host.nativeWindowsCli || (host.binary && host.binary !== 'pocketshell')) {
+  // A vault-bound host never rides a resident channel (whose ssh would use the
+  // user's own keys); the classic path gets its key from the vault holder.
+  if (host.mode !== 'gateway' || host.nativeWindowsCli || (host.binary && host.binary !== 'pocketshell') || isVaultBound(host)) {
     slots.get(host.name)?.channel.close();
     return legacy();
   }
@@ -585,6 +592,7 @@ export async function daemonClient(host: HostEntry): Promise<HostClient> {
   }
 }
 export async function warmHost(host: HostEntry): Promise<void> {
+  if (isVaultBound(host)) return;
   await channelFor(host);
 }
 

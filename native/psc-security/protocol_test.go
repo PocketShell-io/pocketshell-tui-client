@@ -36,3 +36,15 @@ func TestStatusFixedNames(t *testing.T) {
 		}
 	}
 }
+
+func TestVaultKindNames(t *testing.T) {
+	ok := Request{Kind: "vault", Name: "0123456789abcdef0123456789abcdef"}
+	if name, limit, err := fileName(ok); err != nil || name != "vault-0123456789abcdef0123456789abcdef.dpapi" || limit != 4096 {
+		t.Fatalf("vault name: %q %d %v", name, limit, err)
+	}
+	for _, bad := range []string{"", "../x", "0123456789ABCDEF0123456789ABCDEF", "0123"} {
+		if _, _, err := fileName(Request{Kind: "vault", Name: bad}); err == nil {
+			t.Fatalf("vault name %q accepted", bad)
+		}
+	}
+}

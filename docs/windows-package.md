@@ -4,7 +4,7 @@ The v0.3.2 release workflow builds `psc-windows-x64-0.3.2.zip` on Linux,
 checks that exact zip on `windows-latest`, then attaches it and its SHA256 file
 to the GitHub release when the release owner pushes the version tag.
 The zip contains official Node 24.13.1, emitted PSC and pinned Core sources,
-the locked commander/ws packages, the reviewed Windows PTY closure, and the
+the locked commander/ws/hash-wasm packages, the reviewed Windows PTY closure, and the
 Go security helper. The Node archive SHA256 is pinned in the builder.
 
 Run this in a regular, non-administrator PowerShell terminal after v0.3.2 is
@@ -63,7 +63,7 @@ directories if you want to retain login and pins.
 
 Build from a clean checkout with Node dependencies installed, Go from
 `native/psc-security/go.mod`, and Core commit
-`07174896ce7041370bcbf4f791ec513870b9535f` emitted next to the client:
+`93db1bc082a806ecdf2d96641d30edf5afba585d` emitted next to the client:
 
 ```sh
 python3 scripts/build-windows-package.py --go /usr/local/go/bin/go

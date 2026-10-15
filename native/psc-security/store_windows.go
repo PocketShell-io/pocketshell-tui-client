@@ -355,7 +355,7 @@ func execute(r Request) (Reply, error) {
 		if e != nil || len(b) > limit {
 			return Reply{}, refused
 		}
-		if r.Kind == "credentials" {
+		if r.Kind == "credentials" || r.Kind == "vault" {
 			plain := b
 			defer func() {
 				for i := range plain {
@@ -386,7 +386,7 @@ func execute(r Request) (Reply, error) {
 	if r.Op == "exists" {
 		return v, nil
 	}
-	if r.Kind == "credentials" {
+	if r.Kind == "credentials" || r.Kind == "vault" {
 		b, e = dpapi(b, true)
 		if e != nil {
 			return Reply{}, e

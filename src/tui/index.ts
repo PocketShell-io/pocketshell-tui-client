@@ -14,6 +14,7 @@ import { HostClient } from '../hostClient.js';
 import { safeLine } from '../sanitize.js';
 import { getHost, listHosts, type HostEntry } from '../hosts/store.js';
 import { openConnection, type Connection } from '../transport/index.js';
+import { setTerminalPromptAllowed } from '../vault/session.js';
 import { keyToAction, parseKeys } from './keys.js';
 import { render } from './render.js';
 import {
@@ -541,6 +542,8 @@ export async function runTui(options: { host?: string }): Promise<number> {
     return 2;
   }
 
+  // A vault-bound host that is locked says so in the TUI (unlock with `psc vault unlock`).
+  setTerminalPromptAllowed(false);
   const app = new App(host, input, output);
   const crash = (error: unknown) => {
     app.emergencyRestore();

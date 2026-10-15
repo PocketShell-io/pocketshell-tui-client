@@ -736,3 +736,95 @@ export async function mintGatewayToken(
   }
   return { token, expiresAt };
 }
+
+/** One account settings slot read with the CLI session; null when absent (404). */
+export interface CliSlot {
+  data: string;
+  version: number;
+}
+
+const VAULT_SLOT_RE = /^(main|vault|vk-[A-Za-z0-9_-]{1,61})$/;
+
+/**
+ * `GET /cli/settings/{slot}` (read-only, `main` | `vault` | `vk-*`): the
+ * zero-knowledge ciphertext the web uploaded. 404 → null. The bearer goes
+ * only to the stored broker.
+ */
+export async function getCliSlot(baseUrl: string, accessToken: string, slot: string, options: HttpOptions = {}): Promise<CliSlot | null> {
+  if (!VAULT_SLOT_RE.test(slot)) throw new AccountError(`invalid settings slot ${JSON.stringify(slot)}`, { code: 'USAGE' });
+  const resp = await request(baseUrl, 'GET', `/cli/settings/${slot}`, { ...options, bearer: accessToken });
+  rateLimitCheck(resp);
+  if (resp.status === 401) throw new NotLoggedIn(`Your PocketShell login is no longer valid; ${LOGIN_HINT}.`);
+  if (resp.status === 404) {
+    // A 404 without the slot handler's code is a route the server does not have yet.
+    if (errorCode(resp) === 'not_found') return null;
+    throw new AccountError(
+      'This PocketShell server does not offer vault access to the terminal client yet (GET /cli/settings).',
+      { code: 'VAULT_UNAVAILABLE' },
+    );
+  }
+  if (resp.status === 503) {
+    throw new AccountError('The PocketShell server has no key vault configured yet.', { code: 'VAULT_UNAVAILABLE' });
+  }
+  if (resp.status === 403 && errorCode(resp) === 'vault_verify_required') {
+    throw new AccountError('The server wants the vault passphrase again before it hands out keys; run `psc vault unlock`.', {
+      code: 'VAULT_VERIFY_REQUIRED',
+      exitCode: 3,
+    });
+  }
+  if (resp.status !== 200) throw new AccountError(describeFailure(resp, `Reading the ${slot} slot`));
+  const what = 'settings slot';
+  return { data: reqStr(resp.data, 'data', what, 16 * 1024), version: reqInt(resp.data, 'version', what, 0, 1_000_000_000) };
+}
+
+/** Phase-2 server verifier answer, 1:1 with core's VaultServerVerifier.verify. */
+export type VaultVerifyResult =
+  | { kind: 'ok' }
+  | { kind: 'wrong'; retryAfterMs: number }
+  | { kind: 'locked'; retryAfterMs: number }
+  | { kind: 'noVerifier' }
+  | { kind: 'unavailable' };
+
+/**
+ * `POST /cli/vault/verify {auth}` (W2-contract). 404 no_verifier is
+ * `noVerifier`; a missing route, 409 verifier_stale, 503 or any other answer
+ * is `unavailable`: the client-side check decides and the unlock never fails
+ * because of the server. 401 invalid_token is a dead login.
+ */
+export async function verifyVaultCli(
+  baseUrl: string,
+  accessToken: string,
+  auth: string,
+  options: HttpOptions = {},
+): Promise<VaultVerifyResult> {
+  let resp: BrokerResponse;
+  try {
+    resp = await request(baseUrl, 'POST', '/cli/vault/verify', { ...options, bearer: accessToken, body: { auth } });
+  } catch (error) {
+    if (error instanceof BrokerUnavailable) return { kind: 'unavailable' };
+    throw error;
+  }
+  const num = (key: string, cap: number): number | null => {
+    const value = get(resp.data, key);
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.min(value, cap) : null;
+  };
+  const code = errorCode(resp);
+  if (resp.status === 200 && get(resp.data, 'ok') === true) return { kind: 'ok' };
+  if (resp.status === 401 && code === 'wrong_passphrase') {
+    return { kind: 'wrong', retryAfterMs: (num('retryAfter', 86_400) ?? 0) * 1000 };
+  }
+  if (resp.status === 429 && (code === 'too_many_attempts' || code === 'rate_limited')) {
+    return { kind: 'locked', retryAfterMs: (num('retryAfter', 86_400) ?? 60) * 1000 };
+  }
+  if (resp.status === 401) throw new NotLoggedIn(`Your PocketShell login is no longer valid; ${LOGIN_HINT}.`);
+  if (resp.status === 404 && code === 'no_verifier') return { kind: 'noVerifier' };
+  return { kind: 'unavailable' };
+}
+
+/** `GET /cli/vault/status` (phase 2): public KDF params when the header is gated. null when absent. */
+export async function getVaultStatusCli(baseUrl: string, accessToken: string, options: HttpOptions = {}): Promise<Record<string, unknown> | null> {
+  const resp = await request(baseUrl, 'GET', '/cli/vault/status', { ...options, bearer: accessToken });
+  if (resp.status === 401 && errorCode(resp) === 'invalid_token') throw new NotLoggedIn(`Your PocketShell login is no longer valid; ${LOGIN_HINT}.`);
+  if (resp.status !== 200 || resp.data === null) return null;
+  return resp.data;
+}

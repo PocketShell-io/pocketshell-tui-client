@@ -14,7 +14,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 NODE_VERSION = "24.13.1"
 NODE_SHA256 = "fba577c4bb87df04d54dd87bbdaa5a2272f1f99a2acbf9152e1a91b8b5f0b279"
-CORE_COMMIT = "07174896ce7041370bcbf4f791ec513870b9535f"
+CORE_COMMIT = "93db1bc082a806ecdf2d96641d30edf5afba585d"
 
 
 def digest(path):
@@ -49,7 +49,7 @@ def build(args):
         for file in ("package.json", "LICENSE"):
             if (ROOT / file).is_file():
                 shutil.copyfile(ROOT / file, psc / file)
-        for name in ("commander", "ws"):
+        for name in ("commander", "ws", "hash-wasm"):
             shutil.copytree(ROOT / "node_modules" / name, psc / "node_modules" / name)
         target = psc / "node_modules/@pocketshell/core"
         shutil.copytree(core / "dist", target / "dist")

@@ -1,6 +1,6 @@
 {
   "name": "@pocketshell/tui-client",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "PocketShell in the terminal: a TUI and agent-friendly CLI client for PocketShell hosts over local, SSH, and gateway connections.",
   "license": "MIT",
   "author": "Alexey Grigorev <alexey.s.grigoriev@gmail.com>",
@@ -31,10 +31,11 @@
     "bundle:relay": "npm run bundle && node scripts/build-relay.mjs"
   },
   "dependencies": {
+    "@lydell/node-pty": "1.2.0-beta.15",
     "@pocketshell/core": "file:../pocketshell-core",
     "commander": "12.1.0",
-    "ws": "8.22.0",
-    "@lydell/node-pty": "1.2.0-beta.15"
+    "hash-wasm": "4.12.0",
+    "ws": "8.22.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
