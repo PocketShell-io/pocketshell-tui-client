@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { save } from '../src/account/credentials.js';
+import { holderRunning, stopHolder } from '../src/vault/holder.js';
 import { buildVault, sshKeygen, type BuiltVault } from './vaultFixture.js';
 
 const ROOT = resolve(__dirname, '..');
@@ -54,7 +55,13 @@ afterAll(async () => {
 
 const savedEnv = { ...process.env };
 let xdg = '';
+// One private runtime dir for the whole file: holders live there, never in the real one.
+const runtime = mkdtempSync(join(tmpdir(), 'psc-vault-run-'));
+afterAll(() => {
+  rmSync(runtime, { recursive: true, force: true });
+});
 beforeEach(() => {
+  process.env.XDG_RUNTIME_DIR = runtime;
   xdg = mkdtempSync(join(tmpdir(), 'psc-vault-cli-'));
   process.env.XDG_CONFIG_HOME = xdg;
   process.env.POCKETSHELL_BROKER_URL = base;
@@ -64,7 +71,8 @@ beforeEach(() => {
   verifyAnswer = null;
   save({ brokerUrl: base, accessToken: TOKEN, tokenId: 'tok_v', email: 'you@example.com', expiresAt: Math.floor(Date.now() / 1000) + 86400, label: 'me@box' });
 });
-afterEach(() => {
+afterEach(async () => {
+  await stopHolder();
   process.env = { ...savedEnv };
   rmSync(xdg, { recursive: true, force: true });
 });
@@ -127,6 +135,29 @@ describe('psc vault', () => {
     const after = await psc(['vault', 'status', '--json']);
     expect(json(after.stdout)).toMatchObject({ unlocked: false, remembered: null });
   }, 120_000);
+
+  it('unlock without --remember: held in memory for later invocations, then lock', async () => {
+    const r = await psc(['vault', 'unlock', '--json'], PASS);
+    expect(r.code, r.stderr).toBe(0);
+    expect(json(r.stdout)).toMatchObject({ ok: true, remembered: null, held: true, idleMinutes: 30 });
+    expect(await holderRunning()).toBe(true);
+    assertNoSecretsOnDisk();
+    const s = await psc(['vault', 'status', '--json']);
+    expect(json(s.stdout)).toMatchObject({ unlocked: true, remembered: 'holder' });
+    const l = await psc(['vault', 'lock', '--json']);
+    expect(json(l.stdout)).toMatchObject({ ok: true, held: true, forgot: null });
+    expect(await holderRunning()).toBe(false);
+    expect(json((await psc(['vault', 'status', '--json'])).stdout)).toMatchObject({ unlocked: false });
+  }, 120_000);
+
+  it('the holder locks itself after the idle timeout', async () => {
+    process.env.PSC_VAULT_IDLE_MINUTES = '0.02';
+    const r = await psc(['vault', 'unlock', '--json'], PASS);
+    expect(json(r.stdout)).toMatchObject({ held: true });
+    expect(await holderRunning()).toBe(true);
+    await new Promise((res) => setTimeout(res, 2500));
+    expect(await holderRunning()).toBe(false);
+  }, 60_000);
 
   it('a wrong passphrase on the fd: the friendly message, exit 1, nothing remembered', async () => {
     const r = await psc(['vault', 'unlock', '--remember-file'], 'not it');

@@ -112,7 +112,10 @@ psc vault bind <host> --alias <account-host> | --key <name|keyId> | --clear
   keychain it is refused; `--remember-file` keeps it in a `0600` file instead,
   which anyone able to read that file (root, a backup, malware running as you)
   can use to decrypt every key in the vault. Without either, nothing is
-  stored and the next connect asks again.
+  stored: like ssh-agent, a small psc process holds the unlock in memory for
+  this login (owner-only socket in the private runtime dir) until 30 idle
+  minutes pass (`PSC_VAULT_IDLE_MINUTES`) or `psc vault lock`; after that the
+  next connect asks again. On Windows use `--remember` (DPAPI).
 - **Wrong passphrase.** "That passphrase didn't unlock your vault." and a
   retry, waiting 1 s, 2 s, 4 s… (up to 30 s) after the third miss; the server
   may lock unlocking for a while after repeated misses. A forgotten passphrase
@@ -378,7 +381,7 @@ psc -H box sessions list --json                # agentState: working / waiting /
 | `~/.config/pocketshell-tui-client/vault-remember.json` | only with `psc vault unlock --remember-file`: the vault data key (0600) |
 | `~/.config/pocketshell/credentials.json` | login session, shared with the `pocketshell` CLI |
 | `~/.config/pocketshell/gateway_known_hosts` | gateway host-key pins, shared with the `pocketshell` CLI |
-| `$XDG_RUNTIME_DIR/pocketshell-tui-client/` | OpenSSH control sockets |
+| `$XDG_RUNTIME_DIR/pocketshell-tui-client/` | OpenSSH control sockets, the vault holder socket, per-connect vault agent dirs |
 | `$XDG_RUNTIME_DIR/psc-daemon-<uid>/` | resident daemon socket (0700, peer-UID checked) |
 | `%LOCALAPPDATA%\PocketShell\psc-daemon-….secret` | Windows pipe connection secret (owner-only) |
 

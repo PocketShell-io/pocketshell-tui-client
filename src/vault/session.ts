@@ -11,6 +11,7 @@ import {
   bindingFor,
   cachedBinding,
   cliAccount,
+  holdVault,
   refreshBindings,
   secretOrThrow,
   storeFor,
@@ -124,6 +125,12 @@ export async function obtainUnlockedStore(
   if ((await unlockRemembered(account, store)) !== null) return store;
   if (options.prompt === false) throw lockedError();
   await unlockInteractively(store, options);
+  // Later invocations reuse this unlock until the holder's idle timeout.
+  try {
+    await holdVault(account, store);
+  } catch {
+    /* the connect still works; the next one asks again */
+  }
   // A fresh unlock refreshes which saved hosts are vault-bound.
   try {
     await refreshBindings(account, store, listHosts());

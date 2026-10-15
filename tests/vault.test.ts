@@ -7,7 +7,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { KeyVaultStore } from '@pocketshell/core';
 import type { HostEntry } from '../src/hosts/store.js';
 import {
@@ -21,6 +21,7 @@ import {
   unlockRemembered,
   type VaultAccount,
 } from '../src/vault/index.js';
+import { stopHolder } from '../src/vault/holder.js';
 import { keychain, loadRemembered, rememberFile, saveRemembered, setKeychainForTests, type Keychain } from '../src/vault/remember.js';
 import { unlockInteractively, vaultCredentialFor, WRONG_PASSPHRASE } from '../src/vault/session.js';
 import { buildVault, fakeVerifier, memoryTransport, sshKeygen, syncEnvelope, unavailableVerifier, type BuiltVault } from './vaultFixture.js';
@@ -49,14 +50,21 @@ beforeAll(async () => {
 }, 60_000);
 
 const savedEnv = { ...process.env };
+// One private runtime dir for the file (the control dir is cached per process).
+const runtime = mkdtempSync(join(tmpdir(), 'psc-vault-run-'));
+afterAll(async () => {
+  await stopHolder();
+  rmSync(runtime, { recursive: true, force: true });
+});
 beforeEach(() => {
   const xdg = mkdtempSync(join(tmpdir(), 'psc-vault-'));
   process.env.XDG_CONFIG_HOME = xdg;
-  process.env.XDG_RUNTIME_DIR = join(xdg, 'run');
+  process.env.XDG_RUNTIME_DIR = runtime;
   delete process.env.PSC_VAULT_PASSPHRASE_FD;
   setKeychainForTests(null);
 });
-afterEach(() => {
+afterEach(async () => {
+  await stopHolder();
   rmSync(process.env.XDG_CONFIG_HOME!, { recursive: true, force: true });
   process.env = { ...savedEnv };
   setKeychainForTests(undefined);

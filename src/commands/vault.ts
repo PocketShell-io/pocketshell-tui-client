@@ -10,6 +10,7 @@ import { emit, isJsonMode, setJsonMode } from '../output.js';
 import {
   cachedBinding,
   cliAccount,
+  holdVault,
   hostKey,
   lockVault,
   refreshBindings,
@@ -22,6 +23,7 @@ import {
   type VaultAccount,
 } from '../vault/index.js';
 import { PASSPHRASE_FD_ENV } from '../vault/passphrase.js';
+import { idleMs, runHolder } from '../vault/holder.js';
 import { keychain, loadRemembered, rememberFile } from '../vault/remember.js';
 import { KEYS_URL, RESET_URL, unlockInteractively } from '../vault/session.js';
 import { action, jsonOption } from './common.js';
@@ -46,8 +48,10 @@ Remember on this device:
                     RISK: anyone who can read that file (root, a backup, malware
                     running as you) can decrypt every key in your vault without
                     the passphrase. Use only on a machine you trust.
-Without either, nothing is stored: the next connect to a vault-bound host asks
-for the passphrase again (or fails VAULT_LOCKED, exit 3, without a terminal).
+Without either, nothing is stored: the unlock is held in memory by a small
+psc process (owner-only socket) for this login until ${'$'}{PSC_VAULT_IDLE_MINUTES:-30}
+idle minutes pass or \`psc vault lock\`; after that a connect to a vault-bound
+host asks again (or fails VAULT_LOCKED, exit 3, without a terminal).
 
 Wrong passphrase: "That passphrase didn't unlock your vault." and a retry, with
 a growing wait after the third miss. Forgot it? ${RESET_URL}`;
@@ -79,6 +83,11 @@ function hostRows(store: KeyVaultStore | null, accountId: string, hosts: readonl
 export function registerVault(program: Command): void {
   const vault = program.command('vault').description('your PocketShell key vault: unlock, lock, status, bind');
 
+  // The memory-only holder process (started by `vault unlock`); not for direct use.
+  vault.command('__hold', { hidden: true }).action(async () => {
+    await runHolder();
+  });
+
   jsonOption(
     vault
       .command('unlock')
@@ -106,6 +115,8 @@ export function registerVault(program: Command): void {
         const store = storeFor(account);
         await unlockInteractively(store, isJsonMode() ? { onMessage: (t) => process.stderr.write(`${t}\n`) } : {});
         if (backend !== null) rememberVault(account, store, backend);
+        // Without --remember the unlock lives in the memory-only holder until it idles out.
+        const held = backend === null ? await holdVault(account, store).catch(() => false) : false;
         const hosts = listHosts();
         const bindings = await refreshBindings(account, store, hosts);
         const bound = hosts.filter((h) => bindings[hostKey(h)] !== undefined).map((h) => h.name);
@@ -122,6 +133,8 @@ export function registerVault(program: Command): void {
             vaultId: store.vaultId,
             epoch: store.epoch,
             remembered: backend,
+            held,
+            idleMinutes: held ? idleMs() / 60_000 : null,
             keys: store.listKeys().length,
             boundHosts: bound,
           },
@@ -133,7 +146,9 @@ export function registerVault(program: Command): void {
                 ? 'Remembered on this device (OS keychain). `psc vault lock` forgets it.'
                 : backend === 'file'
                   ? 'Remembered on this device (0600 file). `psc vault lock` forgets it.'
-                  : 'Not remembered: the next connect to a vault-bound host asks again (use --remember to keep it).',
+                  : held
+                    ? `Held in memory for this login; locks after ${idleMs() / 60_000} idle minutes or on \`psc vault lock\`.`
+                    : 'Not remembered: the next connect to a vault-bound host asks again (use --remember to keep it).',
             ].join('\n'),
         );
       }),
@@ -144,9 +159,9 @@ export function registerVault(program: Command): void {
       if (opts.json) setJsonMode(true);
       const account = accountOrExplain();
       const had = loadRemembered(account.id);
-      lockVault(account.id);
-      emit({ ok: true, locked: true, forgot: had?.backend ?? null }, () =>
-        had ? `Vault locked; forgot the remembered key (${had.backend}).` : 'Vault locked (nothing was remembered on this device).',
+      const wasHeld = await lockVault(account.id);
+      emit({ ok: true, locked: true, forgot: had?.backend ?? null, held: wasHeld }, () =>
+        had ? `Vault locked; forgot the remembered key (${had.backend}).` : 'Vault locked (nothing is remembered on this device).',
       );
     }),
   );

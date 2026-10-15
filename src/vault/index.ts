@@ -31,7 +31,8 @@ import {
   type VaultSlotTransport,
 } from '@pocketshell/core';
 import { isKeyId, VaultError, type GatewayAuth, type VaultSecret } from './format.js';
-import { accountKey, forgetRemembered, loadRemembered, saveRemembered, type RememberBackend } from './remember.js';
+import { heldRecord, startHolder, stopHolder } from './holder.js';
+import { accountKey, forgetRemembered, loadRemembered, saveRemembered, type RememberBackend, type RememberRecord } from './remember.js';
 import { decryptSyncEnvelope, parseAccountHosts, type AccountHost } from './syncEnvelope.js';
 
 export { KeyVaultStore } from '@pocketshell/core';
@@ -110,17 +111,16 @@ export function storeFor(account: VaultAccount): KeyVaultStore {
   return store;
 }
 
-/** Unlock from this device's remembered record; a stale one is deleted. True when unlocked. */
-export async function unlockRemembered(account: VaultAccount, store: KeyVaultStore): Promise<RememberBackend | null> {
-  const remembered = loadRemembered(account.id);
-  if (remembered === null) return null;
-  const { record } = remembered;
+/** Where an unlocked vault came from without a passphrase. */
+export type UnlockSource = RememberBackend | 'holder';
+
+async function unlockWithRecord(store: KeyVaultStore, record: RememberRecord): Promise<'ok' | 'stale'> {
   const dek = new Uint8Array(Buffer.from(record.dek, 'base64url'));
   const auth = record.auth ? new Uint8Array(Buffer.from(record.auth, 'base64url')) : null;
   try {
     const result = await store.unlockWithRememberedDek({ vaultId: record.vaultId, epoch: record.epoch, dek, ...(auth ? { auth } : {}) });
-    if (result.kind === 'ok') return remembered.backend;
-    if (result.kind === 'stale' || result.kind === 'noVault') forgetRemembered(account.id);
+    if (result.kind === 'ok') return 'ok';
+    if (result.kind === 'stale' || result.kind === 'noVault') return 'stale';
     if (result.kind === 'rateLimited') {
       throw new VaultError(
         `The server is rate limiting vault unlocks; try again in ${Math.ceil(result.retryAfterMs / 1000)}s.`,
@@ -129,42 +129,66 @@ export async function unlockRemembered(account: VaultAccount, store: KeyVaultSto
       );
     }
     if (result.kind === 'corrupt') throw new VaultError('The vault on your account is malformed.', 'VAULT_MALFORMED');
-    if (result.kind === 'error') throw new VaultError(`Could not unlock with the remembered key: ${result.message}`, 'VAULT_ERROR');
-    return null;
+    throw new VaultError(`Could not unlock with the remembered key: ${result.message}`, 'VAULT_ERROR');
   } finally {
     dek.fill(0);
     auth?.fill(0);
   }
 }
 
-export function rememberVault(account: VaultAccount, store: KeyVaultStore, backend: RememberBackend): void {
+/**
+ * Unlock without a passphrase: from the vault holder (an earlier `psc
+ * vault unlock` in this login), else this device's remembered record. A
+ * stale source is dropped. Null when neither opens the vault.
+ */
+export async function unlockRemembered(account: VaultAccount, store: KeyVaultStore): Promise<UnlockSource | null> {
+  const held = await heldRecord(account.id);
+  if (held !== null) {
+    if ((await unlockWithRecord(store, held)) === 'ok') return 'holder';
+    await stopHolder();
+  }
+  const remembered = loadRemembered(account.id);
+  if (remembered === null) return null;
+  if ((await unlockWithRecord(store, remembered.record)) === 'ok') return remembered.backend;
+  forgetRemembered(account.id);
+  return null;
+}
+
+/** The store's remember record in its stored (base64url) form. */
+function recordOf(store: KeyVaultStore): RememberRecord {
   const record = store.exportRememberRecord();
   if (record === null) throw new VaultError('The vault is locked.', 'VAULT_LOCKED', 3);
   try {
-    saveRemembered(
-      account.id,
-      {
-        v: 1,
-        vaultId: record.vaultId,
-        epoch: record.epoch,
-        dek: Buffer.from(record.dek).toString('base64url'),
-        ...(record.auth ? { auth: Buffer.from(record.auth).toString('base64url') } : {}),
-      },
-      backend,
-    );
+    return {
+      v: 1,
+      vaultId: record.vaultId,
+      epoch: record.epoch,
+      dek: Buffer.from(record.dek).toString('base64url'),
+      ...(record.auth ? { auth: Buffer.from(record.auth).toString('base64url') } : {}),
+    };
   } finally {
     record.dek.fill(0);
     record.auth?.fill(0);
   }
 }
 
-/** Lock: wipe the in-memory DEK and forget the remembered record on this device. */
-export function lockVault(accountId: string): void {
+export function rememberVault(account: VaultAccount, store: KeyVaultStore, backend: RememberBackend): void {
+  saveRemembered(account.id, recordOf(store), backend);
+}
+
+/** Keep the unlocked vault in the memory-only holder for later invocations (POSIX). */
+export function holdVault(account: VaultAccount, store: KeyVaultStore): Promise<boolean> {
+  return startHolder(account.id, recordOf(store));
+}
+
+/** Lock: wipe the in-memory DEK, stop the holder and forget the remembered record on this device. */
+export async function lockVault(accountId: string): Promise<boolean> {
   if (current !== null) {
     current.store.lock();
     current = null;
   }
   forgetRemembered(accountId);
+  return stopHolder();
 }
 
 // -- bindings cache ------------------------------------------------------------
