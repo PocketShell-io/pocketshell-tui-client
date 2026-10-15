@@ -215,10 +215,47 @@ describe('daemon sessions replica', () => {
   it('a protocol-1 channel never subscribes and always round-trips', async () => {
     state.protocol = 1;
     const client = await residentClient();
-    const { meta } = await served(client, (c) => c.listSessions());
+    const first = await served(client, (c) => c.listSessions());
+    expect(first.meta).toMatchObject({ source: 'live' });
+    // No push stream exists on protocol 1, so nothing is stored: the second
+    // read round-trips too instead of serving a 6 s cache as "replica".
+    const second = await served(client, (c) => c.listSessions());
+    expect(second.meta).toMatchObject({ source: 'live' });
     expect(state.calls.some((c) => c.method === 'subscribe')).toBe(false);
-    expect(state.calls.some((c) => c.method === 'list')).toBe(true);
-    expect(meta).toMatchObject({ source: 'live' });
+    expect(state.calls.filter((c) => c.method === 'list')).toHaveLength(2);
+  });
+
+  it('a push applied mid-refresh wins over the older response', async () => {
+    const client = await residentClient();
+    const channel = state.channels.at(-1) as unknown as {
+      emit(frame: Record<string, unknown>): void;
+      call(method: string, params: unknown): Promise<unknown>;
+    };
+    channel.emit(snapshot([row('uuid-1')], 7));
+    // Hold the live listing open; a newer snapshot lands while it is away.
+    let resolveList!: (value: unknown) => void;
+    const original = channel.call.bind(channel);
+    channel.call = (method: string, params: unknown) =>
+      method === 'list'
+        ? new Promise((resolve) => {
+            resolveList = resolve as (value: unknown) => void;
+          })
+        : original(method, params);
+    const pending = served(client, (c) => c.listSessions({ fresh: true }));
+    // Let the live request park inside the mocked channel before racing it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    channel.emit(snapshot([row('uuid-2')], 9));
+    resolveList({ schema: 3, sessions: [row('uuid-1')], errors: [] });
+    const { value: answered } = await pending;
+    // The caller still gets the round-trip answer it asked for...
+    expect(answered.sessions.map((r) => r.id)).toEqual(['uuid-1']);
+    // ...but the replica keeps the newer pushed state, and the next read
+    // is local again with no further round trip.
+    const listsBefore = state.calls.filter((c) => c.method === 'list').length;
+    const { value: next, meta } = await served(client, (c) => c.listSessions());
+    expect(next.sessions.map((r) => r.id)).toEqual(['uuid-2']);
+    expect(meta).toMatchObject({ source: 'replica', seq: 9 });
+    expect(state.calls.filter((c) => c.method === 'list')).toHaveLength(listsBefore);
   });
 
   it('a gap heartbeat marks the topic stale: one live refresh, then replica again', async () => {

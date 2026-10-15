@@ -105,12 +105,11 @@ describe('daemon atomic operations and policy retirement', () => {
   it('uses one helper request per selector operation and validates schema3 output', async () => {
     const client = await daemonClient(host);
     expect((await client.listSessions()).sessions[0]?.name).toBe('fixture:tag');
-    // The live listing refreshes the P2 replica, so resolving serves it
-    // locally: one request total for list+resolve, then one per capture/send.
+    // Protocol-1 helpers keep no replica: every read is a live round trip.
     expect((await client.resolveSession('tag')).id).toBe(row.id);
     expect((await client.captureSelected('tag', { mode: 'screen' })).text).toBe('fixture capture');
     expect((await client.sendSelected('tag', 'hello', { enter: false })).id).toBe(row.id);
-    expect(state.calls.map((c) => c.method)).toEqual(['list', 'capture', 'send']);
+    expect(state.calls.map((c) => c.method)).toEqual(['list', 'status', 'capture', 'send']);
     expect(state.calls[0].params).toEqual({ format: 'psc' });
     expect(state.calls.slice(1).every((c) => c.params.selectorMode === 'psc')).toBe(true);
     expect(state.instances).toHaveLength(1);
