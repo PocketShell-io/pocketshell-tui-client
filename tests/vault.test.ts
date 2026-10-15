@@ -22,8 +22,9 @@ import {
   type VaultAccount,
 } from '../src/vault/index.js';
 import { stopHolder } from '../src/vault/holder.js';
-import { keychain, loadRemembered, rememberFile, saveRemembered, setKeychainForTests, type Keychain } from '../src/vault/remember.js';
-import { unlockInteractively, vaultCredentialFor, WRONG_PASSPHRASE } from '../src/vault/session.js';
+import { assertRememberFileSupported, keychain, loadRemembered, rememberFile, saveRemembered, setKeychainForTests, type Keychain } from '../src/vault/remember.js';
+import { defaultPassphraseSource, unlockInteractively, vaultCredentialFor, WRONG_PASSPHRASE } from '../src/vault/session.js';
+import { requests, type RequestContext } from '../src/daemon/context.js';
 import { buildVault, fakeVerifier, memoryTransport, sshKeygen, syncEnvelope, unavailableVerifier, type BuiltVault } from './vaultFixture.js';
 
 const PASS = 'correct horse battery staple';
@@ -176,6 +177,11 @@ describe('remember on this device', () => {
     expect(existsSync(rememberFile())).toBe(false);
   });
 
+  it('--remember-file is refused on Windows (DPAPI is the way there)', () => {
+    expect(() => assertRememberFileSupported('win32')).toThrow(expect.objectContaining({ code: 'VAULT_UNSUPPORTED_PLATFORM', exitCode: 2 }));
+    expect(() => assertRememberFileSupported('linux')).not.toThrow();
+  });
+
   it('--remember-file: a 0600 file, then a passphrase-free unlock', async () => {
     const a = account();
     const store = newStore(a);
@@ -316,5 +322,31 @@ describe('host bindings', () => {
     const cred = await vaultCredentialFor(host, { account: a, unlock: { readPassphrase: async () => PASS, onMessage: () => {} } });
     expect(cred!.keyId).toBe(edId);
     await cred!.credential.close();
+  });
+});
+
+describe('inside the resident daemon', () => {
+  const ctx = (): RequestContext => ({ json: true, stdin: '', tty: false, exitCode: 0, signal: new AbortController().signal, write: () => {} });
+
+  it('never takes a passphrase, not even from PSC_VAULT_PASSPHRASE_FD', () => {
+    process.env.PSC_VAULT_PASSPHRASE_FD = '0';
+    expect(requests.run(ctx(), () => defaultPassphraseSource())).toBeNull();
+  });
+
+  it('never unlocks a vault into its own memory: no holder and nothing remembered is VAULT_LOCKED', async () => {
+    const a = account();
+    mkdirSync(dirname(bindingsFile()), { recursive: true });
+    writeFileSync(
+      bindingsFile(),
+      JSON.stringify({ v: 1, account: a.id, vaultId: built.vaultId, epoch: 1, hosts: { 'name:hetzner': { keyId: edId, gatewayAuth: 'managed', alias: 'hetzner' } } }),
+      { mode: 0o600 },
+    );
+    let asked = 0;
+    const host: HostEntry = { name: 'hetzner', mode: 'ssh', ssh: { destination: 'h' } };
+    await expect(
+      requests.run(ctx(), () => vaultCredentialFor(host, { account: a, unlock: { readPassphrase: async () => (asked++, PASS), onMessage: () => {} } })),
+    ).rejects.toMatchObject({ code: 'VAULT_LOCKED', exitCode: 3 });
+    expect(asked).toBe(0);
+    expect(a.pulls).toEqual([]);
   });
 });

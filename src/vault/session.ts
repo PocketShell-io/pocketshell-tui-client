@@ -6,7 +6,8 @@
 import { requests } from '../daemon/context.js';
 import { listHosts, type HostEntry } from '../hosts/store.js';
 import { startCredential, type SshCredential } from './agent.js';
-import { holderCredential } from './holder.js';
+import { holderCredential, startHolder } from './holder.js';
+import { expectedPasswordPrompt } from './sshPrompt.js';
 import { VaultError, type GatewayAuth } from './format.js';
 import {
   bindingFor,
@@ -16,6 +17,7 @@ import {
   refreshBindings,
   resultError,
   secretOrThrow,
+  storedAccountId,
   storeFor,
   unlockRemembered,
   type KeyVaultStore,
@@ -50,6 +52,8 @@ export function setTerminalPromptAllowed(allowed: boolean): void {
 
 /** The default passphrase source for this process, or null when there is none. */
 export function defaultPassphraseSource(): { read: (attempt: number) => Promise<string>; retry: boolean } | null {
+  // The resident daemon never unlocks (no prompt, and never the caller's fd number in its fd table).
+  if (requests.getStore() !== undefined) return null;
   const fd = passphraseFd();
   if (fd !== null) return { read: async () => readPassphraseFd(fd), retry: false };
   // Never prompt from inside the resident daemon (no terminal there) or under the TUI.
@@ -188,14 +192,30 @@ export async function vaultCredentialFor(
     throw new VaultError(`${host.name} uses a key from your PocketShell vault; log in first (\`psc login\`).`, 'NOT_LOGGED_IN', 3);
   }
   // An unlock held by the holder: it serves the agent; no key enters this process.
-  const held = await holderCredential(account.id, {
+  const request = {
     alias: cached.alias,
     ...(host.vault?.keyId ? { keyId: host.vault.keyId, ...(host.vault.gatewayAuth ? { gatewayAuth: host.vault.gatewayAuth } : {}) } : {}),
-  });
+    // Only an ssh-mode host can use a vault password; the holder answers exactly this prompt.
+    ...(host.mode === 'ssh' && host.ssh ? { expectPrompt: await expectedPasswordPrompt(host.ssh).catch(() => undefined) } : {}),
+  };
+  const held = await holderCredential(account.id, request);
   if (held === null) return null;
   if (held !== undefined) {
     if (held.credential.password && host.mode === 'gateway') throw passwordOnGateway(host);
     return held;
+  }
+  if (requests.getStore() !== undefined) {
+    // The resident daemon never unlocks a vault into its own long-lived memory:
+    // a remembered device gets a holder (which loads the record itself), else it is locked.
+    if (await startHolder(account.id, 'remembered')) {
+      const again = await holderCredential(account.id, request);
+      if (again === null) return null;
+      if (again !== undefined) {
+        if (again.credential.password && host.mode === 'gateway') throw passwordOnGateway(host);
+        return again;
+      }
+    }
+    throw lockedError();
   }
   const store = await obtainUnlockedStore(account, options.unlock);
   // The index is authoritative over the cache: the binding may have moved.
@@ -203,5 +223,17 @@ export async function vaultCredentialFor(
   if (binding === null || binding.gatewayAuth === 'host') return null;
   const secret = secretOrThrow(await store.decryptKey(binding.keyId));
   if (secret.kind === 'password' && host.mode === 'gateway') throw passwordOnGateway(host);
-  return { credential: await startCredential(secret), gatewayAuth: binding.gatewayAuth, keyId: binding.keyId };
+  const expectPrompt = secret.kind === 'password' && host.ssh ? await expectedPasswordPrompt(host.ssh) : undefined;
+  return {
+    credential: await startCredential(secret, expectPrompt ? { expectPrompt } : {}),
+    gatewayAuth: binding.gatewayAuth,
+    keyId: binding.keyId,
+  };
+}
+
+/** True when `host` connects with a vault credential (no network I/O): the daemon keeps such hosts off its resident channels. */
+export function isVaultBound(host: HostEntry): boolean {
+  if (host.mode === 'local') return false;
+  const binding = cachedBinding(storedAccountId(), host);
+  return binding !== null && binding.gatewayAuth !== 'host';
 }

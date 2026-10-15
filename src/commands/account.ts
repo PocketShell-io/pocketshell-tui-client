@@ -14,6 +14,7 @@ import {
   type PendingLogin,
 } from '../account/index.js';
 import { setExitCode } from '../daemon/context.js';
+import { lockVault, storedAccountId } from '../vault/index.js';
 import { emit, EXIT, isJsonMode, setJsonMode } from '../output.js';
 import { action, jsonOption } from './common.js';
 
@@ -113,6 +114,8 @@ export function registerAccount(program: Command): void {
   ).action(
     action(async (opts: { json?: boolean }) => {
       if (opts.json) setJsonMode(true);
+      // Signing out locks the vault on this device (design: "Sign-out forgets it").
+      await lockVault(storedAccountId());
       const result = await logout();
       if (result.result === 'removed_unsafe') warn('Removed an unsafe credentials file without contacting the broker.');
       if (result.result === 'removed_unreadable') warn('Removed an unreadable credentials file.');

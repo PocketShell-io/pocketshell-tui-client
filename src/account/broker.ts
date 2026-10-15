@@ -763,6 +763,9 @@ export async function getCliSlot(baseUrl: string, accessToken: string, slot: str
       { code: 'VAULT_UNAVAILABLE' },
     );
   }
+  if (resp.status === 503) {
+    throw new AccountError('The PocketShell server has no key vault configured yet.', { code: 'VAULT_UNAVAILABLE' });
+  }
   if (resp.status === 403 && errorCode(resp) === 'vault_verify_required') {
     throw new AccountError('The server wants the vault passphrase again before it hands out keys; run `psc vault unlock`.', {
       code: 'VAULT_VERIFY_REQUIRED',

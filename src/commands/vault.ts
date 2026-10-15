@@ -3,6 +3,7 @@
  * terminal. The logic lives in src/vault; this file only renders it.
  * Nothing here prints a key, a passphrase, a DEK or an AUTH value.
  */
+import { existsSync } from 'node:fs';
 import { InvalidArgumentError, type Command } from 'commander';
 import { cleanText } from '../account/index.js';
 import { getHost, listHosts, setHostVault, type HostEntry, type HostVaultBinding } from '../hosts/store.js';
@@ -17,6 +18,7 @@ import {
   refreshBindings,
   resultError,
   rememberVault,
+  storedAccountId,
   storeFor,
   unlockRemembered,
   VaultError,
@@ -25,7 +27,7 @@ import {
 } from '../vault/index.js';
 import { PASSPHRASE_FD_ENV } from '../vault/passphrase.js';
 import { holderStatus, idleMs, runHolder, type HolderStatus } from '../vault/holder.js';
-import { keychain, loadRemembered, rememberFile } from '../vault/remember.js';
+import { assertRememberFileSupported, keychain, loadRemembered, rememberFile } from '../vault/remember.js';
 import { KEYS_URL, RESET_URL, unlockInteractively } from '../vault/session.js';
 import { action, jsonOption } from './common.js';
 
@@ -50,9 +52,10 @@ Remember on this device:
                     running as you) can decrypt every key in your vault without
                     the passphrase. Use only on a machine you trust.
 Without either, nothing is stored: the unlock is held in memory by a small
-psc process (owner-only socket) for this login until ${'$'}{PSC_VAULT_IDLE_MINUTES:-30}
-idle minutes pass or \`psc vault lock\`; after that a connect to a vault-bound
-host asks again (or fails VAULT_LOCKED, exit 3, without a terminal).
+psc process (owner-only socket; it signs for ssh and never hands out the key)
+for this login until ${'$'}{PSC_VAULT_IDLE_MINUTES:-30} idle minutes pass, 12 hours
+at most, or \`psc vault lock\`; after that a connect to a vault-bound host asks
+again (or fails VAULT_LOCKED, exit 3, without a terminal).
 
 Wrong passphrase: "That passphrase didn't unlock your vault." and a retry, with
 a growing wait after the third miss. Forgot it? ${RESET_URL}`;
@@ -90,10 +93,13 @@ export function registerVault(program: Command): void {
 
   // The memory-only holder process (started by `vault unlock`); not for direct use.
   vault.command('__hold', { hidden: true }).action(async () => {
-    await runHolder((id) => {
-      const account = cliAccount();
-      return account.id === id ? new KeyVaultStore({ transport: account.transport, verifier: account.verifier }) : null;
-    });
+    await runHolder(
+      (id) => {
+        const account = cliAccount();
+        return account.id === id ? new KeyVaultStore({ transport: account.transport, verifier: account.verifier }) : null;
+      },
+      (id) => loadRemembered(id)?.record ?? null,
+    );
   });
 
   jsonOption(
@@ -109,7 +115,8 @@ export function registerVault(program: Command): void {
         if (opts.json) setJsonMode(true);
         if (opts.remember && opts.rememberFile) throw new VaultError('pass --remember or --remember-file, not both', 'USAGE', 2);
         const backend = opts.remember ? 'keychain' : opts.rememberFile ? 'file' : null;
-        // Refuse before asking for anything when the keychain cannot be used.
+        // Refuse before asking for anything when the chosen store cannot be used.
+        if (backend === 'file') assertRememberFileSupported();
         if (backend === 'keychain' && keychain() === null) {
           throw new VaultError(
             'No OS keychain is available here (Linux needs secret-tool and a D-Bus session). ' +
@@ -165,9 +172,10 @@ export function registerVault(program: Command): void {
   jsonOption(vault.command('lock').description('lock the vault and forget it on this device')).action(
     action(async (opts: { json?: boolean }) => {
       if (opts.json) setJsonMode(true);
-      const account = accountOrExplain();
-      const had = loadRemembered(account.id);
-      const wasHeld = await lockVault(account.id);
+      // No session needed: an expired or logged-out device must still be able to lock.
+      const id = storedAccountId();
+      const had = id !== null ? loadRemembered(id) : existsSync(rememberFile()) ? { backend: 'file' as const } : null;
+      const wasHeld = await lockVault(id);
       emit({ ok: true, locked: true, forgot: had?.backend ?? null, held: wasHeld }, () =>
         had ? `Vault locked; forgot the remembered key (${had.backend}).` : 'Vault locked (nothing is remembered on this device).',
       );

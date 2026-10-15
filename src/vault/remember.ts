@@ -249,15 +249,29 @@ export function saveRemembered(account: string, record: RememberRecord, backend:
     kc.set(account, secret);
     return;
   }
+  assertRememberFileSupported();
   writePrivateFile(rememberFile(), `${JSON.stringify({ v: 1, account, record: secret })}\n`);
 }
 
-/** Forget on this device: every backend, best effort. */
-export function forgetRemembered(account: string): void {
-  try {
-    keychain()?.remove(account);
-  } catch {
-    /* nothing stored */
+/** Windows has DPAPI (`--remember`); a plaintext file there would only get inherited ACLs. */
+export function assertRememberFileSupported(platform: NodeJS.Platform = process.platform): void {
+  if (platform === 'win32') {
+    throw new VaultError(
+      '--remember-file is not available on Windows; use --remember (DPAPI, current user).',
+      'VAULT_UNSUPPORTED_PLATFORM',
+      2,
+    );
+  }
+}
+
+/** Forget on this device: the file always, the keychain item when the account is known. */
+export function forgetRemembered(account: string | null): void {
+  if (account !== null) {
+    try {
+      keychain()?.remove(account);
+    } catch {
+      /* nothing stored */
+    }
   }
   rmSync(rememberFile(), { force: true });
 }

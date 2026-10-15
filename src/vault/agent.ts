@@ -102,9 +102,12 @@ export interface SshCredential {
   close(): Promise<void>;
 }
 
-const ASKPASS_SCRIPT = (node: string, socket: string): string => `#!/bin/sh
-# PocketShell vault askpass: answers only ssh's password prompt.
-case "$1" in *assword*) ;; *) exit 1 ;; esac
+/** POSIX single-quoted shell word. */
+const shq = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+
+const ASKPASS_SCRIPT = (node: string, socket: string, prompt: string): string => `#!/bin/sh
+# PocketShell vault askpass: answers only this host's password prompt, once.
+[ "$1" = ${shq(prompt)} ] || exit 1
 exec "${node}" -e '
 const s = require("net").connect(process.argv[1]);
 let out = Buffer.alloc(0);
@@ -124,11 +127,17 @@ function privateDir(): string {
   return dir;
 }
 
+/** How long an unanswered password helper stays up. */
+export const PASSWORD_HELPER_TTL_MS = 120_000;
+
 /**
  * Start the agent (key) or askpass server (password) for one connection.
- * The secret reference is dropped from the caller's object afterwards.
+ * A password needs `expectPrompt`, the exact `user@host's password: ` ssh
+ * will show for this host (see expectedPasswordPrompt): any other prompt
+ * (a ProxyJump host, a host-key question) gets nothing. The password is
+ * answered once, then the helper closes; unused, it closes after 2 min.
  */
-export async function startCredential(secret: VaultSecret): Promise<SshCredential> {
+export async function startCredential(secret: VaultSecret, options: { expectPrompt?: string } = {}): Promise<SshCredential> {
   if (process.platform === 'win32') {
     throw new VaultError('Vault keys are not wired to Windows OpenSSH yet; use an identity file for this host.', 'VAULT_UNSUPPORTED_PLATFORM', 2);
   }
@@ -151,30 +160,47 @@ export async function startCredential(secret: VaultSecret): Promise<SshCredentia
       return {
         identityFile: pub,
         agentSocket: sock,
-        options: [`IdentityAgent=${sock}`, 'IdentitiesOnly=yes'],
+        // Never forward the vault agent to the host, whatever ~/.ssh/config says.
+        options: [`IdentityAgent=${sock}`, 'IdentitiesOnly=yes', 'ForwardAgent=no'],
         env: {},
         password: false,
         close,
       };
     }
-    const password = secret.password;
+    if (!options.expectPrompt || /[\x00-\x1f\x7f]/.test(options.expectPrompt)) {
+      throw new VaultError('a vault password needs the exact host prompt to answer', 'VAULT_PASSWORD_UNSUPPORTED', 2);
+    }
+    let password: string | null = secret.password;
     const sock = join(dir, `ap-${randomBytes(8).toString('hex')}.sock`);
-    // One answer per connection; ssh asks again only after a failed attempt.
+    // One answer, then the helper is gone: NumberOfPasswordPrompts=1 means
+    // ssh never asks twice, and nothing else gets the password later.
     const server = createServer((socket) => {
       socket.on('error', () => socket.destroy());
-      socket.end(password);
+      const answer = password;
+      password = null;
+      socket.end(answer ?? '');
+      server.close();
     });
     servers.push(server);
     await listen(server, sock);
     chmodSync(sock, 0o600);
+    const expiry = setTimeout(() => {
+      password = null;
+      server.close();
+    }, PASSWORD_HELPER_TTL_MS);
+    expiry.unref();
     if (/["$`\\]/.test(process.execPath)) throw new VaultError('cannot build the askpass helper for this node path', 'VAULT_UNSUPPORTED_PLATFORM', 2);
     const script = join(dir, 'askpass');
-    writeFileSync(script, ASKPASS_SCRIPT(process.execPath, sock), { mode: 0o700 });
+    writeFileSync(script, ASKPASS_SCRIPT(process.execPath, sock, options.expectPrompt), { mode: 0o700 });
     return {
       options: [
-        'PreferredAuthentications=password,keyboard-interactive',
+        // Password only: keyboard-interactive prompts come from the server
+        // and cannot be tied to this host.
+        'PreferredAuthentications=password',
+        'KbdInteractiveAuthentication=no',
         'PubkeyAuthentication=no',
         'NumberOfPasswordPrompts=1',
+        'ForwardAgent=no',
       ],
       env: { SSH_ASKPASS: script, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: process.env.DISPLAY ?? ':0' },
       password: true,

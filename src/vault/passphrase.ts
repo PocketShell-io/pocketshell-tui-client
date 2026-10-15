@@ -4,7 +4,7 @@
  * the secret), or a no-echo prompt on the terminal. Never argv, never an
  * environment variable holding the passphrase.
  */
-import { closeSync, readFileSync } from 'node:fs';
+import { closeSync, readSync } from 'node:fs';
 import { VaultError } from './format.js';
 
 export const PASSPHRASE_FD_ENV = 'PSC_VAULT_PASSPHRASE_FD';
@@ -22,10 +22,27 @@ export function passphraseFd(env: NodeJS.ProcessEnv = process.env): number | nul
 
 /** Read the passphrase from `fd` once (to EOF), dropping one trailing newline. */
 export function readPassphraseFd(fd: number): string {
-  let bytes: Buffer;
+  // Bounded: never read more than the limit + 1 byte, whatever the fd holds.
+  const buffer = Buffer.alloc(MAX_PASSPHRASE + 1);
+  let length = 0;
   try {
-    bytes = readFileSync(fd);
+    for (;;) {
+      let n: number;
+      try {
+        n = readSync(fd, buffer, length, buffer.length - length, null);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EAGAIN') {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); // a non-blocking pipe not yet written
+          continue;
+        }
+        throw error;
+      }
+      if (n === 0) break;
+      length += n;
+      if (length > MAX_PASSPHRASE) break;
+    }
   } catch {
+    buffer.fill(0);
     throw new VaultError(`could not read the passphrase from fd ${fd} (${PASSPHRASE_FD_ENV})`, 'USAGE', 2);
   } finally {
     if (fd > 2) {
@@ -36,9 +53,12 @@ export function readPassphraseFd(fd: number): string {
       }
     }
   }
-  if (bytes.length > MAX_PASSPHRASE) throw new VaultError('the passphrase is too long', 'USAGE', 2);
-  const text = bytes.toString('utf8').replace(/\r?\n$/, '');
-  bytes.fill(0);
+  if (length > MAX_PASSPHRASE) {
+    buffer.fill(0);
+    throw new VaultError('the passphrase is too long', 'USAGE', 2);
+  }
+  const text = buffer.subarray(0, length).toString('utf8').replace(/\r?\n$/, '');
+  buffer.fill(0);
   if (text.length === 0) throw new VaultError(`fd ${fd} (${PASSPHRASE_FD_ENV}) gave an empty passphrase`, 'USAGE', 2);
   return text;
 }

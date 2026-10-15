@@ -113,8 +113,9 @@ psc vault bind <host> --alias <account-host> | --key <name|keyId> | --clear
   which anyone able to read that file (root, a backup, malware running as you)
   can use to decrypt every key in the vault. Without either, nothing is
   stored: like ssh-agent, a small psc process holds the unlock in memory for
-  this login (owner-only socket in the private runtime dir) until 30 idle
-  minutes pass (`PSC_VAULT_IDLE_MINUTES`) or `psc vault lock`; after that the
+  this login (owner-only socket in the private runtime dir; it signs for ssh
+  and never hands out the vault key) until 30 idle minutes pass
+  (`PSC_VAULT_IDLE_MINUTES`), 12 hours at most, or `psc vault lock`; after that the
   next connect asks again. On Windows use `--remember` (DPAPI).
 - **Wrong passphrase.** "That passphrase didn't unlock your vault." and a
   retry, waiting 1 s, 2 s, 4 s… (up to 30 s) after the third miss; the server

@@ -28,6 +28,7 @@ let slots = new Map<string, string>();
 let hits: string[] = [];
 let verifyAnswer: { status: number; body: unknown } | null = null;
 let routeMissing = false;
+let unconfigured = false;
 
 beforeAll(async () => {
   const k = sshKeygen('ed25519');
@@ -42,6 +43,7 @@ beforeAll(async () => {
       };
       if (req.headers.authorization !== `Bearer ${TOKEN}`) return send(401, { error: 'invalid_token' });
       const m = /^\/cli\/settings\/([A-Za-z0-9_-]+)$/.exec(req.url ?? '');
+      if (req.method === 'GET' && m && unconfigured) return send(503, { error: 'vault_not_configured' });
       if (req.method === 'GET' && m && !routeMissing) {
         const data = slots.get(m[1]!);
         return data === undefined ? send(404, { error: 'not_found' }) : send(200, { slot: m[1], version: 1, updatedAt: 'x', size: data.length, data });
@@ -74,6 +76,7 @@ beforeEach(() => {
   hits = [];
   verifyAnswer = null;
   routeMissing = false;
+  unconfigured = false;
   save({ brokerUrl: base, accessToken: TOKEN, tokenId: 'tok_v', email: 'you@example.com', expiresAt: Math.floor(Date.now() / 1000) + 86400, label: 'me@box' });
 });
 afterEach(async () => {
@@ -181,6 +184,22 @@ describe('psc vault', () => {
     expect(statSync(holderSocket()).mode & 0o777).toBe(0o600);
   }, 120_000);
 
+  it('concurrent unlocks leave exactly one holder (no orphan)', async () => {
+    const [a, b] = await Promise.all([psc(['vault', 'unlock', '--json'], PASS), psc(['vault', 'unlock', '--json'], PASS)]);
+    expect(a.code + b.code).toBe(0);
+    expect(await holderRunning()).toBe(true);
+    await stopHolder();
+    await new Promise((r) => setTimeout(r, 1500));
+    const left = await new Promise<string>((done) => {
+      const c = spawnChild('sh', ['-c', 'ps -eo pid,etimes,args | grep "vault __hold" | grep -v grep || true']);
+      let out = '';
+      c.stdout.on('data', (d: Buffer) => (out += d.toString()));
+      c.on('close', () => done(out));
+    });
+    expect(await holderRunning()).toBe(false);
+    expect(left.trim()).toBe('');
+  }, 120_000);
+
   it('the holder locks itself after the idle timeout', async () => {
     process.env.PSC_VAULT_IDLE_MINUTES = '0.02';
     const r = await psc(['vault', 'unlock', '--json'], PASS);
@@ -190,12 +209,34 @@ describe('psc vault', () => {
     expect(await holderRunning()).toBe(false);
   }, 60_000);
 
+  it('lock works after the login expired; logout locks (holder and remembered key gone)', async () => {
+    expect((await psc(['vault', 'unlock', '--remember-file', '--json'], PASS)).code).toBe(0);
+    const file = join(xdg, 'pocketshell-tui-client', 'vault-remember.json');
+    save({ brokerUrl: base, accessToken: TOKEN, tokenId: 'tok_v', email: 'you@example.com', expiresAt: Math.floor(Date.now() / 1000) - 60, label: 'me@box' });
+    const l = await psc(['vault', 'lock', '--json']);
+    expect(l.code, l.stdout + l.stderr).toBe(0);
+    expect(json(l.stdout)).toMatchObject({ ok: true, locked: true, forgot: 'file' });
+    expect(existsSync(file)).toBe(false);
+
+    save({ brokerUrl: base, accessToken: TOKEN, tokenId: 'tok_v', email: 'you@example.com', expiresAt: Math.floor(Date.now() / 1000) + 86400, label: 'me@box' });
+    expect(json((await psc(['vault', 'unlock', '--json'], PASS)).stdout)).toMatchObject({ held: true });
+    expect(await holderRunning()).toBe(true);
+    await psc(['logout', '--json']);
+    expect(await holderRunning()).toBe(false);
+  }, 120_000);
+
   it('a wrong passphrase on the fd: the friendly message, exit 1, nothing remembered', async () => {
     const r = await psc(['vault', 'unlock', '--remember-file'], 'not it');
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("That passphrase didn't unlock your vault.");
     expect(r.stderr).toContain('https://app.pocketshell.io/keys?reset=1');
     expect(existsSync(join(xdg, 'pocketshell-tui-client', 'vault-remember.json'))).toBe(false);
+  }, 60_000);
+
+  it('an over-long passphrase on the fd is refused without reading it all', async () => {
+    const r = await psc(['vault', 'unlock', '--json'], 'x'.repeat(200_000));
+    expect(r.code).toBe(2);
+    expect(json(r.stdout)).toMatchObject({ ok: false, error: { code: 'USAGE', message: expect.stringContaining('too long') } });
   }, 60_000);
 
   it('--remember without an OS keychain is refused before asking (exit 2)', async () => {
@@ -237,6 +278,10 @@ describe('psc vault', () => {
     routeMissing = true;
     const missing = await psc(['vault', 'status', '--json']);
     expect(json(missing.stdout)).toMatchObject({ ok: false, error: { code: 'VAULT_UNAVAILABLE' } });
+    routeMissing = false;
+    unconfigured = true;
+    const off = await psc(['vault', 'status', '--json']);
+    expect(json(off.stdout)).toMatchObject({ ok: false, error: { code: 'VAULT_UNAVAILABLE' } });
   }, 60_000);
 
   it('vault bind sets and clears a local override on a saved host', async () => {

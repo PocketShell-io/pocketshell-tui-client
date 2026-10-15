@@ -13,7 +13,8 @@
  * bindings) is served for `psc vault status`.
  *
  * It wipes everything and exits on `psc vault lock`, after an idle period
- * with no request (default 30 min, PSC_VAULT_IDLE_MINUTES), or on a signal.
+ * with no request (default 30 min, PSC_VAULT_IDLE_MINUTES), 12 h after it
+ * started whatever the use, or on a signal.
  * POSIX only; Windows remembers with DPAPI instead.
  */
 import { spawn } from 'node:child_process';
@@ -28,6 +29,8 @@ import { VaultError, type GatewayAuth } from './format.js';
 import type { RememberRecord } from './remember.js';
 
 export const DEFAULT_IDLE_MINUTES = 30;
+/** However busy, a holder locks after this long (a fresh `psc vault unlock` starts a new one). */
+export const MAX_HOLD_HOURS = 12;
 const MAX_LINE = 64 * 1024;
 
 export function holderSupported(): boolean {
@@ -63,7 +66,7 @@ type Request =
   | { op: 'ping' }
   | { op: 'lock' }
   | { op: 'status'; account: string }
-  | { op: 'credential'; account: string; alias?: string | null; keyId?: string; gatewayAuth?: GatewayAuth };
+  | { op: 'credential'; account: string; alias?: string | null; keyId?: string; gatewayAuth?: GatewayAuth; expectPrompt?: string };
 
 /** One request/answer over the holder socket; null when no holder answers. */
 function ask(request: Request, timeoutMs = 15_000): Promise<Record<string, unknown> | null> {
@@ -142,13 +145,14 @@ export async function holderStatus(account: string): Promise<HolderStatus | null
  */
 export async function holderCredential(
   account: string,
-  binding: { alias: string | null; keyId?: string; gatewayAuth?: GatewayAuth },
+  binding: { alias: string | null; keyId?: string; gatewayAuth?: GatewayAuth; expectPrompt?: string | undefined },
 ): Promise<HeldCredential | null | undefined> {
   const answer = await ask({
     op: 'credential',
     account,
     alias: binding.alias,
     ...(binding.keyId ? { keyId: binding.keyId, gatewayAuth: binding.gatewayAuth ?? 'managed' } : {}),
+    ...(binding.expectPrompt ? { expectPrompt: binding.expectPrompt } : {}),
   });
   if (answer === null || answer.held === false) return undefined;
   const error = holderError(answer);
@@ -176,7 +180,7 @@ export async function holderCredential(
  * child's stdin, never argv or the environment; resolves once it listens
  * with the vault unlocked.
  */
-export async function startHolder(account: string, record: RememberRecord): Promise<boolean> {
+export async function startHolder(account: string, record: RememberRecord | 'remembered'): Promise<boolean> {
   if (!holderSupported()) return false;
   await stopHolder();
   const [node, ...script] = cliInvocation();
@@ -197,26 +201,33 @@ export async function startHolder(account: string, record: RememberRecord): Prom
     });
   });
   child.stdin!.on('error', () => {}); // a holder that failed early: `ready` already says false
-  child.stdin!.end(`${JSON.stringify({ account, record })}\n`);
+  child.stdin!.end(`${JSON.stringify(record === 'remembered' ? { account, fromRemembered: true } : { account, record })}\n`);
   const ok = await ready;
   child.stdout!.destroy();
   child.unref();
   return ok;
 }
 
-/** The holder process body (`psc vault __hold`). `open` builds the store for its account. */
-export async function runHolder(open: (account: string) => KeyVaultStore | null): Promise<void> {
+/**
+ * The holder process body (`psc vault __hold`). `open` builds the store for
+ * its account; `remembered` loads this device's remembered record (used
+ * when the daemon needs a vault key: the daemon itself never unlocks).
+ */
+export async function runHolder(
+  open: (account: string) => KeyVaultStore | null,
+  remembered: (account: string) => RememberRecord | null,
+): Promise<void> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-  let parsed: { account?: unknown; record?: RememberRecord } | null = null;
+  let parsed: { account?: unknown; record?: RememberRecord; fromRemembered?: boolean } | null = null;
   try {
-    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { account?: unknown; record?: RememberRecord };
+    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { account?: unknown; record?: RememberRecord; fromRemembered?: boolean };
   } catch {
     parsed = null;
   }
   chunks.forEach((c) => c.fill(0));
   const account = typeof parsed?.account === 'string' ? parsed.account : null;
-  const record = parsed?.record;
+  const record = parsed?.fromRemembered === true && account ? remembered(account) : parsed?.record;
   const opened = account ? open(account) : null;
   if (!account || !record || !opened) process.exit(2);
   const store: KeyVaultStore = opened;
@@ -231,6 +242,12 @@ export async function runHolder(open: (account: string) => KeyVaultStore | null)
   const path = holderSocket();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   chmodSync(dirname(path), 0o700);
+  // A concurrent unlock may have started another holder: replace it rather
+  // than unlink a live socket and orphan it.
+  for (let i = 0; i < 20 && (await holderRunning()); i++) {
+    await stopHolder();
+    await new Promise((r) => setTimeout(r, 100));
+  }
   try {
     if (lstatSync(path).isSocket()) rmSync(path, { force: true });
   } catch {
@@ -258,23 +275,34 @@ export async function runHolder(open: (account: string) => KeyVaultStore | null)
         ? store.getHostBinding(request.alias)
         : null;
     if (binding === null || binding.gatewayAuth === 'host') return { none: true };
-    let pending = served.get(binding.keyId);
+    const decrypt = async (): Promise<SshCredential> => {
+      const secret = await store.decryptKey(binding.keyId);
+      if (secret.kind === 'key') return startCredential(secret);
+      // A password helper is one-shot and per request: it is never cached here.
+      if (secret.kind === 'password') return startCredential(secret, request.expectPrompt ? { expectPrompt: request.expectPrompt } : {});
+      const relock = secret.kind === 'gated' || secret.kind === 'locked';
+      throw new VaultError(
+        secret.kind === 'missingKey'
+          ? `The vault key this host uses (${binding.keyId}) is not on your account any more; re-upload it or rebind the host on the web.`
+          : relock
+            ? 'The server wants the vault passphrase again; run `psc vault unlock`.'
+            : 'A vault key could not be decrypted; run `psc vault unlock` again.',
+        secret.kind === 'missingKey' ? 'VAULT_KEY_MISSING' : relock ? 'VAULT_LOCKED' : 'VAULT_RESET',
+        secret.kind === 'missingKey' ? 1 : 3,
+      );
+    };
+    const isPassword = store.getKey(binding.keyId)?.type === 'password';
+    let pending = isPassword ? undefined : served.get(binding.keyId);
     if (!pending) {
-      pending = (async () => {
-        const secret = await store.decryptKey(binding.keyId);
-        if (secret.kind === 'key' || secret.kind === 'password') return startCredential(secret);
-        const relock = secret.kind === 'gated' || secret.kind === 'locked';
-        throw new VaultError(
-          secret.kind === 'missingKey'
-            ? `The vault key this host uses (${binding.keyId}) is not on your account any more; re-upload it or rebind the host on the web.`
-            : relock
-              ? 'The server wants the vault passphrase again; run `psc vault unlock`.'
-              : 'A vault key could not be decrypted; run `psc vault unlock` again.',
-          secret.kind === 'missingKey' ? 'VAULT_KEY_MISSING' : relock ? 'VAULT_LOCKED' : 'VAULT_RESET',
-          secret.kind === 'missingKey' ? 1 : 3,
-        );
-      })();
-      served.set(binding.keyId, pending);
+      pending = decrypt();
+      if (isPassword) {
+        // Its own expiry closes it; track it only so a lock can close it early.
+        const key = `pw:${Math.random()}`;
+        served.set(key, pending);
+        setTimeout(() => served.delete(key), 130_000).unref();
+      } else {
+        served.set(binding.keyId, pending);
+      }
       pending.catch(() => served.delete(binding.keyId));
     }
     const c = await pending;
@@ -324,8 +352,16 @@ export async function runHolder(open: (account: string) => KeyVaultStore | null)
   process.on('SIGTERM', () => void wipeAndExit());
   process.on('SIGINT', () => void wipeAndExit());
   process.on('SIGHUP', () => {});
-  await new Promise<void>((resolve) => server.listen(path, resolve));
+  const listening = await new Promise<boolean>((resolve) => {
+    server.once('error', () => resolve(false));
+    server.listen(path, () => resolve(true));
+  });
+  if (!listening) {
+    store.lock();
+    process.exit(4);
+  }
   chmodSync(path, 0o600);
   touch();
+  setTimeout(() => void wipeAndExit(), MAX_HOLD_HOURS * 3_600_000).unref();
   process.stdout.write('ready\n');
 }

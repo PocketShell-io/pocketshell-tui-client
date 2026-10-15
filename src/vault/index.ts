@@ -59,6 +59,25 @@ export interface VaultAccount {
   readonly verifier: VaultServerVerifier;
 }
 
+/**
+ * This device's account id from the stored login, even an expired one (for
+ * lock/logout cleanup, which must work without a valid session). Null when
+ * there is no readable login.
+ */
+export function storedAccountId(): string | null {
+  let creds: credentials.Credentials;
+  try {
+    creds = credentials.load({ allowSharedMode: true });
+  } catch {
+    return null;
+  }
+  try {
+    return accountKey(sessionBrokerUrl(creds.brokerUrl), creds.email);
+  } catch {
+    return accountKey(creds.brokerUrl, creds.email);
+  }
+}
+
 /** The logged-in CLI session's account (throws NotLoggedIn without one). */
 export function cliAccount(options: broker.HttpOptions = {}): VaultAccount {
   const creds = credentials.requireSession();
@@ -182,8 +201,12 @@ export function holdVault(account: VaultAccount, store: KeyVaultStore): Promise<
   return startHolder(account.id, recordOf(store));
 }
 
-/** Lock: wipe the in-memory DEK, stop the holder and forget the remembered record on this device. */
-export async function lockVault(accountId: string): Promise<boolean> {
+/**
+ * Lock: wipe the in-memory DEK, stop the holder and forget what this device
+ * remembers. Needs no session: the holder and the remember file go
+ * unconditionally; the keychain item when the account is known.
+ */
+export async function lockVault(accountId: string | null): Promise<boolean> {
   if (current !== null) {
     current.store.lock();
     current = null;

@@ -13,6 +13,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { startCredential } from '../src/vault/agent.js';
 import { parsePrivateKey, publicKeyLine } from '../src/vault/sshKey.js';
 import { buildSshArgv } from '../src/transport/ssh.js';
+import { expectedPasswordPrompt, parseSshG } from '../src/vault/sshPrompt.js';
 import { findSsh, runSshCaptured } from '../src/transport/openssh.js';
 import { sshKeygen } from './vaultFixture.js';
 
@@ -99,21 +100,35 @@ describe('in-process agent', () => {
 });
 
 describe('askpass helper', () => {
-  it('answers a password prompt, refuses anything else (host-key confirmation)', async () => {
-    const cred = await startCredential({ kind: 'password', password: 'pw for tests' });
+  const PROMPT = "u@h.example's password: ";
+
+  it('answers only the exact host prompt, and only once', async () => {
+    const cred = await startCredential({ kind: 'password', password: 'pw for tests' }, { expectPrompt: PROMPT });
     try {
       const askpass = cred.env.SSH_ASKPASS!;
-      const ok = await run(askpass, ["u@h's password: "]);
-      expect(ok.status).toBe(0);
-      expect(ok.stdout).toBe('pw for tests\n');
       const hostKey = await run(askpass, ['Are you sure you want to continue connecting (yes/no/[fingerprint])?']);
       expect(hostKey.status).not.toBe(0);
-      expect(hostKey.stdout).toBe('');
-      expect(cred.password).toBe(true);
-      expect(cred.env.SSH_ASKPASS_REQUIRE).toBe('force');
+      const jump = await run(askpass, ["u@jump.example's password: "]);
+      expect(jump.status).not.toBe(0);
+      expect(jump.stdout).toBe('');
+      const ok = await run(askpass, [PROMPT]);
+      expect(ok.status).toBe(0);
+      expect(ok.stdout).toBe('pw for tests\n');
+      const again = await run(askpass, [PROMPT]);
+      expect(again.status).not.toBe(0);
+      expect(again.stdout).toBe('');
+      expect(cred.options).toEqual(expect.arrayContaining(['PreferredAuthentications=password', 'KbdInteractiveAuthentication=no', 'ForwardAgent=no']));
     } finally {
       await cred.close();
     }
+  });
+
+  it('refuses a password credential without the expected prompt', async () => {
+    await expect(startCredential({ kind: 'password', password: 'x' })).rejects.toMatchObject({ code: 'VAULT_PASSWORD_UNSUPPORTED' });
+  });
+
+  it('parses ssh -G for the prompt (HostKeyAlias wins over HostName)', () => {
+    expect(parseSshG('user alice\nhostname 10.0.0.5\nhostkeyalias none\n')).toEqual({ user: 'alice', hostname: '10.0.0.5', hostkeyalias: 'none' });
   });
 });
 
@@ -147,9 +162,10 @@ describe.skipIf(!sshdUsable)('end to end: a private sshd accepts the vault key',
         'ListenAddress 127.0.0.1',
         `HostKey ${host}`,
         `AuthorizedKeysFile ${join(dir, 'authorized_keys')}`,
-        'PasswordAuthentication no',
+        'PasswordAuthentication yes',
         'KbdInteractiveAuthentication no',
         'UsePAM no',
+        'AllowAgentForwarding yes',
         'StrictModes no',
         `PidFile ${join(dir, 'sshd.pid')}`,
       ].join('\n') + '\n',
@@ -164,19 +180,19 @@ describe.skipIf(!sshdUsable)('end to end: a private sshd accepts the vault key',
     rmSync(dir, { recursive: true, force: true });
   });
 
-  async function login(pem: string): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+  async function login(pem: string, command = 'echo vault-ok', config = 'none'): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
     const cred = await startCredential({ kind: 'key', pem });
     try {
       const argv = buildSshArgv({
         config: { destination: '127.0.0.1', port, user: process.env.USER ?? 'nobody' },
         controlPath: null,
         kind: 'exec',
-        command: 'echo vault-ok',
+        command,
         vault: { identityFile: cred.identityFile!, options: cred.options, password: false, keepOwnIdentity: false },
       });
       // Hermetic: ignore ~/.ssh/config and known_hosts, trust only this sshd.
       const at = argv.indexOf('--');
-      argv.splice(at, 0, '-F', 'none', '-o', `UserKnownHostsFile=${join(dir, 'known_hosts')}`, '-o', 'GlobalKnownHostsFile=/dev/null');
+      argv.splice(at, 0, '-F', config, '-o', `UserKnownHostsFile=${join(dir, 'known_hosts')}`, '-o', 'GlobalKnownHostsFile=/dev/null');
       return await runSshCaptured(findSsh(), argv, { timeoutMs: 20_000, env: { ...process.env, SSH_AUTH_SOCK: '' } });
     } finally {
       await cred.close();
@@ -188,6 +204,39 @@ describe.skipIf(!sshdUsable)('end to end: a private sshd accepts the vault key',
     expect(out.stderr).not.toMatch(/Permission denied/);
     expect(out.exitCode).toBe(0);
     expect(out.stdout.trim()).toBe('vault-ok');
+  }, 30_000);
+
+  it('the vault agent is never forwarded, even when ssh config says ForwardAgent yes', async () => {
+    const config = join(dir, 'user_config');
+    writeFileSync(config, 'Host *\n  ForwardAgent yes\n');
+    const out = await login(key.pem, 'if [ -n "$SSH_AUTH_SOCK" ]; then echo forwarded; else echo not-forwarded; fi', config);
+    expect(out.exitCode, out.stderr).toBe(0);
+    expect(out.stdout.trim()).toBe('not-forwarded');
+  }, 30_000);
+
+  it("a vault password is offered to this host's real prompt (computed with ssh -G)", async () => {
+    const user = process.env.USER ?? 'nobody';
+    const config = { destination: '127.0.0.1', port, user };
+    const expectPrompt = await expectedPasswordPrompt(config);
+    expect(expectPrompt).toBe(`${user}@127.0.0.1's password: `);
+    const cred = await startCredential({ kind: 'password', password: 'wrong-on-purpose' }, { expectPrompt });
+    try {
+      const argv = buildSshArgv({
+        config,
+        controlPath: null,
+        kind: 'exec',
+        command: 'true',
+        vault: { options: cred.options, password: true, keepOwnIdentity: false },
+      });
+      argv.splice(argv.indexOf('--'), 0, '-F', 'none', '-o', `UserKnownHostsFile=${join(dir, 'known_hosts')}`, '-o', 'GlobalKnownHostsFile=/dev/null');
+      const out = await runSshCaptured(findSsh(), argv, { timeoutMs: 20_000, env: { ...process.env, ...cred.env } });
+      // Non-root sshd cannot check passwords: the attempt fails, but it was made.
+      expect(out.exitCode).toBe(255);
+      const again = await run(cred.env.SSH_ASKPASS!, [expectPrompt]);
+      expect(again.stdout).toBe(''); // the one answer was spent on ssh's real prompt
+    } finally {
+      await cred.close();
+    }
   }, 30_000);
 
   it('a key the host does not know is refused', async () => {

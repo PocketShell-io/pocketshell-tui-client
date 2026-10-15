@@ -69,6 +69,9 @@ export function buildSshArgv({ config, controlPath, kind, command, vault }: SshA
   if (config.port !== undefined) argv.push('-p', String(config.port));
   if (config.user !== undefined) argv.push('-l', validateArgValue('ssh user', config.user));
   if (vault !== undefined) {
+    // Command-line options beat ~/.ssh/config; ForwardAgent=no keeps the
+    // vault agent on this machine even for a credential from elsewhere.
+    argv.push('-o', 'ForwardAgent=no');
     for (const option of vault.options) argv.push('-o', validateArgValue('vault ssh option', option));
     if (vault.identityFile !== undefined) argv.push('-i', validateArgValue('vault identity', vault.identityFile));
     if (vault.keepOwnIdentity && config.identityFile !== undefined) {
