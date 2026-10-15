@@ -14,7 +14,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 NODE_VERSION = "24.13.1"
 NODE_SHA256 = "fba577c4bb87df04d54dd87bbdaa5a2272f1f99a2acbf9152e1a91b8b5f0b279"
-CORE_COMMIT = "01f81f79f9a92878c1df353b164be774a572c3bf"
+CORE_COMMIT = "8f7b178c3116ffca1996abb99ed86d9561ccb690"
 
 
 def digest(path):

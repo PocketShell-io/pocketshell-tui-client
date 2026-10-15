@@ -60,7 +60,7 @@ pocketshell-client/pocketshell-client-account identity; no config or credential
 migration, fallback, automatic login, or new enrollment is added.
 
 Normal PR CI checks this exact client head against Core
-01f81f79f9a92878c1df353b164be774a572c3bf, the actual current published source
+8f7b178c3116ffca1996abb99ed86d9561ccb690, the actual current published source
 main at integration intake, not an unversioned default checkout or old UI lineage.
 Its API source pair passes the recorded local no-emit check. CI seals freshly
 emitted source/output inventories; neither CI nor this PR authorizes installation
