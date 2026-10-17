@@ -9,8 +9,8 @@ Requires Linux x86-64, Node.js **20 or newer** (tested with 24.13.1), npm,
 curl, and OpenSSH (`ssh`, `ssh-keygen`). The npm package is not public;
 install the self-contained Linux release asset, not the registry package.
 
-Latest verified release on 2026-10-15: [v0.6.0](https://github.com/PocketShell-io/pocketshell-tui-client/releases/tag/v0.6.0).
-It includes device-login commit `655e43f`; no new release is needed.
+Latest release: [v0.7.2](https://github.com/PocketShell-io/pocketshell-tui-client/releases/tag/v0.7.2).
+`psc <host> send` submits and confirms delivery (exit 0 delivered, 3 submitted but idle, 1 not submitted).
 Use the Linux x64 asset below to get the native daemon launcher. The generic
 tarball works on other Node platforms but does not provide that fast launcher.
 
@@ -20,12 +20,12 @@ uname -m                              # x86_64 for this asset
 mkdir -p "$HOME/tmp/psc-install"
 cd "$HOME/tmp/psc-install"
 curl -fL --show-error \
-  https://github.com/PocketShell-io/pocketshell-tui-client/releases/download/v0.6.0/pocketshell-tui-client-0.6.0-linux-x64.tgz \
+  https://github.com/PocketShell-io/pocketshell-tui-client/releases/download/v0.7.2/pocketshell-tui-client-0.7.2-linux-x64.tgz \
   -o psc.tgz
-echo 'cf617d9b866d4eb23acb2e28fa950ef31e16aba0479e7d7581c5a9e9a0592c8e  psc.tgz' | sha256sum -c -
+echo 'd9f80104a810e621baaa6fdadb26cc43436292aaa12ba91239740f9b091aee16  psc.tgz' | sha256sum -c -
 npm install --global --prefix "$HOME/.local/psc" ./psc.tgz
 export PATH="$HOME/.local/psc/bin:$PATH"
-psc --version                         # 0.6.0
+psc --version                         # 0.7.2
 ```
 
 Keep the PATH export in your shell startup configuration. For later upgrades,
@@ -33,7 +33,7 @@ check the latest release's asset name and checksum before substituting them.
 
 ## 2. Set the proxy policy, then log in
 
-**0.6.0 supports this environment safely, but refuses an untrusted proxy.**
+**0.7.2 supports this environment safely, but refuses an untrusted proxy.**
 With `NODE_USE_ENV_PROXY=1` and HTTP(S) proxies set, login returns
 `TRANSPORT_REFUSED` before sending any device or account credentials unless
 the broker is bypassed or the proxy is explicitly trusted.
