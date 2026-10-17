@@ -8,7 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = join(root, 'dist-bundle');
 
 // 1. Test bundle.mjs (generic bundle)
-execFileSync('node', ['scripts/bundle.mjs'], { cwd: root, stdio: 'pipe' });
+execFileSync(process.execPath, ['scripts/bundle.mjs'], { cwd: root, stdio: 'inherit' });
 const genericPkg = JSON.parse(readFileSync(join(outDir, 'package.json'), 'utf8'));
 assert.ok(genericPkg.dependencies?.['@lydell/node-pty'], 'generic package must declare @lydell/node-pty dependency');
 assert.ok(
@@ -18,10 +18,10 @@ assert.ok(
 
 // 2. Test build-relay.mjs (platform-specific binary bundle)
 if (process.platform === 'linux' && process.arch === 'x64') {
-  execFileSync('node', ['scripts/build-relay.mjs'], {
+  execFileSync(process.execPath, ['scripts/build-relay.mjs'], {
     cwd: root,
     env: { ...process.env, PSC_GO: existsSync('/usr/local/go/bin/go') ? '/usr/local/go/bin/go' : process.env.PSC_GO },
-    stdio: 'pipe',
+    stdio: 'inherit',
   });
   const relayPkg = JSON.parse(readFileSync(join(outDir, 'package.json'), 'utf8'));
   assert.ok(relayPkg.bundleDependencies?.includes('@lydell/node-pty'), 'bundleDependencies includes @lydell/node-pty');

@@ -68,5 +68,5 @@ if (existsSync(nodePtyDir)) {
 }
 
 writeFileSync('dist-bundle/package.json', JSON.stringify(pkg, null, 2) + '\n');
-
-execFileSync('npm', ['pack', '--quiet'], { cwd: resolve('dist-bundle'), stdio: 'inherit' });
+const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+execFileSync(npmCmd, ['pack', '--quiet'], { cwd: resolve('dist-bundle'), stdio: 'inherit', shell: process.platform === 'win32' });

@@ -59,6 +59,6 @@ const bundlePkg = {
     node: '>=20',
   },
 };
-
 writeFileSync(join(outDir, 'package.json'), `${JSON.stringify(bundlePkg, null, 2)}\n`);
-execFileSync('npm', ['pack', '--quiet'], { cwd: outDir, stdio: 'inherit' });
+const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+execFileSync(npmCmd, ['pack', '--quiet'], { cwd: outDir, stdio: 'inherit', shell: process.platform === 'win32' });
