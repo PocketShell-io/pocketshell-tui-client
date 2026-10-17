@@ -9,8 +9,8 @@ Requires Linux x86-64, Node.js **20 or newer** (tested with 24.13.1), npm,
 curl, and OpenSSH (`ssh`, `ssh-keygen`). The npm package is not public;
 install the self-contained Linux release asset, not the registry package.
 
-Latest release: [v0.7.2](https://github.com/PocketShell-io/pocketshell-tui-client/releases/tag/v0.7.2).
-`psc <host> send` submits and confirms delivery (exit 0 delivered, 3 submitted but idle, 1 not submitted).
+Latest release: [v0.7.3](https://github.com/PocketShell-io/pocketshell-tui-client/releases/tag/v0.7.3).
+`psc <host> send` submits and confirms delivery (exit 0 delivered or queued behind a busy turn, 3 submitted but idle, 1 not submitted). `psc <host> start --model` passes the model id through to the engine (`a` 0.1.18 or newer).
 Use the Linux x64 asset below to get the native daemon launcher. The generic
 tarball works on other Node platforms but does not provide that fast launcher.
 
@@ -20,12 +20,12 @@ uname -m                              # x86_64 for this asset
 mkdir -p "$HOME/tmp/psc-install"
 cd "$HOME/tmp/psc-install"
 curl -fL --show-error \
-  https://github.com/PocketShell-io/pocketshell-tui-client/releases/download/v0.7.2/pocketshell-tui-client-0.7.2-linux-x64.tgz \
+  https://github.com/PocketShell-io/pocketshell-tui-client/releases/download/v0.7.3/pocketshell-tui-client-0.7.3-linux-x64.tgz \
   -o psc.tgz
-echo 'd9f80104a810e621baaa6fdadb26cc43436292aaa12ba91239740f9b091aee16  psc.tgz' | sha256sum -c -
+echo 'cce1e4f9f86a71b3403a90bdd92237a1a9bb95eff02685e2e5456e42c5c041c7  psc.tgz' | sha256sum -c -
 npm install --global --prefix "$HOME/.local/psc" ./psc.tgz
 export PATH="$HOME/.local/psc/bin:$PATH"
-psc --version                         # 0.7.2
+psc --version                         # 0.7.3
 ```
 
 Keep the PATH export in your shell startup configuration. For later upgrades,
@@ -33,7 +33,7 @@ check the latest release's asset name and checksum before substituting them.
 
 ## 2. Set the proxy policy, then log in
 
-**0.7.2 supports this environment safely, but refuses an untrusted proxy.**
+**0.7.3 supports this environment safely, but refuses an untrusted proxy.**
 With `NODE_USE_ENV_PROXY=1` and HTTP(S) proxies set, login returns
 `TRANSPORT_REFUSED` before sending any device or account credentials unless
 the broker is bypassed or the proxy is explicitly trusted.
