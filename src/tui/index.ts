@@ -450,6 +450,7 @@ export class App {
     }
     if (this.finished) return;
     if (outcome.type === 'opFailed' && this.quitAfterAttach === null) {
+      this.term.output.write(`\r\n${outcome.text}\r\n`);
       await this.waitForKey('press any key to return to PocketShell');
     }
     if (this.quitAfterAttach !== null) {

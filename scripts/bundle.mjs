@@ -4,7 +4,7 @@
  * self-contained `dist-bundle/package.json`, and an `npm pack` tarball.
  */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -15,6 +15,7 @@ const outFile = join(outDir, 'psc.mjs');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 
 mkdirSync(outDir, { recursive: true });
+rmSync(join(outDir, 'node_modules'), { recursive: true, force: true });
 
 await build({
   entryPoints: [join(root, 'src', 'cli.ts')],
@@ -43,6 +44,17 @@ const bundlePkg = {
     psc: './psc.mjs',
   },
   files: ['psc.mjs'],
+  dependencies: {
+    '@lydell/node-pty': pkg.dependencies['@lydell/node-pty'] ?? '1.2.0-beta.15',
+  },
+  optionalDependencies: {
+    '@lydell/node-pty-darwin-arm64': '1.2.0-beta.15',
+    '@lydell/node-pty-darwin-x64': '1.2.0-beta.15',
+    '@lydell/node-pty-linux-arm64': '1.2.0-beta.15',
+    '@lydell/node-pty-linux-x64': '1.2.0-beta.15',
+    '@lydell/node-pty-win32-arm64': '1.2.0-beta.15',
+    '@lydell/node-pty-win32-x64': '1.2.0-beta.15',
+  },
   engines: {
     node: '>=20',
   },

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { build } from 'esbuild';
 if (process.platform === "win32") process.exit(0); // The Windows package builds its own relay (scripts/build-windows-package.py).
@@ -16,8 +16,15 @@ await build({
     js: "import { createRequire as __pscCreateRequire } from 'node:module'; const require = __pscCreateRequire(import.meta.url);",
   },
 });
+
+function resolveGo() {
+  if (process.env.PSC_GO) return process.env.PSC_GO;
+  if (existsSync('/usr/local/go/bin/go')) return '/usr/local/go/bin/go';
+  return 'go';
+}
+
 execFileSync(
-  process.env.PSC_GO ?? 'go',
+  resolveGo(),
   ['build', '-trimpath', '-ldflags', '-X main.version=' + pkg.version, '-o', resolve('dist-bundle/psc'), '.'],
   {
     cwd: 'native/psc-relay',
@@ -35,6 +42,31 @@ pkg.os = [process.platform];
 pkg.cpu = [process.arch];
 pkg.bin = { psc: './psc', 'pocketshell-tui-client': './psc' };
 pkg.files = ['psc', 'psc.mjs', 'daemon.mjs'];
+
+const platformPkg = `@lydell/node-pty-${process.platform}-${process.arch}`;
+const nodePtyDir = resolve('node_modules/@lydell');
+if (existsSync(nodePtyDir)) {
+  mkdirSync('dist-bundle/node_modules/@lydell', { recursive: true });
+  const ptyWrapper = resolve(nodePtyDir, 'node-pty');
+  const ptyPlatform = resolve(nodePtyDir, `node-pty-${process.platform}-${process.arch}`);
+  const bundledDeps = [];
+  if (existsSync(ptyWrapper)) {
+    cpSync(ptyWrapper, 'dist-bundle/node_modules/@lydell/node-pty', { recursive: true, dereference: true });
+    bundledDeps.push('@lydell/node-pty');
+  }
+  if (existsSync(ptyPlatform)) {
+    cpSync(ptyPlatform, `dist-bundle/node_modules/@lydell/node-pty-${process.platform}-${process.arch}`, { recursive: true, dereference: true });
+    bundledDeps.push(platformPkg);
+  }
+  if (bundledDeps.length > 0) {
+    pkg.dependencies = {
+      ...(pkg.dependencies ?? {}),
+      ...Object.fromEntries(bundledDeps.map((name) => [name, '1.2.0-beta.15'])),
+    };
+    pkg.bundleDependencies = bundledDeps;
+  }
+}
+
 writeFileSync('dist-bundle/package.json', JSON.stringify(pkg, null, 2) + '\n');
 
 execFileSync('npm', ['pack', '--quiet'], { cwd: resolve('dist-bundle'), stdio: 'inherit' });

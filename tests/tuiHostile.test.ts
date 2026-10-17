@@ -194,7 +194,22 @@ describe('SIGTERM / SIGHUP while attached', () => {
     const { app, inner, writes } = fakeApp(async () => 1);
     const attaching = inner.attach(row('alpha:main'));
     for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    expect(writes.join('')).toContain('attach to alpha:main ended with exit 1');
     expect(writes.join('')).toContain('press any key');
+    expect(app.terminate(129)).toBe(false);
+    await attaching;
+    await expect(app.done).resolves.toBe(129);
+  });
+
+  it('displays the error message on screen before prompting for keypress when attach throws', async () => {
+    const { app, inner, writes } = fakeApp(async () => {
+      throw new Error('Cannot find module @lydell/node-pty-linux-x64');
+    });
+    const attaching = inner.attach(row('alpha:main'));
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    const output = writes.join('');
+    expect(output).toContain('Cannot find module @lydell/node-pty-linux-x64');
+    expect(output).toContain('press any key to return to PocketShell');
     expect(app.terminate(129)).toBe(false);
     await attaching;
     await expect(app.done).resolves.toBe(129);

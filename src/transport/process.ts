@@ -154,19 +154,21 @@ export function runCaptured(
   });
 }
 
-/**
- * Spawn `file argv` on this process's terminal (inherited stdio) and wait.
- * The child owns the tty while it runs: resize, Ctrl+C and friends reach it
- * directly, and we ignore SIGINT so a Ctrl+C meant for the child doesn't
- * kill the client underneath it.
- */
-export function runInteractive(
+function isPtyLoadError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message;
+  return (
+    msg.includes('@lydell/node-pty') ||
+    msg.includes('Cannot find module') ||
+    (error as NodeJS.ErrnoException).code === 'MODULE_NOT_FOUND'
+  );
+}
+
+function runInheritedInteractive(
   file: string,
   argv: readonly string[],
-  env: NodeJS.ProcessEnv = process.env,
-  options: SessionInteractiveOptions = {},
+  env: NodeJS.ProcessEnv,
 ): Promise<number | null> {
-  if (options.sessionDetach) return runSessionInteractive(file, argv, env, options);
   return new Promise((resolve) => {
     const ignore = () => {};
     process.on('SIGINT', ignore);
@@ -178,4 +180,29 @@ export function runInteractive(
     child.on('error', () => done(null));
     child.on('close', (code) => done(code));
   });
+}
+
+/**
+ * Spawn `file argv` on this process's terminal (inherited stdio) and wait.
+ * The child owns the tty while it runs: resize, Ctrl+C and friends reach it
+ * directly, and we ignore SIGINT so a Ctrl+C meant for the child doesn't
+ * kill the client underneath it.
+ */
+export async function runInteractive(
+  file: string,
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  options: SessionInteractiveOptions = {},
+): Promise<number | null> {
+  if (options.sessionDetach) {
+    try {
+      return await runSessionInteractive(file, argv, env, options);
+    } catch (error) {
+      if (isPtyLoadError(error)) {
+        return runInheritedInteractive(file, argv, env);
+      }
+      throw error;
+    }
+  }
+  return runInheritedInteractive(file, argv, env);
 }

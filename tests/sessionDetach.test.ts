@@ -51,6 +51,17 @@ describe('production session detach opt-in', () => {
     expect(mock.legacy).toHaveBeenCalledWith('/bin/sh', ['-c', 'fixture'], { stdio: 'inherit', env: {} });
     expect(mock.spawn).not.toHaveBeenCalled(); expect(f.input.setRawMode).not.toHaveBeenCalled();
   });
+  it('falls back to inherited execution when node-pty fails to load on a standard interactive terminal', async () => {
+    const f = fixture();
+    mock.spawn.mockImplementation(() => {
+      const err = new Error("Cannot find module '@lydell/node-pty-linux-x64'");
+      (err as NodeJS.ErrnoException).code = 'MODULE_NOT_FOUND';
+      throw err;
+    });
+    const code = await runInteractive('/bin/sh', ['-c', 'fixture'], {}, { sessionDetach: true, input: f.input, output: f.output } as never);
+    expect(code).toBe(255);
+    expect(mock.legacy).toHaveBeenCalledWith('/bin/sh', ['-c', 'fixture'], { stdio: 'inherit', env: {} });
+  });
   it('refuses non-TTY, existing input reader, and concurrent ownership before taking terminal', async () => {
     const f = fixture(); f.input.isTTY = false;
     await expect(runInteractive('fixture', [], {}, { sessionDetach: true, input: f.input, output: f.output } as never)).rejects.toThrow(/exclusive/);

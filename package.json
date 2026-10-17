@@ -27,7 +27,7 @@
     "dev": "node --import tsx src/cli.ts",
     "postinstall": "node scripts/apply-windows-pty-overlay.mjs",
     "verify:windows-dependency": "node scripts/apply-windows-pty-overlay.mjs --verify",
-    "test:packaging": "node --test tests/windowsDependencyOverlay.packaging.mjs",
+    "test:packaging": "node --test tests/windowsDependencyOverlay.packaging.mjs && node tests/bundlePackaging.packaging.mjs",
     "bundle:relay": "npm run bundle && node scripts/build-relay.mjs"
   },
   "dependencies": {
