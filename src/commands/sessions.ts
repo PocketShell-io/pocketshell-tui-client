@@ -137,6 +137,7 @@ export function registerSessions(program: Command): void {
       .description('create a session named <basename of cwd>:<name> (or reuse the live one with that name)')
       .option('-C, --cwd <dir>', "working directory on the host (quote a leading ~ so it reaches the host: -C '~/git/x')")
       .option('-e, --engine <engine>', 'agent engine to launch (see `engines`); omit it for a plain shell')
+      .option('--model <model>', 'pass --model through to the engine (`a start --model`)')
       .option('--profile <profile>', 'aplexer profile (see `profiles`)')
       .option('-a, --attach', 'attach right after creating (not with --json)')
       .addHelpText(
@@ -146,11 +147,11 @@ export function registerSessions(program: Command): void {
           `\n${SESSION_HELP}`,
       ),
   ).action(
-    action(async (name: string, opts: HostOpts & { cwd?: string; engine?: string; profile?: string; attach?: boolean }) => {
+    action(async (name: string, opts: HostOpts & { cwd?: string; engine?: string; model?: string; profile?: string; attach?: boolean }) => {
       if (opts.json) setJsonMode(true);
       if (opts.attach && isJsonMode()) throw usageError('--attach takes over the terminal and cannot be combined with --json');
       await withHost(opts, async (client, host) => {
-        const created = await client.createSession(name, { cwd: opts.cwd, engine: opts.engine, profile: opts.profile });
+        const created = await client.createSession(name, { cwd: opts.cwd, engine: opts.engine, model: opts.model, profile: opts.profile });
         if (opts.attach) {
           const row = await client.resolveSession(created.id ?? created.name);
           process.exitCode = (await client.attach(row)) ?? 1;

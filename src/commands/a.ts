@@ -678,6 +678,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
       )
       .option('-C, --cwd <dir>', "working directory on the host (quote a leading ~: -C '~/git/x')")
       .option('-e, --engine <engine>', 'agent engine to launch (claude, codex, opencode, grok, ...)')
+      .option('--model <model>', 'pass --model through to the engine (`a start --model`)')
       .option('--profile <profile>', 'aplexer profile')
       .option('-p, --prompt <text>', 'initial prompt to send once ready (`-` reads stdin)')
       .option(
@@ -693,6 +694,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
         opts: {
           cwd?: string;
           engine?: string;
+          model?: string;
           profile?: string;
           prompt?: string;
           readyTimeout: number;
@@ -707,6 +709,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
           const created = await client.createSession(shortTag, {
             cwd: opts.cwd,
             engine: opts.engine,
+            model: opts.model,
             profile: opts.profile,
           });
           if (promptText !== null) {
@@ -739,7 +742,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     hostCmd
       .command('send <session> [text]')
       .description(
-        'send and SUBMIT (Enter is default; --no-enter to just type). Delivery is acknowledged like `a send --enter`: exit 0 delivered, 3 submitted but the agent stayed idle, 1 not delivered.',
+        'send and SUBMIT (Enter is default; --no-enter to just type). Delivery is acknowledged like `a send --enter`: exit 0 delivered or queued behind a busy turn, 3 submitted but the agent stayed idle, 1 not delivered.',
       )
       .option('--enter', 'press Enter after the text (default) and acknowledge delivery')
       .option('--no-enter', 'type the text without pressing Enter')

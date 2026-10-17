@@ -323,6 +323,28 @@ describe('multi-line send encoding and HostClient.send', () => {
     });
   });
 
+  it('HostClient.send treats a queued delivered_idle verdict as submitted', async () => {
+    const client = new HostClient(
+      fakeConnection(async () => ({
+        exitCode: 3,
+        stdout: `${JSON.stringify({
+          delivery: {
+            status: 'delivered_idle',
+            queued: true,
+            detail: 'submitted and echoed, but no sign of work within 10000ms',
+          },
+        })}\n`,
+        stderr: '',
+        timedOut: false,
+      })),
+    );
+    await expect(client.send(makeRow({ id: 'sess-9' }), 'queued please', { enter: true })).resolves.toMatchObject({
+      status: 'submitted',
+      queued: true,
+      detail: 'submitted while the agent was busy; queued behind its current turn',
+    });
+  });
+
   it('HostClient.send returns delivered_idle when a exits 3', async () => {
     const client = new HostClient(
       fakeConnection(async (command) => ({

@@ -153,6 +153,23 @@ describe('host session backend', () => {
     expect(seen.find((c) => c.includes('--json start'))).toContain('--engine');
   });
 
+  it('passes --model through to a start', async () => {
+    const seen: string[] = [];
+    const client = new HostClient(connection(async (cmd) => {
+      seen.push(cmd);
+      if (isProbeExec(cmd)) return outcome(probeStdout({ wrapper: { exit: 127 }, apath: '/managed/a', snapshot: { output: JSON.stringify([]) } }));
+      if (cmd.includes('pwd -P')) return outcome('/c/Users/Alexey/my project\n');
+      if (cmd.includes('--json start')) return outcome(JSON.stringify(raw));
+      return outcome('[]');
+    }));
+    await client.createSession('test', { cwd: raw.workspace, engine: 'codex', model: 'gpt-5.4' });
+    const start = seen.find((c) => c.includes('--json start')) ?? '';
+    expect(start).toContain('--engine');
+    expect(start).toContain('codex');
+    expect(start).toContain('--model');
+    expect(start).toContain('gpt-5.4');
+  });
+
   it('creates directly and reuses an existing workspace/tag without starting again', async () => {
     const seen: string[] = [];
     const client = new HostClient(connection(async (cmd) => {

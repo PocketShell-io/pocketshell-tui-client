@@ -161,7 +161,9 @@ psc a hetzner capture e2e-test --wait-for PONG --lines 15
 
 # Send a multi-line prompt and submit it. Enter is the default, and the
 # command does not return success until delivery is acknowledged (same
-# verdict as `a send --enter`: exit 0 delivered, 3 submitted but idle, 1 dropped).
+# verdict as `a send --enter`: exit 0 delivered or queued behind a busy turn,
+# 3 submitted but idle, 1 dropped).
+psc a hetzner start review -C '~/git/project' -e codex --model gpt-5.4
 printf 'line1\nline2: reply LINES-OK\n' | psc a hetzner send e2e-test
 psc a hetzner capture e2e-test --wait-for LINES-OK --lines 20
 psc a hetzner status e2e-test

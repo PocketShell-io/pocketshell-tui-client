@@ -143,6 +143,20 @@ export function parseSendReport(stdout: string): SendDelivery | null {
 }
 
 /**
+ * A prompt echoed while the agent was already busy is queued behind that
+ * turn. Older `a` reports that as `delivered_idle` ("no sign of work") and
+ * exits 3. The text was submitted; keep `queued` and report `submitted`.
+ */
+export function normalizeDelivery(delivery: SendDelivery): SendDelivery {
+  if (delivery.status !== 'delivered_idle' || delivery.queued !== true) return delivery;
+  return {
+    ...delivery,
+    status: 'submitted',
+    detail: 'submitted while the agent was busy; queued behind its current turn',
+  };
+}
+
+/**
  * A submitted send must carry a verdict. `failed` is an error. Anything else
  * (including `delivered_idle`) is returned so the caller can use `a`'s exit code.
  */
@@ -150,6 +164,7 @@ export function requireDelivery(delivery: SendDelivery | null, fallback?: string
   if (!delivery) {
     throw new DeliveryError('DELIVERY_UNCONFIRMED', fallback ?? 'send finished without a delivery verdict', 1, null);
   }
+  delivery = normalizeDelivery(delivery);
   if (delivery.status === 'failed') {
     const detail = typeof delivery.detail === 'string' ? delivery.detail.trim() : '';
     throw new DeliveryError('DELIVERY_FAILED', detail || fallback || 'text was not submitted', 1, delivery);
@@ -223,7 +238,7 @@ function settleShellDelivery(outcome: ExecOutcome): SendDelivery {
       delivery,
     );
   }
-  return delivery;
+  return normalizeDelivery(delivery);
 }
 
 export class SessionNotFound extends Error {
@@ -683,11 +698,15 @@ export class HostClient {
 
   async createSession(
     name: string,
-    options: { cwd?: string | null; engine?: string | null; profile?: string | null } = {},
+    options: { cwd?: string | null; engine?: string | null; profile?: string | null; model?: string | null } = {},
   ): Promise<CreatedSession> {
-    if (this.native) return this.native.createSession(name, options);
+    if (this.native) {
+      if (options.model) throw new Error('psc start --model needs a direct aplexer (`a start --model`); this host uses the native CLI');
+      return this.native.createSession(name, options);
+    }
     const { backend, listing } = await this.sessionsBackend();
     if (backend.direct) return this.directCreateSession(name, options, backend.direct, listing);
+    if (options.model) throw new Error('psc start --model needs `a` on the host (`a start --model`)');
     try {
       return await this.cli.createSession(name, options);
     } catch (error) {
@@ -728,7 +747,7 @@ export class HostClient {
 
   private async directCreateSession(
     name: string,
-    options: { cwd?: string | null; engine?: string | null; profile?: string | null },
+    options: { cwd?: string | null; engine?: string | null; profile?: string | null; model?: string | null },
     direct: string,
     probeListing?: SessionsListing | null,
   ): Promise<CreatedSession> {
@@ -742,6 +761,7 @@ export class HostClient {
     if (existing) return { name: existing.name, id: existing.id, created: false };
     let command = `${binary} --json start --workspace ${workspace} --tag ${shellQuote(name)}`;
     if (options.engine) command += ` --engine ${shellQuote(options.engine)}`;
+    if (options.model) command += ` --model ${shellQuote(options.model)}`;
     if (options.profile) command += ` --profile ${shellQuote(options.profile)}`;
     const record = JSON.parse(stripSystemdNoise(await this.runChecked(command, 60_000)));
     if (typeof record.id !== 'string') throw new Error('aplexer start returned no session id');
