@@ -2,7 +2,7 @@
 # Install or upgrade psc from a GitHub Release (no npm registry).
 #
 # Usage:
-#   scripts/install-psc.sh [--version v0.7.4] [--prefix ~/.local/psc]
+#   scripts/install-psc.sh [--version v0.7.5] [--prefix ~/.local/psc]
 #                          [--asset linux-x64|generic] [--repo OWNER/REPO]
 #
 # Defaults: latest release, prefix ~/.local/psc, linux-x64 asset on

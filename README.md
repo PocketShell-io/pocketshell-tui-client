@@ -30,14 +30,14 @@ release's `SHA256SUMS.txt`, then `npm install -g` the tarball. The
 works on other Node 20+ platforms without it.
 
 ```bash
-TAG=v0.7.4; ASSET=pocketshell-tui-client-0.7.4-linux-x64.tgz; DIR="$HOME/tmp/psc-install"; mkdir -p "$DIR" && gh release download "$TAG" --repo PocketShell-io/pocketshell-tui-client --pattern "$ASSET" --pattern SHA256SUMS.txt --dir "$DIR" --clobber && (cd "$DIR" && grep -F " $ASSET" SHA256SUMS.txt | sha256sum -c -) && npm install --global --prefix "$HOME/.local/psc" "$DIR/$ASSET" && export PATH="$HOME/.local/psc/bin:$PATH" && psc --version
+TAG=v0.7.5; ASSET=pocketshell-tui-client-0.7.5-linux-x64.tgz; DIR="$HOME/tmp/psc-install"; mkdir -p "$DIR" && gh release download "$TAG" --repo PocketShell-io/pocketshell-tui-client --pattern "$ASSET" --pattern SHA256SUMS.txt --dir "$DIR" --clobber && (cd "$DIR" && grep -F " $ASSET" SHA256SUMS.txt | sha256sum -c -) && npm install --global --prefix "$HOME/.local/psc" "$DIR/$ASSET" && export PATH="$HOME/.local/psc/bin:$PATH" && psc --version
 ```
 
 The same steps as a script (defaults: latest release, `--prefix
 ~/.local/psc`, `linux-x64` on Linux/x86_64, generic bundle elsewhere):
 
 ```bash
-scripts/install-psc.sh --version v0.7.4
+scripts/install-psc.sh --version v0.7.5
 ```
 
 Keep the PATH export in your shell startup configuration. Every release
