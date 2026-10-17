@@ -1,5 +1,5 @@
 import { requests, type RequestContext } from './context.js';
-import { HostClient, pickSession } from '../hostClient.js';
+import { HostClient, pickSession, readDelivery, requireDelivery, type SendDelivery, type SubmittedSend } from '../hostClient.js';
 import { noteResidentCapability } from '../hostCapability.js';
 import { trace } from '../trace.js';
 import { parseHostSessionsList, type SessionRow, type SessionsListing } from '@pocketshell/core';
@@ -431,19 +431,21 @@ class RpcHostClient extends HostClient {
     return selected(await request(this.host!, 'status', { selector, selectorMode: 'psc' }));
   }
 
-  override async sendSelected(
-    selector: string,
-    text: string,
-    options: { enter: boolean },
-  ): Promise<SessionRow> {
-    return selected(
-      await request(
-        this.host!,
-        'send',
-        { selector, selectorMode: 'psc', payload: text, submit: options.enter },
-        true,
-      ),
+  override async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<SendDelivery | null> {
+    return (await this.sendSelected(session.id ?? session.name, text, { enter: Boolean(options.enter) })).delivery;
+  }
+
+  override async sendSelected(selector: string, text: string, options: { enter: boolean }): Promise<SubmittedSend> {
+    const value = await request(
+      this.host!,
+      'send',
+      { selector, selectorMode: 'psc', payload: text, submit: options.enter },
+      true,
     );
+    const delivery = options.enter
+      ? requireDelivery(readDelivery(value), 'resident send did not acknowledge delivery')
+      : null;
+    return { row: selected(value), delivery };
   }
 
   override async captureSelected(

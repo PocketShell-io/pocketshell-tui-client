@@ -40,7 +40,7 @@ program
       '  psc <host> connect                  interactive shell on <host> (like ssh)\n' +
       '  psc <host> ls                       sessions on <host>\n' +
       '  psc <host> start <tag> -C DIR -e ENGINE [--prompt TEXT|-]\n' +
-      '  psc <host> send <session> [TEXT|-]  type + submit\n' +
+      '  psc <host> send <session> [TEXT|-]  type + submit, then confirm delivery\n' +
       '  psc <host> wait <session>           until the agent is idle again\n' +
       '  psc <host> capture <session>        plain-text screen\n' +
       '  psc <host> status|stop <session>\n' +

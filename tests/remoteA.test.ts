@@ -258,28 +258,35 @@ describe('multi-line send encoding and HostClient.send', () => {
     });
   });
 
-  it('HostClient.send sends multi-line text with bracketed paste and delayed CR', async () => {
+  it('HostClient.send submits raw text through a send --enter and requires a verdict', async () => {
     const calls: Array<{ command: string; stdin?: string | Uint8Array }> = [];
     const client = new HostClient(
       fakeConnection(async (command, stdin) => {
         calls.push({ command, stdin });
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({ delivery: { status: 'submitted', detail: 'submitted' } })}\n`,
+          stderr: '',
+          timedOut: false,
+        };
       }),
     );
     const session = makeRow({ id: 'sess-1234' });
 
-    await client.send(session, 'single line', { enter: true });
+    await expect(client.send(session, 'single line', { enter: true })).resolves.toMatchObject({ status: 'submitted' });
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.command).toContain('--stdin --enter');
+    expect(calls[0]!.command).toContain('--stdin --json --enter');
+    expect(calls[0]!.command).not.toContain('--hex');
     expect(calls[0]!.command).toContain('sess-1234');
     expect(calls[0]!.stdin).toBe('single line');
 
     calls.length = 0;
-    await client.send(session, 'line1\nline2', { enter: true });
+    await expect(client.send(session, 'line1\nline2', { enter: true })).resolves.toMatchObject({ status: 'submitted' });
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.command).toContain("--stdin && sleep 0.15 && '\\''a'\\'' send");
-    expect(calls[0]!.command).toContain('--hex 0d');
-    expect(calls[0]!.stdin).toBe('\x1b[200~line1\nline2\x1b[201~');
+    expect(calls[0]!.command).toContain('--stdin --json --enter');
+    expect(calls[0]!.command).not.toContain('--hex 0d');
+    expect(calls[0]!.command).not.toContain('sleep');
+    expect(calls[0]!.stdin).toBe('line1\nline2');
 
     calls.length = 0;
     await client.send(session, 'line1\nline2', { enter: false });
@@ -288,6 +295,46 @@ describe('multi-line send encoding and HostClient.send', () => {
     expect(calls[0]!.command).not.toContain('--enter');
     expect(calls[0]!.command).not.toContain('--hex 0d');
     expect(calls[0]!.stdin).toBe('\x1b[200~line1\nline2\x1b[201~');
+  });
+
+  it('HostClient.send fails when a send --enter writes bytes but does not acknowledge them', async () => {
+    const client = new HostClient(
+      fakeConnection(async () => ({ exitCode: 0, stdout: '{"bytes":4,"status":"pty_written"}\n', stderr: '', timedOut: false })),
+    );
+    await expect(client.send(makeRow({ id: 'sess-1234' }), 'line1\nline2', { enter: true })).rejects.toMatchObject({
+      code: 'DELIVERY_UNCONFIRMED',
+      exitCode: 1,
+    });
+  });
+
+  it('HostClient.send fails when the verdict says the text was not submitted', async () => {
+    const client = new HostClient(
+      fakeConnection(async () => ({
+        exitCode: 1,
+        stdout: `${JSON.stringify({ delivery: { status: 'failed', detail: 'stayed in the input box' } })}\n`,
+        stderr: '',
+        timedOut: false,
+      })),
+    );
+    await expect(client.send(makeRow({ id: 'sess-1234' }), 'hello', { enter: true })).rejects.toMatchObject({
+      code: 'DELIVERY_FAILED',
+      exitCode: 1,
+      message: 'stayed in the input box',
+    });
+  });
+
+  it('HostClient.send returns delivered_idle when a exits 3', async () => {
+    const client = new HostClient(
+      fakeConnection(async (command) => ({
+        exitCode: 3,
+        stdout: `${JSON.stringify({ delivery: { status: 'delivered_idle', detail: 'no sign of work' } })}\n`,
+        stderr: command.includes('idle') ? '' : '',
+        timedOut: false,
+      })),
+    );
+    await expect(client.send(makeRow({ id: 'sess-9' }), 'idle please', { enter: true })).resolves.toMatchObject({
+      status: 'delivered_idle',
+    });
   });
 });
 

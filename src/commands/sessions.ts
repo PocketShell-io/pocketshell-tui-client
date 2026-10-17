@@ -5,7 +5,8 @@
  */
 import type { Command } from 'commander';
 import type { SessionRow } from '@pocketshell/core';
-import { execCommandLine, SessionNotFound, type HostClient } from '../hostClient.js';
+import { deliveryExitCode, execCommandLine, SessionNotFound, type HostClient } from '../hostClient.js';
+import { setExitCode } from '../daemon/context.js';
 import { CliError, emit, EXIT, isJsonMode, note, setJsonMode, usageError } from '../output.js';
 import { safeLine, safeText } from '../sanitize.js';
 import { action, hostOptions, parsePositiveInt, parseSeconds, withHost } from './common.js';
@@ -193,12 +194,14 @@ export function registerSessions(program: Command): void {
     sessions
       .command('send <session> [text]')
       .description('type TEXT into a session without attaching; it is NOT submitted unless --enter is given')
-      .option('--enter', 'press Enter after the text (submits a prompt / runs a command line)')
+      .option('--enter', 'press Enter after the text and acknowledge delivery (`a send --enter`)')
       .addHelpText(
         'after',
         '\nTEXT `-` or omitted reads stdin; ONE trailing newline is stripped from stdin input\n' +
           '(so `echo hi | psc sessions send x --enter` types "hi" and presses Enter once).\n' +
           'Without --enter the text sits typed but unsubmitted.\n' +
+          'With --enter, exit 0 means delivered, 3 means submitted but the agent stayed idle,\n' +
+          'and 1 means the text was not submitted. --json includes "delivery" when Enter was sent.\n' +
           '--json: {"ok":true,"host":...,"session":{"name","id"},"bytes":N,"enter":true|false}' +
           `\n${SESSION_HELP}`,
       ),
@@ -208,8 +211,23 @@ export function registerSessions(program: Command): void {
         const payload = text === undefined || text === '-' ? (await readStdin()).replace(/\r?\n$/, '') : text;
         const row = await client.resolveSession(selector);
         const enter = Boolean(opts.enter);
-        await client.send(row, payload, { enter });
-        emit({ ok: true, host: host.name, session: ref(row), bytes: Buffer.byteLength(payload), enter }, () => '');
+        const delivery = await client.send(row, payload, { enter });
+        if (delivery && deliveryExitCode(delivery.status) === 3) setExitCode(3);
+        if (delivery && (delivery.status === 'delivered_idle' || delivery.status === 'unverified')) {
+          const detail = typeof delivery.detail === 'string' ? delivery.detail : '';
+          note(`${delivery.status.replace(/_/g, ' ')}${detail ? `: ${detail}` : ''}`);
+        }
+        emit(
+          {
+            ok: true,
+            host: host.name,
+            session: ref(row),
+            bytes: Buffer.byteLength(payload),
+            enter,
+            ...(delivery ? { delivery } : {}),
+          },
+          () => '',
+        );
       }),
     ),
   );

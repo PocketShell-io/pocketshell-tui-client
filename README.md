@@ -159,7 +159,9 @@ psc a hetzner start e2e-test -C '~/git/project' -e claude --prompt 'reply with j
 psc a hetzner wait e2e-test --timeout 60
 psc a hetzner capture e2e-test --wait-for PONG --lines 15
 
-# Send a multi-line prompt as one bracketed-paste message and submit (Enter is default):
+# Send a multi-line prompt and submit it. Enter is the default, and the
+# command does not return success until delivery is acknowledged (same
+# verdict as `a send --enter`: exit 0 delivered, 3 submitted but idle, 1 dropped).
 printf 'line1\nline2: reply LINES-OK\n' | psc a hetzner send e2e-test
 psc a hetzner capture e2e-test --wait-for LINES-OK --lines 20
 psc a hetzner status e2e-test

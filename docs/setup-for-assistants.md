@@ -151,8 +151,12 @@ psc hetzner stop dots-smoke --if-exists
 For an assistant session, add `-e ENGINE` and optionally `--prompt TEXT` to
 `start`, choosing an installed engine and an existing host workspace with
 `-C`. Quote paths beginning with `~` so dots' shell does not expand them
-locally. `send` submits Enter by default;
-use `--no-enter` to leave a draft. Capture can contain sensitive host output.
+locally. `send` submits Enter by default and waits for the same delivery
+verdict as `a send --enter`: exit 0 means the text was submitted (and the
+agent started working, or this engine cannot be checked), exit 3 means it
+was submitted but the agent stayed idle, exit 1 means it was not submitted.
+A typed-but-unsent draft or a paste the agent dropped is not a success.
+Use `--no-enter` to leave a draft. Capture can contain sensitive host output.
 
 **No public posts:** do not post session output, screenshots, login codes,
 account details, or credentials publicly. Communicate with Alexey privately;

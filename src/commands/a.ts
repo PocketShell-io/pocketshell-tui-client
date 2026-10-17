@@ -2,21 +2,20 @@
  * `psc <host> <verb>` (legacy spelling `psc a <host> <verb>`): remote aplexer through PocketShell — one short, predictable
  * command family for driving agent sessions across hosts.
  */
-import { requests } from '../daemon/context.js';
+import { deliveryExitCode, encodeSendPayload, HostClient, SessionNotFound, type SendDelivery } from '../hostClient.js';
 import { Command } from 'commander';
 import type { CreatedSession, SessionRow } from '@pocketshell/core';
 import { mintGatewayToken } from '../account/index.js';
 import { fetchDevices, type DevicePresence } from '../gateway/devices.js';
 import { resolveEndpoint } from '../gateway/endpoint.js';
 import { loadPins } from '../gateway/pins.js';
-import { encodeSendPayload, HostClient, SessionNotFound } from '../hostClient.js';
+import { requests, setExitCode } from '../daemon/context.js';
 import { defaultHostName, friendlyHostName, listHosts, pickHost, type HostEntry } from '../hosts/store.js';
 import { noteHostUsed } from '../daemon/prewarm.js';
-import { classify, CliError, emit, EXIT, isJsonMode, setJsonMode, usageError } from '../output.js';
+import { classify, CliError, emit, EXIT, isJsonMode, note, setJsonMode, usageError } from '../output.js';
 import { safeLine, safeText } from '../sanitize.js';
 import { openConnection } from '../transport/index.js';
 import { action, jsonOption, parsePositiveInt, parseSeconds } from './common.js';
-import { trace } from '../trace.js';
 import { describeHost } from './hosts.js';
 import { table } from './sessions.js';
 
@@ -38,7 +37,7 @@ Commands:
   psc <host> connect                  interactive login shell on <host> (like ssh)
   psc <host> ls                       sessions on <host> (name, engine, state, workspace) — plain table
   psc <host> start <tag> [options]    create (or reuse live) session <basename DIR>:<tag>; optionally send --prompt
-  psc <host> send <session> [TEXT|-]  send and SUBMIT (Enter is default; --no-enter to just type)
+  psc <host> send <session> [TEXT|-]  send and SUBMIT (Enter is default; --no-enter to just type). Exit 0 delivered, 3 submitted but idle, 1 not delivered
   psc <host> capture <session> [opts] plain-text rendered screen by default (no ANSI), trailing blank lines trimmed
   psc <host> wait <session> [opts]    block until the session's agent is idle/waiting (exit 124 on timeout)
   psc <host> stop <session> [opts]    stop a session (--if-exists succeeds when already gone)
@@ -703,6 +702,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
         if (opts.json) setJsonMode(true);
         const promptText = await resolvePromptText(opts.prompt);
         await withResolvedHost(hostSelector, async (client, host) => {
+          let prompted: SendDelivery | null = null;
           const shortTag = tag.includes(':') ? tag.split(':').pop()! : tag;
           const created = await client.createSession(shortTag, {
             cwd: opts.cwd,
@@ -714,8 +714,8 @@ export function buildHostVerbProgram(hostSelector: string): Command {
               engine: opts.engine,
               timeoutS: opts.readyTimeout,
             });
-            await client.send(row, promptText, { enter: true });
-            await confirmPromptDelivery(client, row, promptText);
+            const delivery = await client.send(row, promptText, { enter: true });
+            prompted = delivery;
           }
           emit(
             {
@@ -725,6 +725,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
               id: created.id,
               created: created.created,
               prompted: promptText !== null,
+              ...(prompted ? { delivery: prompted } : {}),
               session: created,
             },
             () => safeLine(created.name),
@@ -738,40 +739,34 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     hostCmd
       .command('send <session> [text]')
       .description(
-        'send and SUBMIT (Enter is default; --no-enter to just type). Multi-line text is sent via bracketed paste as one message.',
+        'send and SUBMIT (Enter is default; --no-enter to just type). Delivery is acknowledged like `a send --enter`: exit 0 delivered, 3 submitted but the agent stayed idle, 1 not delivered.',
       )
-      .option('--enter', 'press Enter after the text (default)')
+      .option('--enter', 'press Enter after the text (default) and acknowledge delivery')
       .option('--no-enter', 'type the text without pressing Enter')
-      .option('--wait', 'confirm prompt delivery synchronously before returning (reads the local replica when live)'),
+      .option('--wait', 'accepted for compatibility; delivery is always acknowledged before send returns'),
   ).action(
-    action(async (selector: string, text: string | undefined, opts: { enter?: boolean; json?: boolean; wait?: boolean }) => {
+    action(async (selector: string, text: string | undefined, opts: { enter?: boolean; json?: boolean }) => {
       if (opts.json) setJsonMode(true);
       const payload = await resolveSendText(text);
       const enter = opts.enter ?? true;
       const encoded = encodeSendPayload(payload, { enter });
       await withResolvedHost(hostSelector, async (client, host) => {
-        const row = await client.sendSelected(selector, payload, { enter });
-        // Delivery confirmation reads the local replica/mirror when live
-        // (zero round trips) and never writes in the background: only
-        // --wait performs the full synchronous confirm, which may resend.
-        let delivery: Awaited<ReturnType<typeof confirmPromptDelivery>> | undefined;
-        if (opts.wait) {
-          delivery = await confirmPromptDelivery(client, row, payload);
-        } else if (requests.getStore()?.transportPath === 'resident') {
-          void confirmPromptDelivery(client, row, payload, { readOnly: true }).then(
-            (outcome) => trace(outcome === 'unconfirmed' ? 'send_unconfirmed' : 'send_observed'),
-            () => trace('send_unconfirmed'),
-          );
+        const sent = await client.sendSelected(selector, payload, { enter });
+        const delivery = sent.delivery;
+        if (delivery && deliveryExitCode(delivery.status) === 3) setExitCode(3);
+        if (delivery && (delivery.status === 'delivered_idle' || delivery.status === 'unverified')) {
+          const detail = typeof delivery.detail === 'string' ? delivery.detail : '';
+          note(`${delivery.status.replace(/_/g, ' ')}${detail ? `: ${detail}` : ''}`);
         }
         emit(
           {
             ok: true,
             host: host.name,
-            session: ref(row),
+            session: ref(sent.row),
             bytes: Buffer.byteLength(payload),
             enter,
             bracketed: encoded.bracketed,
-            ...(delivery !== undefined ? { delivery } : {}),
+            ...(delivery ? { delivery } : {}),
           },
           () => '',
         );

@@ -55,7 +55,11 @@ describe('host session backend', () => {
         return outcome(probeStdout({ wrapper: { exit: code }, apath: '' }));
       if (isRawAplexerExec(cmd))
         return outcome(probeStdout({ apath: '/managed runtime/python/a', snapshot: { output: JSON.stringify([raw]) } }));
-      return outcome(JSON.stringify([raw]));
+      return outcome(
+        cmd.includes(' send ')
+          ? JSON.stringify({ delivery: { status: 'submitted', detail: 'fixture' } })
+          : JSON.stringify([raw]),
+      );
     }));
     await client.listSessions();
     await client.captureSelected('test', { mode: 'screen' });
