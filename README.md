@@ -21,6 +21,29 @@ psc                        # interactive UI
 psc sessions list --json   # the same data, for scripts and agents
 ```
 
+## Install / upgrade (no npm registry)
+
+psc is not published to npm. Install the self-contained tarball attached
+to a GitHub Release: download it with `gh`, check its sha256 against the
+release's `SHA256SUMS.txt`, then `npm install -g` the tarball. The
+`linux-x64` asset carries the native daemon launcher; the generic tarball
+works on other Node 20+ platforms without it.
+
+```bash
+TAG=v0.7.4; ASSET=pocketshell-tui-client-0.7.4-linux-x64.tgz; DIR="$HOME/tmp/psc-install"; mkdir -p "$DIR" && gh release download "$TAG" --repo PocketShell-io/pocketshell-tui-client --pattern "$ASSET" --pattern SHA256SUMS.txt --dir "$DIR" --clobber && (cd "$DIR" && grep -F " $ASSET" SHA256SUMS.txt | sha256sum -c -) && npm install --global --prefix "$HOME/.local/psc" "$DIR/$ASSET" && export PATH="$HOME/.local/psc/bin:$PATH" && psc --version
+```
+
+The same steps as a script (defaults: latest release, `--prefix
+~/.local/psc`, `linux-x64` on Linux/x86_64, generic bundle elsewhere):
+
+```bash
+scripts/install-psc.sh --version v0.7.4
+```
+
+Keep the PATH export in your shell startup configuration. Every release
+carries `SHA256SUMS.txt` plus per-file `.sha256` sidecars; verify before
+installing, and substitute the tag/asset names when upgrading.
+
 ## Connection modes
 
 | Mode | Use it when | How it connects |

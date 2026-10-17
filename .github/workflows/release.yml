@@ -1,0 +1,86 @@
+# Distribution for psc (@pocketshell/tui-client) without the npm registry.
+#
+# There is no NPM_TOKEN on this repository, and none is wanted: the release
+# artifact is the packed tarball attached to the GitHub Release, installed
+# with `npm install -g <tgz>` after a sha256 check (see README and
+# scripts/install-psc.sh). On a version tag this workflow builds both the
+# generic Node bundle and the Linux x64 tarball (generic bundle + Go native
+# launcher), writes SHA256SUMS.txt plus per-file .sha256 sidecars, and
+# uploads everything to the tag's GitHub Release.
+name: github release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'existing release tag to (re)publish assets for, e.g. v0.7.4'
+        required: true
+permissions:
+  contents: write
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          path: client
+      # The client depends on file:../pocketshell-core: the same pinned Core as ci.yml.
+      - uses: actions/checkout@v4
+        with:
+          repository: PocketShell-io/pocketshell-core
+          ref: 93db1bc082a806ecdf2d96641d30edf5afba585d
+          path: pocketshell-core
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.13.1'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client/native/psc-relay/go.mod
+          cache-dependency-path: client/native/psc-relay/go.sum
+      - name: Build pinned Core
+        working-directory: pocketshell-core
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          node scripts/fix-esm-extensions.mjs
+      - working-directory: client
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Tag matches package version
+        working-directory: client
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="$(node -p "require('./package.json').version")"
+          test "$tag" = "v$version" || { echo "tag $tag does not match package.json version $version"; exit 1; }
+      - working-directory: client
+        run: npm test
+      - working-directory: client
+        run: npm run build && node scripts/bundle.mjs
+      - name: Pack release tarballs and checksums
+        working-directory: client
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          generic="pocketshell-tui-client-$version.tgz"
+          linux="pocketshell-tui-client-$version-linux-x64.tgz"
+          mkdir -p release-assets
+          # bundle.mjs packed the generic Node tarball; save it before the
+          # relay build repacks dist-bundle/ under the same file name.
+          mv "dist-bundle/$generic" "release-assets/$generic"
+          node scripts/build-relay.mjs
+          mv "dist-bundle/$generic" "release-assets/$linux"
+          ( cd release-assets && sha256sum "$generic" > "$generic.sha256" && sha256sum "$linux" > "$linux.sha256" && sha256sum "$generic" "$linux" > SHA256SUMS.txt )
+          cat release-assets/SHA256SUMS.txt
+      - name: Attach tarballs and checksums to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes || \
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+            "client/release-assets/pocketshell-tui-client-"*".tgz" \
+            "client/release-assets/"*.sha256 \
+            client/release-assets/SHA256SUMS.txt

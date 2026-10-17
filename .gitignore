@@ -2,6 +2,7 @@ node_modules/
 dist/
 .fixture-*/
 dist-bundle/
+release-assets/
 out/
 .tmp/
 *.log
