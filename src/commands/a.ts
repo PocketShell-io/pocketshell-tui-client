@@ -18,6 +18,7 @@ import { openConnection } from '../transport/index.js';
 import { action, jsonOption, parsePositiveInt, parseSeconds } from './common.js';
 import { describeHost } from './hosts.js';
 import { table } from './sessions.js';
+import { agentScreen, screenModel } from '../screenModels.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -36,7 +37,7 @@ Commands:
   psc hosts [--check]                 saved hosts; --check pings each in parallel (online/offline/error + versions)
   psc <host> connect                  interactive login shell on <host> (like ssh)
   psc <host> ls                       sessions on <host> (name, engine, state, workspace) — plain table
-  psc <host> start <tag> [options]    create (or reuse live) session <basename DIR>:<tag>; optionally send --prompt
+  psc <host> start <tag> [options]    create (or reuse live) session <repository>:<tag>; optionally send --prompt
   psc <host> send <session> [TEXT|-]  send and SUBMIT (Enter is default; --no-enter to just type). Exit 0 delivered, 3 submitted but idle, 1 not delivered
   psc <host> capture <session> [opts] plain-text rendered screen by default (no ANSI), trailing blank lines trimmed
   psc <host> wait <session> [opts]    block until the session's agent is idle/waiting (exit 124 on timeout)
@@ -221,7 +222,7 @@ function compileRegex(source: string): RegExp {
  *   stable across two polls while `agentState !== 'working'`.
  */
 export async function waitForAgentReady(
-  client: Pick<HostClient, 'listSessions' | 'capture'>,
+  client: Pick<HostClient, 'listSessions' | 'capture'> & Partial<Pick<HostClient, 'sendKeys'>>,
   created: CreatedSession,
   options: {
     engine?: string;
@@ -237,6 +238,7 @@ export async function waitForAgentReady(
   const selector = created.id ?? created.name;
   let lastScreen: string | null = null;
   let lastRow: SessionRow | null = null;
+  let acceptedTrust: string | null = null;
 
   for (;;) {
     const { sessions } = await client.listSessions();
@@ -258,7 +260,20 @@ export async function waitForAgentReady(
       } satisfies SessionRow);
     lastRow = row;
 
-    if (!created.created) {
+    const model = screenModel(options.engine ?? row.engine ?? row.agent);
+    if (model) {
+      const screen = trimCapture(await client.capture(row, { mode: 'screen' }));
+      const state = agentScreen(model, screen);
+      if (state.trustKeys && acceptedTrust !== screen && client.sendKeys) {
+        await client.sendKeys(row, state.trustKeys);
+        acceptedTrust = screen;
+        lastScreen = null;
+      } else if (state.ready && screen === lastScreen) {
+        return row;
+      } else {
+        lastScreen = screen;
+      }
+    } else if (!created.created) {
       if (row.agentState !== 'working') return row;
     } else {
       const screen = trimCapture(await client.capture(row, { mode: 'screen' }));
@@ -674,7 +689,7 @@ export function buildHostVerbProgram(hostSelector: string): Command {
       .command('start <tag>')
       .alias('create')
       .description(
-        'create (or reuse live) session <basename DIR>:<tag>; if --prompt is given, wait until ready and send it as one message',
+        'create (or reuse live) session <repository>:<tag>; if --prompt is given, wait until ready and send it as one message',
       )
       .option('-C, --cwd <dir>', "working directory on the host (quote a leading ~: -C '~/git/x')")
       .option('-e, --engine <engine>', 'agent engine to launch (claude, codex, opencode, grok, ...)')

@@ -17,6 +17,16 @@ function connection(exec: Connection['exec'], hostName = 'direct'): Connection {
 }
 
 describe('direct snapshot mapping', () => {
+  it.each(['flash', 'argon', 'antigravity'])('preserves %s idle reports through redraws until the next lifecycle report', (engine) => {
+    const record = { ...raw, engine, reported_state_at_ms: 1000, last_activity_ms: 99000 };
+    expect(directSessions([record], 100000).sessions[0]).toMatchObject({ agentState: 'idle', agentStateSource: 'reported' });
+    expect(directSessions([{ ...record, reported_state: 'working', reported_state_at_ms: 99999 }], 100000).sessions[0]?.agentState).toBe('working');
+    expect(directSessions([{ ...record, phase: 'starting' }], 100000).sessions[0]?.agentState).toBe('working');
+  });
+  it('retracts other engines idle reports when later PTY activity contradicts them', () => {
+    expect(directSessions([{ ...raw, last_activity_ms: 23000 }], 24000).sessions[0])
+      .toMatchObject({ agentState: 'working', agentStateSource: 'heuristic' });
+  });
   it('matches the wrapper naming, epochs, attachment and reported-state contract', () => {
     expect(directSessions([raw], 20000)).toEqual({ errors: [], sessions: [{ name: 'my project:test', id: 'abcd1234',
       workspace: raw.workspace, tag: 'test', engine: null, profile: null, agent: 'codex', agentState: 'idle',
@@ -31,12 +41,54 @@ describe('direct snapshot mapping', () => {
     const rows = directSessions([raw, raw, { ...raw, id: 'dead', state: 'exited' },
       { ...raw, id: 'unknown', state: 'unknown' }, { ...raw, id: 'starting', state: 'starting', phase: 'starting' }], 24000).sessions;
     expect(rows.map((r) => [r.id, r.agentState, r.agentStateSource])).toEqual([
-      ['abcd1234', 'waiting', 'heuristic'], ['starting', 'working', 'heuristic']]);
+      ['abcd1234', 'idle', 'reported'], ['starting', 'working', 'heuristic']]);
     expect(() => directSessions({ sessions: [] })).toThrow(/array/);
   });
 });
 
 describe('host session backend', () => {
+  it.each(['flash', 'argon', 'codex-orin'])('submits %s via raw paste and a separate verified Enter', async (engine) => {
+    let screen = '> ';
+    const writes: string[] = [];
+    const client = new HostClient(connection(async (cmd, options) => {
+      if (cmd.includes(' capture ')) return outcome(screen);
+      expect(cmd).toContain('--stdin --raw');
+      expect(cmd).not.toContain('--enter');
+      const bytes = String(options.stdin);
+      writes.push(bytes);
+      screen = bytes === '\r' ? 'Working (esc to interrupt)\n> ' : `> ${bytes}`;
+      return outcome('');
+    }));
+    const session = directSessions([{ ...raw, engine }]).sessions[0]!;
+    expect(await client.send(session, 'hello', { enter: true })).toMatchObject({ status: 'delivered_working' });
+    expect(writes).toEqual(['hello', '\r']);
+  });
+  it('names a worktree after its repository while preserving cwd and reusing by cwd/tag', async () => {
+    const record = { ...raw, workspace: '/tmp/dataops-wt-x' };
+    const seen: string[] = [];
+    const client = new HostClient(connection(async (cmd) => {
+      seen.push(cmd);
+      if (isProbeExec(cmd)) return outcome(probeStdout({ apath: '/managed/a', snapshot: { output: JSON.stringify([record]) } }));
+      if (cmd.includes('--git-common-dir')) return outcome('/tmp/dataops/.git\n');
+      if (cmd.includes('pwd -P')) return outcome('/tmp/dataops-wt-x\n');
+      return outcome(JSON.stringify([record]));
+    }));
+    expect(await client.createSession('test', { cwd: '/tmp/dataops-wt-x' })).toMatchObject({ name: 'dataops:test', created: false });
+    expect((await client.listSessions()).sessions[0]).toMatchObject({ name: 'dataops:test', workspace: '/tmp/dataops-wt-x' });
+    expect((await client.resolveSession('dataops:test')).id).toBe(raw.id);
+    expect(await client.createSession('test', { cwd: '/tmp/dataops-wt-x' })).toMatchObject({ name: 'dataops:test', created: false });
+    expect(seen.filter((c) => c.includes('--git-common-dir'))).toHaveLength(1);
+    expect(seen.some((c) => c.includes('--json start'))).toBe(false);
+  });
+  it.each(['flash', 'argon', 'codex-orin'])('uses live %s input state instead of redraw activity in ls', async (engine) => {
+    const record = { ...raw, engine, reported_state: null, last_activity_ms: Date.now() };
+    const client = new HostClient(connection(async (cmd) => {
+      if (isProbeExec(cmd)) return outcome(probeStdout({ apath: '/managed/a', snapshot: { output: JSON.stringify([record]) } }));
+      if (cmd.includes(' capture ')) return outcome(engine === 'codex-orin' ? '› Ask Codex to do anything' : '> \n? for shortcuts');
+      return outcome('');
+    }));
+    expect((await client.listSessions()).sessions[0]?.agentState).toBe('idle');
+  });
   let xdg: string | undefined;
   beforeEach(() => {
     xdg = process.env.XDG_CONFIG_HOME;
@@ -88,7 +140,8 @@ describe('host session backend', () => {
     }));
     const listing = await client.listSessions();
     expect(listing.sessions.map((r) => r.id)).toEqual([raw.id]);
-    expect(seen).toHaveLength(1);
+    expect(seen).toHaveLength(2); // backend probe + batched git repository identity
+    expect(seen[1]).toContain('--git-common-dir');
     // The probe's own listing is served, never fetched twice.
     expect(seen[0]).toContain('pocketshell sessions list --json');
     expect(seen[0]).toContain('--json snapshot');

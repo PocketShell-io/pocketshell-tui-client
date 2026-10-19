@@ -1,5 +1,6 @@
 import { posix, win32 } from 'node:path';
 import type { SessionRow, SessionsListing } from '@pocketshell/core';
+import { screenModel } from './screenModels.js';
 
 const string = (value: unknown): string | null => typeof value === 'string' && value ? value : null;
 const ms = (value: unknown): number | null => {
@@ -35,7 +36,9 @@ export function directSessions(payload: unknown, now = Date.now()): SessionsList
     let agentState: SessionRow['agentState'] = null;
     let agentStateSource: SessionRow['agentStateSource'] = null;
     if (phase !== 'exited' && phase !== 'failed') {
-      if (phase !== 'starting' && reportedAt !== null && now - reportedAt <= 8000
+      const idleValid = reported === 'idle' && (screenModel(string(r.engine)) === 'antigravity'
+        || activity === null || (reportedAt !== null && activity <= reportedAt + 2000));
+      if (phase !== 'starting' && reportedAt !== null && (idleValid || now - reportedAt <= 8000 && reported !== 'idle')
         && (reported === 'idle' || reported === 'waiting' || reported === 'working')) {
         agentState = reported;
         agentStateSource = 'reported';

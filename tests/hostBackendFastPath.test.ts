@@ -1,7 +1,7 @@
 /**
  * The P0 fast-path contract for the classic (non-daemon) path:
- * - a first-contact `ls` is one connection and its listing is never fetched twice;
- * - the backend verdict persists on disk, so later processes serve `a --json snapshot` in one connection;
+ * - a first-contact `ls` probes once and batches repository identity in one extra exec;
+ * - the backend verdict persists on disk, so later processes use `a --json snapshot`;
  * - failures that suggest the backend changed invalidate the verdict and re-probe;
  * - a wrapper that lacks a verb (tray builds without `sessions create`) falls back to direct `a`.
  */
@@ -49,17 +49,19 @@ async function freshHostClient(connection: Connection) {
 }
 
 describe('classic connection counts', () => {
-  it('a first-contact ls on a wrapper+a host is exactly one exec, and its listing is served', async () => {
+  it('a first-contact ls probes once and batches repository identity without refetching the snapshot', async () => {
     const commands: string[] = [];
     const client = await freshHostClient(fakeConnection((command) => {
       commands.push(command);
       if (isProbeExec(command))
         return outcome(probeStdout({ wrapper: { output: wrapperListing }, apath: '/home/u/.local/bin/a', snapshot: { output: snapshot } }));
+      if (command.includes('--git-common-dir')) return outcome('/home/u/proj/.git\n');
       throw new Error(`unexpected exec: ${command}`);
     }));
     const listing = await client.listSessions();
     expect(listing.sessions.map((r) => r.id)).toEqual([raw.id]);
-    expect(commands).toHaveLength(1);
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toContain('--git-common-dir');
   });
 
   it('a wrapper-only host pays the raw a probe once, then lists via the wrapper alone', async () => {
@@ -78,7 +80,7 @@ describe('classic connection counts', () => {
     expect(commands[2]).not.toContain('command -v a');
   });
 
-  it('a later process (fresh module graph) serves the cached direct backend in one snapshot-only exec', async () => {
+  it('a later process uses the cached direct backend and resolves repository identity once', async () => {
     const first: string[] = [];
     await (await freshHostClient(fakeConnection((command) => {
       first.push(command);
@@ -86,7 +88,7 @@ describe('classic connection counts', () => {
         return outcome(probeStdout({ wrapper: { output: wrapperListing }, apath: '/home/u/.local/bin/a', snapshot: { output: snapshot } }));
       throw new Error(`unexpected exec: ${command}`);
     }))).listSessions();
-    expect(first).toHaveLength(1);
+    expect(first).toHaveLength(2);
 
     const second: string[] = [];
     const client = await freshHostClient(fakeConnection((command) => {
@@ -95,7 +97,8 @@ describe('classic connection counts', () => {
     }));
     const listing = await client.listSessions();
     expect(listing.sessions.map((r) => r.id)).toEqual([raw.id]);
-    expect(second).toHaveLength(1);
+    expect(second).toHaveLength(2);
+    expect(second[1]).toContain('--git-common-dir');
     expect(second[0]).toContain('--json snapshot');
     expect(second[0]).toContain('/home/u/.local/bin/a');
     expect(second[0]).not.toContain('pocketshell sessions list');

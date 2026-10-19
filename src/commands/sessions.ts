@@ -15,8 +15,8 @@ type HostOpts = { host?: string; json?: boolean };
 
 const SESSION_HELP = `
 Session names and selectors:
-  A session is named <workspace>:<tag>, where <workspace> is the basename of
-  its working directory (-C) on the host and <tag> is the NAME you create it
+  A session is named <workspace>:<tag>, where <workspace> is the repository
+  name (or the directory name outside Git) and <tag> is the NAME you create it
   with: \`sessions create review -C '~/git/project'\` makes \`project:review\`.
 
   A SESSION argument accepts, in this order of precedence:
@@ -134,7 +134,7 @@ export function registerSessions(program: Command): void {
   hostOptions(
     sessions
       .command('create <name>')
-      .description('create a session named <basename of cwd>:<name> (or reuse the live one with that name)')
+      .description('create a session named <repository>:<name> (or reuse the live one with that name)')
       .option('-C, --cwd <dir>', "working directory on the host (quote a leading ~ so it reaches the host: -C '~/git/x')")
       .option('-e, --engine <engine>', 'agent engine to launch (see `engines`); omit it for a plain shell')
       .option('--model <model>', 'pass --model through to the engine (`a start --model`)')

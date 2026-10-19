@@ -106,6 +106,30 @@ afterEach(() => {
   else process.env.XDG_CONFIG_HOME = xdg;
 });
 describe('daemon atomic operations and policy retirement', () => {
+  it('uses the screen-verified classic path before dispatching a modeled engine send', async () => {
+    const original = row.engine;
+    row.engine = 'flash';
+    let screen = '> ';
+    const writes: string[] = [];
+    const closed = vi.fn();
+    state.legacy.mockResolvedValue({ hostName: 'fixture', mode: 'gateway', close: closed,
+      exec: async (command: string, options: any) => {
+        if (command.includes(' send ')) {
+          expect(command).toContain('--stdin --raw');
+          writes.push(options.stdin);
+          screen = options.stdin === '\r' ? 'Working (esc to interrupt)\n> ' : `> ${options.stdin}`;
+        }
+        return { exitCode: 0, timedOut: false, stderr: '', stdout: command.includes('--git-common-dir') ? '/fixture/.git\n' : screen };
+      },
+    });
+    try {
+      const client = await daemonClient(host);
+      expect((await client.sendSelected('tag', 'hello', { enter: true })).delivery?.status).toBe('delivered_working');
+      expect(writes).toEqual(['hello', '\r']);
+      expect(state.calls.some((c) => c.method === 'send')).toBe(false);
+      expect(closed).toHaveBeenCalledTimes(2); // metadata and acknowledged send
+    } finally { row.engine = original; }
+  });
   it('uses one helper request per selector operation and validates schema3 output', async () => {
     const client = await daemonClient(host);
     expect((await client.listSessions()).sessions[0]?.name).toBe('fixture:tag');
@@ -117,7 +141,7 @@ describe('daemon atomic operations and policy retirement', () => {
     expect(state.calls[0].params).toEqual({ format: 'psc' });
     expect(state.calls.slice(1).every((c) => c.params.selectorMode === 'psc')).toBe(true);
     expect(state.instances).toHaveLength(1);
-    expect(state.legacy).not.toHaveBeenCalled();
+    expect(state.legacy).toHaveBeenCalledTimes(1); // batched Git repository identity, cached for subsequent reads
   });
   it('retires account/pin generations and refuses unsafe or deleted credentials before dispatch', async () => {
     let client = await daemonClient(host);

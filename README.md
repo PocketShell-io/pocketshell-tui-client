@@ -196,7 +196,7 @@ psc a hetzner stop e2e-test --if-exists
 
 ### Sessions: names and selectors
 
-`sessions create NAME -C DIR` makes a session named `<basename of DIR>:NAME`
+`sessions create NAME -C DIR` makes a session named `<repository>:NAME`
 (`create review -C '~/git/project'` → `project:review`). Without `-e/--engine`
 the session is a plain shell; with one it launches that agent (see `psc engines`).
 Creating a name that is already live reuses it (`"created": false`).
@@ -319,6 +319,16 @@ secret unreadable, the pipe refused, the daemon not starting — falls back to
 the classic path.
 
 The classic path itself is one connection per command wherever possible:
+
+- Session display names use the repository that owns the working directory.
+  A worktree such as `dataops-wt-x` displays as `dataops:TAG`; its working
+  directory stays at the worktree. Repository identity uses a batched Git
+  lookup, cached per client. Directories outside Git keep their directory name.
+- Flash and Argon use the Antigravity input screen model; Codex Orin uses
+  the Codex model. `start --prompt` accepts the workspace trust dialog and
+  waits for a rendered input prompt. Sends verify the paste before pressing
+  Enter separately, retry Enter if needed, and fail if submission cannot be
+  confirmed. Antigravity idle redraws do not count as model work.
 
 - psc prefers a **direct `a --json snapshot`** over the `pocketshell`
   wrapper whenever the host's `a` is known to work — the snapshot answers in

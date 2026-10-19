@@ -8,6 +8,8 @@ import { ConnectionError, openConnection } from '../transport/index.js';
 import { HostChannel, RpcFailure, type EventFrame } from './channel.js';
 import { gatewayPolicy } from './policy.js';
 import { isVaultBound } from '../vault/session.js';
+import { screenModel } from '../screenModels.js';
+import { shellQuote } from '@pocketshell/core';
 
 /** A replica answer is served only while the last push frame is this fresh. */
 export const REPLICA_LIVE_WINDOW_MS = 6_000;
@@ -274,6 +276,19 @@ function selected(value: unknown): SessionRow {
   return parsed;
 }
 class RpcHostClient extends HostClient {
+  override async sendKeys(session: SessionRow, keys: string): Promise<void> {
+    const connection = await openConnection(this.host!);
+    try { await new HostClient(connection, this.host!.binary, this.host).sendKeys(session, keys); }
+    finally { await connection.close(); }
+  }
+  protected override async workspaceRepoNames(workspaces: string[]): Promise<string[]> {
+    const connection = await openConnection(this.host!);
+    try {
+      const client = new HostClient(connection, this.host!.binary, this.host);
+      const script = workspaces.map((cwd) => `git -C ${shellQuote(cwd)} rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '\\n'`).join('; ');
+      return (await client.runChecked(script, 15_000)).trimEnd().split('\n');
+    } finally { await connection.close(); }
+  }
   constructor(host: HostEntry) {
     super(
       {
@@ -391,6 +406,10 @@ class RpcHostClient extends HostClient {
   }
 
   override async listSessions(options: { fresh?: boolean } = {}): Promise<SessionsListing> {
+    return this.enrichSessions(await this.rawListSessions(options));
+  }
+
+  private async rawListSessions(options: { fresh?: boolean }): Promise<SessionsListing> {
     const context = requests.getStore();
     const slot = await this.liveSlot();
     if (!options.fresh && slot && RpcHostClient.replicaLive(slot) && slot.replica) {
@@ -409,6 +428,8 @@ class RpcHostClient extends HostClient {
   }
 
   override async resolveSession(selector: string, options: { fresh?: boolean } = {}): Promise<SessionRow> {
+    // Repo-derived display names may differ from the older helper's cwd name.
+    if (selector.includes(':')) return pickSession((await this.listSessions(options)).sessions, selector);
     const context = requests.getStore();
     const slot = await this.liveSlot();
     if (!options.fresh && slot && RpcHostClient.replicaLive(slot) && slot.replica) {
@@ -418,17 +439,18 @@ class RpcHostClient extends HostClient {
         seq: slot.replica.seq,
         ageMs: Date.now() - slot.replica.receivedAt,
       });
-      return row;
+      return (await this.enrichSessions({ sessions: [row], errors: [] })).sessions[0]!;
     }
     // One live refresh (a full listing, not a single status) so the stored
     // replica is current again before anything is served from it. Plain
     // status requests (fresh, protocol 1, or no usable slot) never touch it.
     if (!options.fresh && slot && RpcHostClient.pushActive(slot)) {
       RpcHostClient.noteRead(context, { source: 'live' });
-      return pickSession((await this.refreshReplica()).sessions, selector);
+      return pickSession((await this.enrichSessions(await this.refreshReplica())).sessions, selector);
     }
     RpcHostClient.noteRead(context, { source: 'live' });
-    return selected(await request(this.host!, 'status', { selector, selectorMode: 'psc' }));
+    const row = selected(await request(this.host!, 'status', { selector, selectorMode: 'psc' }));
+    return (await this.enrichSessions({ sessions: [row], errors: [] })).sessions[0]!;
   }
 
   override async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<SendDelivery | null> {
@@ -436,6 +458,17 @@ class RpcHostClient extends HostClient {
   }
 
   override async sendSelected(selector: string, text: string, options: { enter: boolean }): Promise<SubmittedSend> {
+    // Older resident helpers do not recognize these aliases. Resolve before
+    // dispatch, then use the same screen-verified raw path as the classic client.
+    const row = options.enter || selector.includes(':') ? await this.resolveSession(selector, { fresh: true }) : null;
+    if (row?.id) selector = row.id;
+    if (row && screenModel(row.engine ?? row.agent)) {
+      const connection = await openConnection(this.host!);
+      try {
+        const client = new HostClient(connection, this.host!.binary, this.host);
+        return { row, delivery: await client.send(row, text, options) };
+      } finally { await connection.close(); }
+    }
     const value = await request(
       this.host!,
       'send',
@@ -452,6 +485,10 @@ class RpcHostClient extends HostClient {
     selector: string,
     options: { mode: 'screen' | 'raw'; bytes?: number; fresh?: boolean },
   ): Promise<{ row: SessionRow; text: string }> {
+    if (selector.includes(':')) {
+      const row = await this.resolveSession(selector, { fresh: options.fresh });
+      selector = row.id ?? selector;
+    }
     const context = requests.getStore();
     const slot = await this.liveSlot();
     // The mirror carries rendered screens only; raw history always round-trips.

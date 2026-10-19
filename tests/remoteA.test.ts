@@ -380,6 +380,21 @@ describe('capture trimming and systemd noise stripping', () => {
 });
 
 describe('waitForAgentReady and waitForSessionIdle', () => {
+  it.each(['flash', 'argon', 'codex-orin'])('waits for %s input and accepts startup trust once', async (engine) => {
+    const trust = 'Do you trust the contents of this project?\n> Yes, I trust this folder\n No, exit';
+    const ready = engine === 'codex-orin' ? '› Ask Codex to do anything' : '> \n? for shortcuts';
+    const screens = ['Loading...', 'Loading...', trust, trust, ready, ready];
+    let i = 0;
+    const keys: string[] = [];
+    const row = makeRow({ engine, agentState: 'working' });
+    await waitForAgentReady({
+      listSessions: async () => ({ sessions: [row], errors: [] }),
+      capture: async () => screens[Math.min(i++, screens.length - 1)]!,
+      sendKeys: async (_row, bytes) => { keys.push(bytes); },
+    }, { name: row.name, id: row.id, created: true }, { engine, timeoutS: 5, pollMs: 1, sleepFn: async () => {} });
+    expect(i).toBe(6);
+    expect(keys).toEqual(['\r']);
+  });
   it('waitForAgentReady waits until an engine session renders a stable non-empty screen and is not working', async () => {
     const screens = ['', 'loading...', '❯ ', '❯ '];
     const states: Array<'working' | 'waiting'> = ['working', 'working', 'waiting', 'waiting'];

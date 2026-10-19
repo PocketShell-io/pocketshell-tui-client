@@ -1,4 +1,6 @@
 import { directSessions } from './directAplexer.js';
+import { agentScreen, screenModel, submitWithScreen } from './screenModels.js';
+import { posix, win32 } from 'node:path';
 import { requests } from './daemon/context.js';
 import {
   forgetBackendCapability,
@@ -646,6 +648,42 @@ export class HostClient {
     );
   }
 
+  private readonly repoNames = new Map<string, string>();
+
+  /** Git's common directory belongs to the repository even when cwd is a worktree. */
+  protected async workspaceRepoNames(workspaces: string[]): Promise<string[]> {
+    const script = workspaces.map((cwd) => `git -C ${shellQuote(cwd)} rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '\\n'`).join('; ');
+    return (await this.runChecked(script, 15_000)).trimEnd().split('\n');
+  }
+
+  protected async enrichSessions(listing: SessionsListing): Promise<SessionsListing> {
+    const missing = [...new Set(listing.sessions.flatMap((r) => r.workspace && !this.repoNames.has(r.workspace) ? [r.workspace] : []))];
+    if (missing.length) {
+      const dirs = await this.workspaceRepoNames(missing).catch(() => []);
+      missing.forEach((cwd, i) => {
+        const path = /^[A-Za-z]:|^\\\\/.test(cwd) ? win32 : posix;
+        const common = dirs[i]?.trim();
+        // Only accept git metadata, never arbitrary command output.
+        const repo = common && path.basename(common) === '.git' ? path.basename(path.dirname(common)) : path.basename(cwd);
+        this.repoNames.set(cwd, repo);
+      });
+    }
+    const sessions = await Promise.all(listing.sessions.map(async (original) => {
+      let row = { ...original };
+      const repo = row.workspace && this.repoNames.get(row.workspace);
+      if (repo && row.tag) row.name = `${repo}:${row.tag}`;
+      const model = screenModel(row.engine ?? row.agent);
+      if (model && (!row.phase || row.phase === 'running')) {
+        try {
+          const state = agentScreen(model, await this.capture(row, { mode: 'screen' }));
+          if (state.busy || state.ready) row = { ...row, agentState: state.busy ? 'working' : 'idle', agentStateSource: 'heuristic' };
+        } catch { /* A failed capture must not hide the host's listing. */ }
+      }
+      return row;
+    }));
+    return { ...listing, sessions };
+  }
+
   /** The resolved direct `a` word, without probing; null when not yet known. */
   private async resolvedDirect(): Promise<string | null> {
     return this.backend ? (await this.backend).direct : null;
@@ -656,13 +694,13 @@ export class HostClient {
     void options;
     if (this.native) return this.native.listSessions();
     const first = await this.sessionsBackend();
-    if (first.listing) return first.listing;
+    if (first.listing) return this.enrichSessions(first.listing);
     try {
-      return await this.fetchListing(first.backend);
+      return await this.enrichSessions(await this.fetchListing(first.backend));
     } catch (error) {
       if (!HostClient.backendMayHaveChanged(error)) throw error;
       const retry = await this.refreshedBackend();
-      return retry.listing ?? this.fetchListing(retry.backend);
+      return this.enrichSessions(retry.listing ?? await this.fetchListing(retry.backend));
     }
   }
 
@@ -755,7 +793,7 @@ export class HostClient {
     const workspace = await this.workspaceArgument(options.cwd);
     const resolvedWorkspace = (await this.runChecked(`cd ${workspace} && pwd -P`)).trim();
     const normalize = (path: string) => path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`).replace(/\/+$/, '');
-    const listing = probeListing ?? (await this.listSessions());
+    const listing = probeListing ? await this.enrichSessions(probeListing) : await this.listSessions();
     const existing = listing.sessions.find((r) => r.tag === name && r.workspace !== null
       && normalize(r.workspace) === normalize(resolvedWorkspace));
     if (existing) return { name: existing.name, id: existing.id, created: false };
@@ -765,7 +803,7 @@ export class HostClient {
     if (options.profile) command += ` --profile ${shellQuote(options.profile)}`;
     const record = JSON.parse(stripSystemdNoise(await this.runChecked(command, 60_000)));
     if (typeof record.id !== 'string') throw new Error('aplexer start returned no session id');
-    const row = directSessions([{ ...record, state: 'starting' }]).sessions[0];
+    const row = (await this.enrichSessions(directSessions([{ ...record, state: 'starting' }]))).sessions[0];
     if (!row) throw new Error('aplexer start returned an invalid session record');
     return { name: row.name, id: row.id, created: true };
   }
@@ -856,12 +894,28 @@ export class HostClient {
     const a = shellQuote((await this.resolvedDirect()) ?? 'a');
     const target = shellQuote(session.id ?? session.name);
     if (options.enter) {
+      const model = screenModel(session.engine ?? session.agent);
+      if (model) {
+        const delivery = await submitWithScreen(model, text, {
+          capture: () => this.capture(session, { mode: 'screen' }),
+          write: async (bytes) => { await this.runChecked(`${a} send ${target} --stdin --raw`, DEFAULT_TIMEOUT_MS, bytes); },
+          frame: frameForPaste,
+        });
+        return requireDelivery(delivery);
+      }
       const outcome = await this.run(`${a} send ${target} --stdin --json --enter`, SEND_ACK_TIMEOUT_MS, text);
       return settleShellDelivery(outcome);
     }
     const encoded = encodeSendPayload(text, { enter: false });
     await this.runChecked(`${a} send ${target} --stdin`, DEFAULT_TIMEOUT_MS, encoded.framed);
     return null;
+  }
+
+  /** Control keys for a recognized startup trust dialog; never paste-frame CR. */
+  async sendKeys(session: SessionRow, keys: string): Promise<void> {
+    if (this.native) this.native.unsupported('session control keys');
+    const a = shellQuote((await this.resolvedDirect()) ?? 'a');
+    await this.runChecked(`${a} send ${shellQuote(session.id ?? session.name)} --stdin --raw`, DEFAULT_TIMEOUT_MS, keys);
   }
 
   /** What the session shows right now (`--screen --plain`) or its recent raw output. */
