@@ -1,5 +1,7 @@
 # pocketshell-tui-client
 
+See [SCOPE.md](SCOPE.md) for ownership and product boundaries.
+
 PocketShell in the terminal. It's the same client as the desktop, web and
 Android apps (hosts → workspaces → agent sessions), for machines and moments
 where all you have is a terminal: an SSH session on a remote box, a headless
