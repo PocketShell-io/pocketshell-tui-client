@@ -37,6 +37,7 @@ jobs:
           python3 scripts/build-windows-package.py
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: psc-windows-package
           path: client/out/windows/*
           if-no-files-found: error
