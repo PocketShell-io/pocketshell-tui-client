@@ -47,21 +47,18 @@ describe('direct snapshot mapping', () => {
 });
 
 describe('host session backend', () => {
-  it.each(['flash', 'argon', 'codex-orin'])('submits %s via raw paste and a separate verified Enter', async (engine) => {
-    let screen = '> ';
+  it.each(['flash', 'argon', 'codex-orin'])('sends %s keystrokes without agent-state verification', async (engine) => {
     const writes: string[] = [];
     const client = new HostClient(connection(async (cmd, options) => {
-      if (cmd.includes(' capture ')) return outcome(screen);
       expect(cmd).toContain('--stdin --raw');
       expect(cmd).not.toContain('--enter');
       const bytes = String(options.stdin);
       writes.push(bytes);
-      screen = bytes === '\r' ? 'Working (esc to interrupt)\n> ' : `> ${bytes}`;
       return outcome('');
     }));
     const session = directSessions([{ ...raw, engine }]).sessions[0]!;
-    expect(await client.send(session, 'hello', { enter: true })).toMatchObject({ status: 'delivered_working' });
-    expect(writes).toEqual(['hello', '\r']);
+    await expect(client.send(session, 'hello', { enter: true })).resolves.toBeUndefined();
+    expect(writes).toEqual(['hello\r']);
   });
   it('names a worktree after its repository while preserving cwd and reusing by cwd/tag', async () => {
     const record = { ...raw, workspace: '/tmp/dataops-wt-x' };
@@ -109,7 +106,7 @@ describe('host session backend', () => {
         return outcome(probeStdout({ apath: '/managed runtime/python/a', snapshot: { output: JSON.stringify([raw]) } }));
       return outcome(
         cmd.includes(' send ')
-          ? JSON.stringify({ delivery: { status: 'submitted', detail: 'fixture' } })
+          ? JSON.stringify({ ok: true })
           : JSON.stringify([raw]),
       );
     }));

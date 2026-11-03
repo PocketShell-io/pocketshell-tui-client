@@ -1,5 +1,5 @@
 import { directSessions } from './directAplexer.js';
-import { agentScreen, screenModel, submitWithScreen } from './screenModels.js';
+import { agentScreen, screenModel } from './screenModels.js';
 import { posix, win32 } from 'node:path';
 import { requests } from './daemon/context.js';
 import {
@@ -15,7 +15,7 @@ import {
  * `pocketshell …` commands and parses their schema-checked JSON. This class
  * adds the PATH wrapper (sshd exec channels rarely have ~/.local/bin) and
  * the few aplexer verbs the host CLI doesn't carry yet — `send` and
- * `capture` — which agents need to drive a session without attaching.
+ * `capture` — for human session control without attaching.
  */
 import {
   BP_END,
@@ -55,9 +55,9 @@ export interface EncodedSendPayload {
 }
 
 /**
- * Encode a message for PTY delivery: multi-line text is wrapped in bracketed
- * paste (`ESC[200~ … ESC[201~`) so an agent REPL ingests it as one message
- * rather than submitting every line; `enter` appends CR (`\r`) after `ESC[201~`.
+ * Encode keystrokes for a PTY: multi-line text is wrapped in bracketed
+ * paste (`ESC[200~ … ESC[201~`) as one input rather than separate lines;
+ * `enter` appends CR (`\r`) after `ESC[201~`.
  */
 export function encodeSendPayload(text: string, options: { enter?: boolean } = {}): EncodedSendPayload {
   const enter = Boolean(options.enter);
@@ -67,121 +67,7 @@ export function encodeSendPayload(text: string, options: { enter?: boolean } = {
   return { framed, bytes, bracketed, enter };
 }
 
-/** Verdict of `a send --enter` (`delivery.status`). */
-export type DeliveryStatus = 'delivered_working' | 'delivered_idle' | 'submitted' | 'unverified' | 'failed';
-
-/** The `delivery` object `a send --json --enter` prints. Unknown fields are kept. */
-export interface SendDelivery {
-  status: DeliveryStatus;
-  detail?: string;
-  [key: string]: unknown;
-}
-
-/** What one acknowledged send resolved to. `delivery` is null when Enter was not requested. */
-export interface SubmittedSend {
-  row: SessionRow;
-  delivery: SendDelivery | null;
-}
-
-const DELIVERY_STATUSES = new Set<string>([
-  'delivered_working',
-  'delivered_idle',
-  'submitted',
-  'unverified',
-  'failed',
-]);
-
-/**
- * Same exit codes as `a send --enter`: 0 delivered (or not checkable),
- * 3 submitted but the agent stayed idle, 1 not delivered.
- */
-export function deliveryExitCode(status: DeliveryStatus): number {
-  if (status === 'delivered_idle') return 3;
-  if (status === 'failed') return 1;
-  return 0;
-}
-
-/** Send finished without proof the text was submitted, or the proof says it was not. */
-export class DeliveryError extends Error {
-  readonly details: { delivery: SendDelivery | null };
-  constructor(
-    readonly code: 'DELIVERY_FAILED' | 'DELIVERY_UNCONFIRMED',
-    message: string,
-    readonly exitCode: number,
-    delivery: SendDelivery | null,
-  ) {
-    super(message);
-    this.name = 'DeliveryError';
-    this.details = { delivery };
-  }
-}
-
-/** Pull `delivery` out of an `a send --json` document or a resident send result. */
-export function readDelivery(value: unknown): SendDelivery | null {
-  if (!value || typeof value !== 'object') return null;
-  const raw = (value as { delivery?: unknown }).delivery;
-  if (!raw || typeof raw !== 'object') return null;
-  const status = (raw as { status?: unknown }).status;
-  if (typeof status !== 'string' || !DELIVERY_STATUSES.has(status)) return null;
-  return raw as SendDelivery;
-}
-
-/** Parse stdout of `a send --json`. Systemd noise and extra lines are ignored. */
-export function parseSendReport(stdout: string): SendDelivery | null {
-  const text = stripSystemdNoise(stdout).trim();
-  const chunks = [text];
-  for (let i = text.length - 1; i >= 0; i--) {
-    if (text[i] === '{') chunks.push(text.slice(i));
-  }
-  for (const chunk of chunks) {
-    try {
-      const delivery = readDelivery(JSON.parse(chunk));
-      if (delivery) return delivery;
-    } catch {
-      /* try the next JSON object */
-    }
-  }
-  return null;
-}
-
-/**
- * A prompt echoed while the agent was already busy is queued behind that
- * turn. Older `a` reports that as `delivered_idle` ("no sign of work") and
- * exits 3. The text was submitted; keep `queued` and report `submitted`.
- */
-export function normalizeDelivery(delivery: SendDelivery): SendDelivery {
-  if (delivery.status !== 'delivered_idle' || delivery.queued !== true) return delivery;
-  return {
-    ...delivery,
-    status: 'submitted',
-    detail: 'submitted while the agent was busy; queued behind its current turn',
-  };
-}
-
-/**
- * A submitted send must carry a verdict. `failed` is an error. Anything else
- * (including `delivered_idle`) is returned so the caller can use `a`'s exit code.
- */
-export function requireDelivery(delivery: SendDelivery | null, fallback?: string): SendDelivery {
-  if (!delivery) {
-    throw new DeliveryError('DELIVERY_UNCONFIRMED', fallback ?? 'send finished without a delivery verdict', 1, null);
-  }
-  delivery = normalizeDelivery(delivery);
-  if (delivery.status === 'failed') {
-    const detail = typeof delivery.detail === 'string' ? delivery.detail.trim() : '';
-    throw new DeliveryError('DELIVERY_FAILED', detail || fallback || 'text was not submitted', 1, delivery);
-  }
-  return delivery;
-}
-
-
 const DEFAULT_TIMEOUT_MS = 30_000;
-/**
- * `a send --enter` waits for a ready input box (up to 30s) and then for the
- * agent to start working (up to 10s), plus paste/submit retries. 30s cuts
- * that short and can kill the process after the text is typed but before Enter.
- */
-const SEND_ACK_TIMEOUT_MS = 90_000;
 
 /**
  * `systemd-run` (which aplexer may launch through) announces itself on
@@ -211,36 +97,6 @@ export class HostCommandError extends Error {
     this.code = outcome.timedOut ? 'TIMEOUT' : 'HOST_COMMAND_FAILED';
     this.exitCode = outcome.timedOut ? 124 : 1;
   }
-}
-
-/** Interpret `a send --stdin --json --enter`. Exit 0 without a verdict is a failure. */
-function settleShellDelivery(outcome: ExecOutcome): SendDelivery {
-  if (outcome.timedOut) {
-    throw new HostCommandError('`a send --enter` timed out before delivery was acknowledged', outcome);
-  }
-  const delivery = parseSendReport(outcome.stdout);
-  const stderr = stripSystemdNoise(outcome.stderr).trim().split('\n').filter(Boolean).slice(-3).join(' ');
-  if (delivery?.status === 'failed' || outcome.exitCode === 1) {
-    const detail = typeof delivery?.detail === 'string' ? delivery.detail.trim() : '';
-    throw new DeliveryError('DELIVERY_FAILED', detail || stderr || 'text was not submitted', 1, delivery);
-  }
-  if (!delivery || outcome.exitCode === null) {
-    throw new DeliveryError(
-      'DELIVERY_UNCONFIRMED',
-      stderr || `a send --enter exited ${outcome.exitCode ?? 'none'} without a delivery verdict`,
-      outcome.exitCode && outcome.exitCode !== 0 ? outcome.exitCode : 1,
-      delivery,
-    );
-  }
-  if (outcome.exitCode !== 0 && outcome.exitCode !== deliveryExitCode(delivery.status)) {
-    throw new DeliveryError(
-      'DELIVERY_UNCONFIRMED',
-      stderr || `a send --enter exited ${outcome.exitCode} (${delivery.status})`,
-      outcome.exitCode,
-      delivery,
-    );
-  }
-  return normalizeDelivery(delivery);
 }
 
 export class SessionNotFound extends Error {
@@ -705,7 +561,7 @@ export class HostClient {
   }
 
   /**
-   * Resolve what a user or agent typed to one session row (see
+   * Resolve what a user typed to one session row (see
    * {@link pickSession} for the ranking). Throws SessionNotFound or
    * SessionAmbiguous.
    */
@@ -721,11 +577,11 @@ export class HostClient {
     return pickSession(sessions, selector);
   }
 
-  /** Resolve and execute atomically when the transport supports a resident helper. */
-  async sendSelected(selector: string, text: string, options: { enter: boolean }): Promise<SubmittedSend> {
+  /** Resolve a session, send the requested keystrokes, and return its row. */
+  async sendSelected(selector: string, text: string, options: { enter: boolean }): Promise<SessionRow> {
     const row = await this.resolveSession(selector);
-    const delivery = await this.send(row, text, options);
-    return { row, delivery };
+    await this.send(row, text, options);
+    return row;
   }
 
   async captureSelected(selector: string, options: { mode: 'screen' | 'raw'; bytes?: number; fresh?: boolean }): Promise<{ row: SessionRow; text: string }> {
@@ -876,46 +732,13 @@ export class HostClient {
     return this.cli.removeWorkspace(this.connection.hostName, path);
   }
 
-  /**
-   * Type into a session without attaching.
-   *
-   * With `enter` (the default for `psc <host> send`), the raw text is handed
-   * to `a send --stdin --json --enter`. Aplexer frames multi-line paste,
-   * presses Enter after the engine has ingested it, and returns a delivery
-   * verdict. Pre-wrapping the paste here and following it with a separate
-   * CR (`--hex 0d`) skips that check: the bytes can sit unsubmitted, or be
-   * dropped, while both writes still exit 0.
-   *
-   * Without `enter`, multi-line text is still bracketed so a newline does
-   * not submit each line. That path only types; it has no delivery verdict.
-   */
-  async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<SendDelivery | null> {
+  /** Type keystrokes into a session without attaching; optionally press Enter. */
+  async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<void> {
     if (this.native) this.native.unsupported('session send (not advertised by the reviewed native CLI)');
     const a = shellQuote((await this.resolvedDirect()) ?? 'a');
     const target = shellQuote(session.id ?? session.name);
-    if (options.enter) {
-      const model = screenModel(session.engine ?? session.agent);
-      if (model) {
-        const delivery = await submitWithScreen(model, text, {
-          capture: () => this.capture(session, { mode: 'screen' }),
-          write: async (bytes) => { await this.runChecked(`${a} send ${target} --stdin --raw`, DEFAULT_TIMEOUT_MS, bytes); },
-          frame: frameForPaste,
-        });
-        return requireDelivery(delivery);
-      }
-      const outcome = await this.run(`${a} send ${target} --stdin --json --enter`, SEND_ACK_TIMEOUT_MS, text);
-      return settleShellDelivery(outcome);
-    }
-    const encoded = encodeSendPayload(text, { enter: false });
-    await this.runChecked(`${a} send ${target} --stdin`, DEFAULT_TIMEOUT_MS, encoded.framed);
-    return null;
-  }
-
-  /** Control keys for a recognized startup trust dialog; never paste-frame CR. */
-  async sendKeys(session: SessionRow, keys: string): Promise<void> {
-    if (this.native) this.native.unsupported('session control keys');
-    const a = shellQuote((await this.resolvedDirect()) ?? 'a');
-    await this.runChecked(`${a} send ${shellQuote(session.id ?? session.name)} --stdin --raw`, DEFAULT_TIMEOUT_MS, keys);
+    const encoded = encodeSendPayload(text, { enter: Boolean(options.enter) });
+    await this.runChecked(`${a} send ${target} --stdin --raw`, DEFAULT_TIMEOUT_MS, encoded.bytes);
   }
 
   /** What the session shows right now (`--screen --plain`) or its recent raw output. */

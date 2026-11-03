@@ -65,10 +65,6 @@ vi.mock('../src/daemon/channel.js', async (original) => {
         if (method === 'list') return { schema: 3, sessions: [row], errors: [] };
         if (method === 'ping') return { ok: true };
         if (method === 'capture') return { session: row, text: 'fixture capture' };
-        if (method === 'send' && params?.submit) {
-          if (params.payload === 'drop') return { session: row, delivery: { status: 'failed', detail: 'dropped' } };
-          return { session: row, delivery: { status: 'submitted', detail: 'fixture' } };
-        }
         return { session: row };
       }
       close() {
@@ -106,10 +102,9 @@ afterEach(() => {
   else process.env.XDG_CONFIG_HOME = xdg;
 });
 describe('daemon atomic operations and policy retirement', () => {
-  it('uses the screen-verified classic path before dispatching a modeled engine send', async () => {
+  it('uses raw keystrokes on the classic path without agent-state observation', async () => {
     const original = row.engine;
-    row.engine = 'flash';
-    let screen = '> ';
+    row.engine = 'shell';
     const writes: string[] = [];
     const closed = vi.fn();
     state.legacy.mockResolvedValue({ hostName: 'fixture', mode: 'gateway', close: closed,
@@ -117,31 +112,45 @@ describe('daemon atomic operations and policy retirement', () => {
         if (command.includes(' send ')) {
           expect(command).toContain('--stdin --raw');
           writes.push(options.stdin);
-          screen = options.stdin === '\r' ? 'Working (esc to interrupt)\n> ' : `> ${options.stdin}`;
         }
-        return { exitCode: 0, timedOut: false, stderr: '', stdout: command.includes('--git-common-dir') ? '/fixture/.git\n' : screen };
+        return { exitCode: 0, timedOut: false, stderr: '', stdout: command.includes('--git-common-dir') ? '/fixture/.git\n' : '' };
       },
     });
     try {
       const client = await daemonClient(host);
-      expect((await client.sendSelected('tag', 'hello', { enter: true })).delivery?.status).toBe('delivered_working');
-      expect(writes).toEqual(['hello', '\r']);
+      expect(await client.sendSelected('tag', 'hello', { enter: true })).toMatchObject({ id: row.id });
+      expect(writes).toEqual(['hello\r']);
       expect(state.calls.some((c) => c.method === 'send')).toBe(false);
-      expect(closed).toHaveBeenCalledTimes(2); // metadata and acknowledged send
+      expect(closed).toHaveBeenCalled();
     } finally { row.engine = original; }
   });
   it('uses one helper request per selector operation and validates schema3 output', async () => {
+    const writes: string[] = [];
+    state.legacy.mockResolvedValue({
+      hostName: 'fixture',
+      mode: 'gateway',
+      exec: async (command: string, options: any) => {
+        if (command.includes(' send ')) {
+          expect(command).toContain('--stdin --raw');
+          writes.push(options.stdin);
+        }
+        return { exitCode: 0, timedOut: false, stderr: '', stdout: '' };
+      },
+      attachInteractive: vi.fn(),
+      close: vi.fn(),
+    });
     const client = await daemonClient(host);
     expect((await client.listSessions()).sessions[0]?.name).toBe('fixture:tag');
     // Protocol-1 helpers keep no replica: every read is a live round trip.
     expect((await client.resolveSession('tag')).id).toBe(row.id);
     expect((await client.captureSelected('tag', { mode: 'screen' })).text).toBe('fixture capture');
-    expect((await client.sendSelected('tag', 'hello', { enter: false })).row.id).toBe(row.id);
-    expect(state.calls.map((c) => c.method)).toEqual(['list', 'status', 'capture', 'send']);
+    expect((await client.sendSelected('tag', 'hello', { enter: false })).id).toBe(row.id);
+    expect(state.calls.map((c) => c.method)).toEqual(['list', 'status', 'capture', 'status']);
+    expect(writes).toEqual(['hello']);
     expect(state.calls[0].params).toEqual({ format: 'psc' });
     expect(state.calls.slice(1).every((c) => c.params.selectorMode === 'psc')).toBe(true);
     expect(state.instances).toHaveLength(1);
-    expect(state.legacy).toHaveBeenCalledTimes(1); // batched Git repository identity, cached for subsequent reads
+    expect(state.legacy).toHaveBeenCalledTimes(2); // metadata lookup and direct keystroke send
   });
   it('retires account/pin generations and refuses unsafe or deleted credentials before dispatch', async () => {
     let client = await daemonClient(host);
@@ -156,7 +165,7 @@ describe('daemon atomic operations and policy retirement', () => {
     expect(state.instances[1].closed).toBe(true);
     expect(state.calls).toHaveLength(2);
   });
-  it('retries a lost read once and never retries an uncertain send', async () => {
+  it('retries a lost read and resolves a session before writing keystrokes', async () => {
     const client = await daemonClient(host);
     state.failNext = 'CONNECTION_LOST';
     await client.listSessions();
@@ -167,13 +176,6 @@ describe('daemon atomic operations and policy retirement', () => {
       code: 'OUTCOME_UNKNOWN',
     });
     expect(state.calls).toHaveLength(1);
-  });
-  it('rejects a resident send whose verdict says the text was not submitted', async () => {
-    const client = await daemonClient(host);
-    await expect(client.sendSelected('tag', 'drop', { enter: true })).rejects.toMatchObject({
-      code: 'DELIVERY_FAILED',
-      message: 'dropped',
-    });
   });
   it('uses a live ping with negotiated versions, and falls back before mutation for old capabilities', async () => {
     let client = await daemonClient(host);

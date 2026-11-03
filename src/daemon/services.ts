@@ -1,5 +1,5 @@
 import { requests, type RequestContext } from './context.js';
-import { HostClient, pickSession, readDelivery, requireDelivery, type SendDelivery, type SubmittedSend } from '../hostClient.js';
+import { HostClient, pickSession } from '../hostClient.js';
 import { noteResidentCapability } from '../hostCapability.js';
 import { trace } from '../trace.js';
 import { parseHostSessionsList, type SessionRow, type SessionsListing } from '@pocketshell/core';
@@ -8,7 +8,6 @@ import { ConnectionError, openConnection } from '../transport/index.js';
 import { HostChannel, RpcFailure, type EventFrame } from './channel.js';
 import { gatewayPolicy } from './policy.js';
 import { isVaultBound } from '../vault/session.js';
-import { screenModel } from '../screenModels.js';
 import { shellQuote } from '@pocketshell/core';
 
 /** A replica answer is served only while the last push frame is this fresh. */
@@ -276,11 +275,6 @@ function selected(value: unknown): SessionRow {
   return parsed;
 }
 class RpcHostClient extends HostClient {
-  override async sendKeys(session: SessionRow, keys: string): Promise<void> {
-    const connection = await openConnection(this.host!);
-    try { await new HostClient(connection, this.host!.binary, this.host).sendKeys(session, keys); }
-    finally { await connection.close(); }
-  }
   protected override async workspaceRepoNames(workspaces: string[]): Promise<string[]> {
     const connection = await openConnection(this.host!);
     try {
@@ -453,32 +447,20 @@ class RpcHostClient extends HostClient {
     return (await this.enrichSessions({ sessions: [row], errors: [] })).sessions[0]!;
   }
 
-  override async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<SendDelivery | null> {
-    return (await this.sendSelected(session.id ?? session.name, text, { enter: Boolean(options.enter) })).delivery;
+  override async send(session: SessionRow, text: string, options: { enter?: boolean } = {}): Promise<void> {
+    await this.sendSelected(session.id ?? session.name, text, { enter: Boolean(options.enter) });
   }
 
-  override async sendSelected(selector: string, text: string, options: { enter: boolean }): Promise<SubmittedSend> {
-    // Older resident helpers do not recognize these aliases. Resolve before
-    // dispatch, then use the same screen-verified raw path as the classic client.
-    const row = options.enter || selector.includes(':') ? await this.resolveSession(selector, { fresh: true }) : null;
-    if (row?.id) selector = row.id;
-    if (row && screenModel(row.engine ?? row.agent)) {
-      const connection = await openConnection(this.host!);
-      try {
-        const client = new HostClient(connection, this.host!.binary, this.host);
-        return { row, delivery: await client.send(row, text, options) };
-      } finally { await connection.close(); }
-    }
-    const value = await request(
-      this.host!,
-      'send',
-      { selector, selectorMode: 'psc', payload: text, submit: options.enter },
-      true,
-    );
-    const delivery = options.enter
-      ? requireDelivery(readDelivery(value), 'resident send did not acknowledge delivery')
-      : null;
-    return { row: selected(value), delivery };
+  override async sendSelected(selector: string, text: string, options: { enter: boolean }): Promise<SessionRow> {
+    // Keystroke sends use the aplexer PTY path directly. The resident RPC
+    // send operation adds agent-state observation that human input does not need.
+    const row = await this.resolveSession(selector, { fresh: true });
+    const connection = await openConnection(this.host!);
+    try {
+      const client = new HostClient(connection, this.host!.binary, this.host);
+      await client.send(row, text, options);
+      return row;
+    } finally { await connection.close(); }
   }
 
   override async captureSelected(

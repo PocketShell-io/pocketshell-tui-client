@@ -1,26 +1,23 @@
 /**
- * `psc <host> <verb>` (legacy spelling `psc a <host> <verb>`): remote aplexer through PocketShell — one short, predictable
- * command family for driving agent sessions across hosts.
+ * `psc <host> <verb>` (legacy spelling `psc a <host> <verb>`): human session
+ * control through PocketShell across saved hosts.
  */
-import { deliveryExitCode, encodeSendPayload, HostClient, SessionNotFound, type SendDelivery } from '../hostClient.js';
+import { HostClient, SessionNotFound } from '../hostClient.js';
 import { Command } from 'commander';
-import type { CreatedSession, SessionRow } from '@pocketshell/core';
+import type { SessionRow } from '@pocketshell/core';
 import { mintGatewayToken } from '../account/index.js';
 import { fetchDevices, type DevicePresence } from '../gateway/devices.js';
 import { resolveEndpoint } from '../gateway/endpoint.js';
 import { loadPins } from '../gateway/pins.js';
-import { requests, setExitCode } from '../daemon/context.js';
+import { requests } from '../daemon/context.js';
 import { defaultHostName, friendlyHostName, listHosts, pickHost, type HostEntry } from '../hosts/store.js';
 import { noteHostUsed } from '../daemon/prewarm.js';
-import { classify, CliError, emit, EXIT, isJsonMode, note, setJsonMode, usageError } from '../output.js';
+import { classify, emit, isJsonMode, keystrokeSendResult, setJsonMode, usageError } from '../output.js';
 import { safeLine, safeText } from '../sanitize.js';
 import { openConnection } from '../transport/index.js';
-import { action, jsonOption, parsePositiveInt, parseSeconds } from './common.js';
+import { action, jsonOption, parsePositiveInt } from './common.js';
 import { describeHost } from './hosts.js';
 import { table } from './sessions.js';
-import { agentScreen, screenModel } from '../screenModels.js';
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The read-source meta of the last operation, when a resident transport served it. */
 function replicaMeta(): { meta?: { source: 'replica' | 'live'; seq?: number; ageMs?: number } } {
@@ -31,16 +28,15 @@ function replicaMeta(): { meta?: { source: 'replica' | 'live'; seq?: number; age
 export const A_HELP = `Usage: psc [options] <host> <command>
        psc hosts [--check]
 
-Remote aplexer across your PocketShell hosts.
+Human session control across your PocketShell hosts.
 
 Commands:
   psc hosts [--check]                 saved hosts; --check pings each in parallel (online/offline/error + versions)
   psc <host> connect                  interactive login shell on <host> (like ssh)
   psc <host> ls                       sessions on <host> (name, engine, state, workspace) — plain table
-  psc <host> start <tag> [options]    create (or reuse live) session <repository>:<tag>; optionally send --prompt
-  psc <host> send <session> [TEXT|-]  send and SUBMIT (Enter is default; --no-enter to just type). Exit 0 delivered, 3 submitted but idle, 1 not delivered
+  psc <host> start <tag> [options]    create (or reuse live) session <repository>:<tag>
+  psc <host> send <session> [TEXT|-]  type keystrokes (Enter is default; --no-enter to leave text unsubmitted)
   psc <host> capture <session> [opts] plain-text rendered screen by default (no ANSI), trailing blank lines trimmed
-  psc <host> wait <session> [opts]    block until the session's agent is idle/waiting (exit 124 on timeout)
   psc <host> stop <session> [opts]    stop a session (--if-exists succeeds when already gone)
   psc <host> status <session>         one session's row (state, agent state, engine, created)
 
@@ -59,10 +55,10 @@ Examples:
   psc hosts
   psc hosts --check --json
   psc hetzner ls
-  psc hetzner start e2e-test -C '~/git/project' -e claude --prompt 'reply with just the word PONG'
-  psc hetzner wait e2e-test --timeout 120
-  psc hetzner capture e2e-test --lines 20 --wait-for PONG
-  echo -e 'line1\\nline2: reply LINES-OK' | psc hetzner send e2e-test
+  psc hetzner start review -C '~/git/project' -e claude
+  psc hetzner send review 'please review the changes' --enter
+  psc hetzner capture review --lines 20
+  echo -e 'line1\\nline2: reply LINES-OK' | psc hetzner send review
   psc hetzner status e2e-test
   psc hetzner stop e2e-test --if-exists
 `;
@@ -100,21 +96,6 @@ export async function resolveSendText(
     return (await readStdin()).replace(/\r?\n$/, '');
   }
   throw usageError("missing message text (pass TEXT, '-' or pipe stdin)");
-}
-
-/**
- * Resolve `--prompt <text|->` for `psc <host> start`:
- * - `undefined` → null (no prompt to send);
- * - `'-'` → read stdin and strip one trailing line break;
- * - any other string → verbatim.
- */
-export async function resolvePromptText(
-  promptOpt: string | undefined,
-  readStdin: () => Promise<string> = readAllStdin,
-): Promise<string | null> {
-  if (promptOpt === undefined) return null;
-  if (promptOpt === '-') return (await readStdin()).replace(/\r?\n$/, '');
-  return promptOpt;
 }
 
 /**
@@ -203,250 +184,6 @@ async function withResolvedHost(
     noteHostUsed(host);
   } finally {
     await client.connection.close();
-  }
-}
-
-function compileRegex(source: string): RegExp {
-  try {
-    return new RegExp(source, 'm');
-  } catch (error) {
-    throw usageError(`invalid --wait-for regex: ${(error as Error).message}`);
-  }
-}
-
-/**
- * Wait until a newly started (or reused) session is ready to accept input:
- * - for a reused session (`created: false`), waits until `agentState !== 'working'`;
- * - for a freshly created session (`created: true`), waits until the screen
- *   has rendered non-empty content (when an engine is launched) and remained
- *   stable across two polls while `agentState !== 'working'`.
- */
-export async function waitForAgentReady(
-  client: Pick<HostClient, 'listSessions' | 'capture'> & Partial<Pick<HostClient, 'sendKeys'>>,
-  created: CreatedSession,
-  options: {
-    engine?: string;
-    timeoutS?: number;
-    pollMs?: number;
-    sleepFn?: (ms: number) => Promise<void>;
-  } = {},
-): Promise<SessionRow> {
-  const timeoutS = options.timeoutS ?? 30;
-  const pollMs = options.pollMs ?? 500;
-  const pause = options.sleepFn ?? sleep;
-  const deadline = Date.now() + timeoutS * 1000;
-  const selector = created.id ?? created.name;
-  let lastScreen: string | null = null;
-  let lastRow: SessionRow | null = null;
-  let acceptedTrust: string | null = null;
-
-  for (;;) {
-    const { sessions } = await client.listSessions();
-    const row =
-      sessions.find((s) => (created.id && s.id === created.id) || s.name === created.name) ??
-      ({
-        name: created.name,
-        id: created.id,
-        workspace: null,
-        tag: created.name.split(':')[1] ?? created.name,
-        engine: options.engine ?? null,
-        profile: null,
-        agent: options.engine ?? null,
-        agentState: null,
-        agentStateSource: null,
-        attached: false,
-        createdEpoch: null,
-        activityEpoch: null,
-      } satisfies SessionRow);
-    lastRow = row;
-
-    const model = screenModel(options.engine ?? row.engine ?? row.agent);
-    if (model) {
-      const screen = trimCapture(await client.capture(row, { mode: 'screen' }));
-      const state = agentScreen(model, screen);
-      if (state.trustKeys && acceptedTrust !== screen && client.sendKeys) {
-        await client.sendKeys(row, state.trustKeys);
-        acceptedTrust = screen;
-        lastScreen = null;
-      } else if (state.ready && screen === lastScreen) {
-        return row;
-      } else {
-        lastScreen = screen;
-      }
-    } else if (!created.created) {
-      if (row.agentState !== 'working') return row;
-    } else {
-      const screen = trimCapture(await client.capture(row, { mode: 'screen' }));
-      const wantsEngine = Boolean(options.engine || row.engine || row.agent);
-      const hasContent = screen.length > 0;
-      const notWorking = row.agentState !== 'working';
-      if (wantsEngine) {
-        if (hasContent && notWorking && lastScreen !== null && screen === lastScreen) {
-          return row;
-        }
-      } else if ((hasContent || lastScreen !== null) && notWorking) {
-        return row;
-      }
-      lastScreen = screen;
-    }
-
-    if (Date.now() >= deadline) {
-      throw new CliError(
-        'TIMEOUT',
-        `session ${created.name} did not become ready within ${timeoutS}s`,
-        EXIT.TIMEOUT,
-        { session: { name: lastRow.name, id: lastRow.id } },
-      );
-    }
-    await pause(Math.min(pollMs, Math.max(0, deadline - Date.now())));
-  }
-}
-
-/** Whitespace-collapsed text, for matching a prompt against a rendered screen. */
-function collapse(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-/**
- * Make sure a `start --prompt` actually reached the agent. A TUI that is
- * still initialising (codex loading MCP servers, for one) can drop typed
- * input even though its screen looked settled. Within `windowS` the agent
- * must be seen working; otherwise:
- * - neither the prompt's first line nor a "[Pasted text…]" placeholder is on
- *   screen: it was swallowed, send it again (once);
- * - it is on screen but never submitted: press Enter.
- */
-export async function confirmPromptDelivery(
-  client: Pick<HostClient, 'listSessions' | 'capture' | 'send'>,
-  row: SessionRow,
-  promptText: string,
-  options: {
-    windowS?: number;
-    pollMs?: number;
-    sleepFn?: (ms: number) => Promise<void>;
-    /**
-     * Observe only: never resend or press Enter, so the check is safe to run
-     * in the background after a `send` returned. Returns 'unconfirmed' when
-     * delivery cannot be proven without writing.
-     */
-    readOnly?: boolean;
-  } = {},
-): Promise<'working' | 'resent' | 'entered' | 'visible' | 'unconfirmed'> {
-  const windowS = options.windowS ?? 15;
-  const pollMs = options.pollMs ?? 1000;
-  const pause = options.sleepFn ?? sleep;
-  const readOnly = options.readOnly ?? false;
-  const firstLine = promptText.split('\n').find((line) => line.trim() !== '') ?? '';
-  const probe = collapse(firstLine).slice(0, 40);
-  const polls = Math.max(1, Math.ceil((windowS * 1000) / pollMs));
-  let resent = false;
-  for (let round = 0; round < 2; round++) {
-    let visible = false;
-    for (let i = 0; i < polls; i++) {
-      await pause(pollMs);
-      const { sessions } = await client.listSessions();
-      const current = sessions.find((s) => (row.id && s.id === row.id) || s.name === row.name);
-      if (current?.agentState === 'working') return resent ? 'resent' : 'working';
-      const screen = collapse(trimCapture(await client.capture(current ?? row, { mode: 'screen' })));
-      // A multi-line paste is shown as a placeholder, not as its text.
-      visible = (probe !== '' && screen.includes(probe)) || /\[Pasted (text|content)\b/i.test(screen);
-    }
-    if (visible) {
-      if (resent) return 'resent';
-      if (readOnly) return 'visible';
-      await client.send(row, '', { enter: true });
-      return 'entered';
-    }
-    if (resent || probe === '') return resent ? 'resent' : 'visible';
-    if (readOnly) return 'unconfirmed';
-    await client.send(row, promptText, { enter: true });
-    resent = true;
-  }
-  return 'resent';
-}
-
-export interface WaitIdleResult {
-  row: SessionRow;
-  state: string;
-  reason: 'agent_state' | 'screen_idle' | 'phase';
-  elapsedMs: number;
-}
-
-/**
- * Block until `selector`'s agent is idle/waiting:
- * - uses `row.agentState` (`idle` or `waiting`) when the host exposes it via
- *   `sessions list` JSON;
- * - otherwise falls back to waiting until the rendered screen is unchanged for
- *   `idleS` seconds (default 5).
- * An idle/waiting agent state only counts once the agent has been seen
- * working or `settleS` seconds (default 3) have passed, so `send` followed
- * at once by `wait` does not return before the agent has picked the prompt up.
- * Throws CliError('TIMEOUT', ..., 124) on timeout.
- */
-export async function waitForSessionIdle(
-  client: Pick<HostClient, 'resolveSession' | 'capture'>,
-  selector: string,
-  options: {
-    idleS?: number;
-    settleS?: number;
-    timeoutS?: number;
-    pollMs?: number;
-    sleepFn?: (ms: number) => Promise<void>;
-  } = {},
-): Promise<WaitIdleResult> {
-  const idleS = options.idleS ?? 5;
-  const settleS = options.settleS ?? 3;
-  const timeoutS = options.timeoutS ?? 300;
-  const pollMs = options.pollMs ?? 1000;
-  const pause = options.sleepFn ?? sleep;
-  const started = Date.now();
-  const deadline = started + timeoutS * 1000;
-
-  let lastScreen: string | null = null;
-  let unchangedSince = started;
-  let lastRow: SessionRow | null = null;
-  let seenWorking = false;
-
-  for (;;) {
-    const row = await client.resolveSession(selector);
-    lastRow = row;
-    const now = Date.now();
-
-    if (row.phase && row.phase !== 'running') {
-      return { row, state: row.phase, reason: 'phase', elapsedMs: now - started };
-    }
-
-    if (row.agentState !== null) {
-      const settled = seenWorking || now - started >= settleS * 1000;
-      if ((row.agentState === 'idle' || row.agentState === 'waiting') && settled) {
-        return { row, state: row.agentState, reason: 'agent_state', elapsedMs: now - started };
-      }
-      // working (or idle but not yet settled): reset the screen idle timer and keep polling.
-      if (row.agentState === 'working') seenWorking = true;
-      lastScreen = null;
-      unchangedSince = now;
-    } else {
-      const screen = trimCapture(await client.capture(row, { mode: 'screen' }));
-      if (lastScreen === null || screen !== lastScreen) {
-        lastScreen = screen;
-        unchangedSince = now;
-      } else if (now - unchangedSince >= idleS * 1000) {
-        return { row, state: 'idle', reason: 'screen_idle', elapsedMs: now - started };
-      }
-    }
-
-    if (Date.now() >= deadline) {
-      throw new CliError(
-        'TIMEOUT',
-        `session ${lastRow.name} did not become idle within ${timeoutS}s`,
-        EXIT.TIMEOUT,
-        {
-          session: ref(lastRow),
-          agentState: lastRow.agentState,
-        },
-      );
-    }
-    await pause(Math.min(pollMs, Math.max(0, deadline - Date.now())));
   }
 }
 
@@ -647,7 +384,7 @@ function configureSubcommandErrorHandling(command: Command): void {
 
 /** Build the Commander parser for `psc <host> <verb> ...`. */
 export function buildHostVerbProgram(hostSelector: string): Command {
-  const hostCmd = new Command(`psc ${hostSelector}`).description(`drive aplexer sessions on ${hostSelector}`);
+  const hostCmd = new Command(`psc ${hostSelector}`).description(`control sessions on ${hostSelector}`);
 
   jsonOption(
     hostCmd
@@ -688,20 +425,11 @@ export function buildHostVerbProgram(hostSelector: string): Command {
     hostCmd
       .command('start <tag>')
       .alias('create')
-      .description(
-        'create (or reuse live) session <repository>:<tag>; if --prompt is given, wait until ready and send it as one message',
-      )
+      .description('create (or reuse live) session <repository>:<tag>')
       .option('-C, --cwd <dir>', "working directory on the host (quote a leading ~: -C '~/git/x')")
       .option('-e, --engine <engine>', 'agent engine to launch (claude, codex, opencode, grok, ...)')
       .option('--model <model>', 'pass --model through to the engine (`a start --model`)')
-      .option('--profile <profile>', 'aplexer profile')
-      .option('-p, --prompt <text>', 'initial prompt to send once ready (`-` reads stdin)')
-      .option(
-        '--ready-timeout <seconds>',
-        'seconds to wait for the agent to be ready for --prompt',
-        parseSeconds,
-        30,
-      ),
+      .option('--profile <profile>', 'aplexer profile'),
   ).action(
     action(
       async (
@@ -711,15 +439,11 @@ export function buildHostVerbProgram(hostSelector: string): Command {
           engine?: string;
           model?: string;
           profile?: string;
-          prompt?: string;
-          readyTimeout: number;
           json?: boolean;
         },
       ) => {
         if (opts.json) setJsonMode(true);
-        const promptText = await resolvePromptText(opts.prompt);
         await withResolvedHost(hostSelector, async (client, host) => {
-          let prompted: SendDelivery | null = null;
           const shortTag = tag.includes(':') ? tag.split(':').pop()! : tag;
           const created = await client.createSession(shortTag, {
             cwd: opts.cwd,
@@ -727,14 +451,6 @@ export function buildHostVerbProgram(hostSelector: string): Command {
             model: opts.model,
             profile: opts.profile,
           });
-          if (promptText !== null) {
-            const row = await waitForAgentReady(client, created, {
-              engine: opts.engine,
-              timeoutS: opts.readyTimeout,
-            });
-            const delivery = await client.send(row, promptText, { enter: true });
-            prompted = delivery;
-          }
           emit(
             {
               ok: true,
@@ -742,8 +458,6 @@ export function buildHostVerbProgram(hostSelector: string): Command {
               name: created.name,
               id: created.id,
               created: created.created,
-              prompted: promptText !== null,
-              ...(prompted ? { delivery: prompted } : {}),
               session: created,
             },
             () => safeLine(created.name),
@@ -756,38 +470,17 @@ export function buildHostVerbProgram(hostSelector: string): Command {
   jsonOption(
     hostCmd
       .command('send <session> [text]')
-      .description(
-        'send and SUBMIT (Enter is default; --no-enter to just type). Delivery is acknowledged like `a send --enter`: exit 0 delivered or queued behind a busy turn, 3 submitted but the agent stayed idle, 1 not delivered.',
-      )
-      .option('--enter', 'press Enter after the text (default) and acknowledge delivery')
-      .option('--no-enter', 'type the text without pressing Enter')
-      .option('--wait', 'accepted for compatibility; delivery is always acknowledged before send returns'),
+      .description('type keystrokes into a session (Enter is default; --no-enter leaves the text unsubmitted)')
+      .option('--enter', 'press Enter after the text (default)')
+      .option('--no-enter', 'type the text without pressing Enter'),
   ).action(
     action(async (selector: string, text: string | undefined, opts: { enter?: boolean; json?: boolean }) => {
       if (opts.json) setJsonMode(true);
       const payload = await resolveSendText(text);
       const enter = opts.enter ?? true;
-      const encoded = encodeSendPayload(payload, { enter });
       await withResolvedHost(hostSelector, async (client, host) => {
-        const sent = await client.sendSelected(selector, payload, { enter });
-        const delivery = sent.delivery;
-        if (delivery && deliveryExitCode(delivery.status) === 3) setExitCode(3);
-        if (delivery && (delivery.status === 'delivered_idle' || delivery.status === 'unverified')) {
-          const detail = typeof delivery.detail === 'string' ? delivery.detail : '';
-          note(`${delivery.status.replace(/_/g, ' ')}${detail ? `: ${detail}` : ''}`);
-        }
-        emit(
-          {
-            ok: true,
-            host: host.name,
-            session: ref(sent.row),
-            bytes: Buffer.byteLength(payload),
-            enter,
-            bracketed: encoded.bracketed,
-            ...(delivery ? { delivery } : {}),
-          },
-          () => '',
-        );
+        const row = await client.sendSelected(selector, payload, { enter });
+        emit(keystrokeSendResult(host.name, row, payload, enter), () => '');
       });
     }),
   );
@@ -797,8 +490,6 @@ export function buildHostVerbProgram(hostSelector: string): Command {
       .command('capture <session>')
       .description('plain-text rendered screen by default (no ANSI), trailing blank lines trimmed')
       .option('-n, --lines <n>', 'return the last N non-empty lines', parsePositiveInt)
-      .option('--wait-for <regex>', 'poll (~every 500 ms) until the capture matches this regex (multiline)')
-      .option('--timeout <seconds>', 'with --wait-for: give up after this long (exit 124)', parseSeconds, 30)
       .option('--raw', 'recent raw output bytes instead of the rendered screen')
       .option('--bytes <n>', 'with --raw: how many history bytes', parsePositiveInt)
       .option('--fresh', 'force a live round trip instead of the screen mirror (when live)'),
@@ -808,8 +499,6 @@ export function buildHostVerbProgram(hostSelector: string): Command {
         selector: string,
         opts: {
           lines?: number;
-          waitFor?: string;
-          timeout: number;
           raw?: boolean;
           bytes?: number;
           json?: boolean;
@@ -818,46 +507,9 @@ export function buildHostVerbProgram(hostSelector: string): Command {
       ) => {
         if (opts.json) setJsonMode(true);
         if (opts.bytes !== undefined && !opts.raw) throw usageError('--bytes only applies with --raw');
-        const pattern = opts.waitFor === undefined ? null : compileRegex(opts.waitFor);
         await withResolvedHost(hostSelector, async (client, host) => {
           const mode = opts.raw ? 'raw' : 'screen';
           const captureOptions = { mode, bytes: opts.bytes, fresh: opts.fresh } as const;
-          const row = pattern ? await client.resolveSession(selector) : null;
-          if (pattern && row) {
-            const deadline = Date.now() + opts.timeout * 1000;
-            for (;;) {
-              const rawText = await client.capture(row, captureOptions);
-              const match = pattern.exec(rawText);
-              if (match) {
-                const text = trimCapture(rawText, { raw: opts.raw, lines: opts.lines });
-                emit(
-                  {
-                    ok: true,
-                    host: host.name,
-                    session: ref(row),
-                    mode,
-                    text,
-                    ...(opts.lines !== undefined ? { lines: opts.lines } : {}),
-                    matched: true,
-                    match: match[0],
-                    ...replicaMeta(),
-                  },
-                  () => text,
-                );
-                return;
-              }
-              if (Date.now() >= deadline) {
-                const text = trimCapture(rawText, { raw: opts.raw, lines: opts.lines });
-                throw new CliError(
-                  'TIMEOUT',
-                  `${JSON.stringify(pattern.source)} did not appear in ${row.name} within ${opts.timeout}s`,
-                  EXIT.TIMEOUT,
-                  { session: ref(row), text },
-                );
-              }
-              await sleep(Math.min(500, Math.max(0, deadline - Date.now())));
-            }
-          }
           const captured = await client.captureSelected(selector, captureOptions);
           const rawText = captured.text;
           const text = trimCapture(rawText, { raw: opts.raw, lines: opts.lines });
@@ -872,50 +524,6 @@ export function buildHostVerbProgram(hostSelector: string): Command {
               ...replicaMeta(),
             },
             () => text,
-          );
-        });
-      },
-    ),
-  );
-
-  jsonOption(
-    hostCmd
-      .command('wait <session>')
-      .description("block until the session's agent is idle/waiting (exit 124 on timeout)")
-      .option(
-        '--idle <seconds>',
-        'fallback screen-unchanged duration when agent state is not reported',
-        parseSeconds,
-        5,
-      )
-      .option(
-        '--settle <seconds>',
-        'ignore an idle agent state until the agent was seen working or this long has passed',
-        parseSeconds,
-        3,
-      )
-      .option('--timeout <seconds>', 'give up after this many seconds (exit 124)', parseSeconds, 300),
-  ).action(
-    action(
-      async (selector: string, opts: { idle: number; settle: number; timeout: number; json?: boolean }) => {
-        if (opts.json) setJsonMode(true);
-        await withResolvedHost(hostSelector, async (client, host) => {
-          const result = await waitForSessionIdle(client, selector, {
-            idleS: opts.idle,
-            settleS: opts.settle,
-            timeoutS: opts.timeout,
-          });
-          emit(
-            {
-              ok: true,
-              host: host.name,
-              session: ref(result.row),
-              state: result.state,
-              agentState: result.row.agentState,
-              reason: result.reason,
-              elapsedMs: result.elapsedMs,
-            },
-            () => `${safeLine(result.row.name)} ${safeLine(result.state)}`,
           );
         });
       },
@@ -1038,33 +646,15 @@ export const HOST_VERB_NAMES = new Set([
   'create',
   'send',
   'capture',
-  'wait',
   'stop',
   'kill',
   'status',
   'show',
 ]);
 
-/**
- * Normalize remote-aplexer arguments before Commander parsing:
- * - trailing `--prompt` (with no argument) becomes `--prompt -` so piped stdin works.
- */
-export function normalizeAArgs(args: readonly string[]): string[] {
-  const out = [...args];
-  for (let i = 0; i < out.length; i++) {
-    if (out[i] === '--') break;
-    if ((out[i] === '--prompt' || out[i] === '-p') && (i === out.length - 1 || out[i + 1]?.startsWith('-'))) {
-      if (out[i + 1] !== '-') {
-        out.splice(i + 1, 0, '-');
-      }
-    }
-  }
-  return out;
-}
-
 /** Run `psc <host> <verb> ...` / `psc hosts [--check]` (or legacy `psc a ...`) given the arguments after `psc` / `psc a`. */
 export async function dispatchA(rawArgs: readonly string[]): Promise<void> {
-  const args = normalizeAArgs(rawArgs);
+  const args = [...rawArgs];
   const filtered = args.filter((a) => a !== '--json');
   if (args.includes('--json')) setJsonMode(true);
 
@@ -1123,7 +713,7 @@ export async function dispatchA(rawArgs: readonly string[]): Promise<void> {
   const restWithoutJson = rest.filter((a) => a !== '--json');
   if (restWithoutJson.length === 0) {
     throw usageError(
-      `missing command for host ${JSON.stringify(first)} (expected connect, ls, start, send, capture, wait, stop, or status)`,
+      `missing command for host ${JSON.stringify(first)} (expected connect, ls, start, send, capture, stop, or status)`,
     );
   }
   if (restWithoutJson.length === 1 && (restWithoutJson[0] === '--help' || restWithoutJson[0] === '-h')) {
@@ -1177,7 +767,7 @@ export function registerA(program: Command): void {
     .allowExcessArguments(true)
     .helpOption(false)
     .description(
-      'remote aplexer: hosts, ls, start, send, capture, wait, stop, status (legacy alias of `psc <host> <verb>`)',
+      'remote sessions: hosts, ls, start, send, capture, stop, status (legacy alias of `psc <host> <verb>`)',
     )
     .action(async (args: string[]) => {
       await dispatchA(args);
