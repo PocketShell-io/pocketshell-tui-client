@@ -1,9 +1,9 @@
 /**
- * Output discipline for an agent-friendly CLI.
+ * Output discipline for a human-focused CLI and its scripts.
  *
  * - `--json` (or PSC_JSON=1): exactly one JSON document on stdout per
  *   command; failures are `{"ok":false,"error":{"code","message",...}}` on
- *   stdout too, so an agent parses one stream. Human text never mixes in.
+ *   stdout too, so scripts parse one stream. Human text never mixes in.
  * - Without it: readable text on stdout, `error: …` on stderr.
  * - Exit codes are stable (see EXIT below) in both modes.
  */
@@ -81,6 +81,22 @@ export function emit(data: unknown, human?: () => string): void {
   } else {
     writeOutput('stdout', `${JSON.stringify(data, null, 2)}\n`);
   }
+}
+
+/** Result for a human keystroke send; this deliberately has no delivery verdict. */
+export function keystrokeSendResult(
+  host: string,
+  session: { name: string; id: string | null },
+  payload: string,
+  enter: boolean,
+): { ok: true; host: string; session: { name: string; id: string | null }; bytes: number; enter: boolean } {
+  return {
+    ok: true,
+    host,
+    session: { name: session.name, id: session.id },
+    bytes: Buffer.byteLength(payload),
+    enter,
+  };
 }
 
 /** Progress or hints for humans; silent in JSON mode, always on stderr. */

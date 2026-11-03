@@ -20,7 +20,7 @@ the other clients run.
 npm install && npm run build
 npm link                   # puts `pocketshell-tui-client` and `psc` on PATH
 psc                        # interactive UI
-psc sessions list --json   # the same data, for scripts and agents
+psc sessions list --json   # the same data, for inspection and human-run scripts
 ```
 
 ## Install / upgrade (no npm registry)
@@ -74,7 +74,7 @@ psc hosts list|add|alias|sync|remove|default|check
 psc sessions list                     sessions on the host
 psc sessions create NAME [-C DIR] [-e ENGINE] [--profile P] [--attach]
 psc sessions send SESSION [TEXT] [--enter]   type into a session (stdin when TEXT is - or omitted)
-psc sessions capture SESSION [--raw [--bytes N]] [--wait-for REGEX [--timeout S]]
+psc sessions capture SESSION [--raw [--bytes N]]
 psc sessions attach SESSION           take over the terminal (Ctrl-b d detaches); also `psc attach`
 psc sessions kill SESSION [--if-exists]
 psc sessions warnings | ack [SESSION]
@@ -148,19 +148,18 @@ psc vault bind <host> --alias <account-host> | --key <name|keyId> | --clear
   cannot be recovered: reset the vault at https://app.pocketshell.io/keys?reset=1
   and upload the keys again.
 
-## Remote aplexer (`psc a`)
+## Remote sessions (`psc a`)
 
-`psc a` is a short, predictable command family for non-interactively driving
-agent sessions across your hosts (plain text by default, `--json` everywhere,
-same exit-code contract):
+`psc a` controls sessions across your hosts for a person at a terminal or a
+human-initiated script. Managed agent workflows use Hub. The command family
+supports plain text by default and `--json` for scripts:
 
 ```text
 psc a hosts [--check]                 saved hosts (presence online/offline; --check pings each in parallel)
 psc a <host> ls                       sessions on <host> (name, engine, state, workspace) — plain table
-psc a <host> start <tag> [-C DIR] [-e ENGINE] [--profile P] [--prompt TEXT | --prompt -] [--ready-timeout S]
+psc a <host> start <tag> [-C DIR] [-e ENGINE] [--profile P]
 psc a <host> send <session> [TEXT|-] [--no-enter]
-psc a <host> capture <session> [--lines N] [--wait-for RE] [--timeout S] [--raw]
-psc a <host> wait <session> [--idle S] [--timeout S]
+psc a <host> capture <session> [--lines N] [--raw]
 psc a <host> stop <session> [--if-exists]
 psc a <host> status <session>
 ```
@@ -179,18 +178,11 @@ psc hosts alias win35 desktop
 psc a hosts
 psc a hosts --check
 
-# Start or reuse a session, wait for readiness, and submit an initial prompt:
-psc a hetzner start e2e-test -C '~/git/project' -e claude --prompt 'reply with just the word PONG'
-psc a hetzner wait e2e-test --timeout 60
-psc a hetzner capture e2e-test --wait-for PONG --lines 15
-
-# Send a multi-line prompt and submit it. Enter is the default, and the
-# command does not return success until delivery is acknowledged (same
-# verdict as `a send --enter`: exit 0 delivered or queued behind a busy turn,
-# 3 submitted but idle, 1 dropped).
+# Create a session, attach to it, or send keystrokes during a human session:
 psc a hetzner start review -C '~/git/project' -e codex --model gpt-5.4
-printf 'line1\nline2: reply LINES-OK\n' | psc a hetzner send e2e-test
-psc a hetzner capture e2e-test --wait-for LINES-OK --lines 20
+psc sessions attach review -H hetzner
+printf 'line1\nline2: reply LINES-OK\n' | psc a hetzner send review
+psc a hetzner capture review --lines 20
 psc a hetzner status e2e-test
 psc a hetzner stop e2e-test --if-exists
 ```
@@ -218,18 +210,18 @@ prefixes, or a tag and a prefix pointing at different sessions) fails with
 `SESSION_AMBIGUOUS` and the candidates; no match fails with `SESSION_NOT_FOUND`.
 Both exit 5.
 
-### Driving a session
+### Human session control
 
-- `send` types the text but does **not** submit it; add `--enter` to press
-  Enter. Text from stdin loses exactly one trailing newline, so
-  `echo 'run the tests' | psc sessions send review --enter` submits once.
+- `psc sessions send` types the text but does **not** submit it by default;
+  add `--enter` to press Enter. `psc a <host> send` presses Enter by default;
+  add `--no-enter` to leave the text unsubmitted. Both commands write
+  keystrokes and do not inspect agent state or claim that it accepted the text.
+  Text from stdin loses exactly one trailing newline, so
+  `echo 'run the tests' | psc sessions send review --enter` types the line and
+  presses Enter once.
 - `capture` prints the rendered screen as plain text (`--raw`: recent raw
   output bytes, `--bytes N` with `--raw` only). systemd-run's
   `Running as unit: …` banner is stripped.
-- `capture --wait-for REGEX [--timeout S]` polls the screen about every 500 ms
-  until the JavaScript regex matches (multiline: `^`/`$` match per line), then
-  prints it (`"matched": true, "match": "…"`). Default timeout 30 s; on timeout
-  it fails with `TIMEOUT`, exit 124, and the last capture in `error.text`.
 - `kill` of a session that no longer exists is `SESSION_NOT_FOUND` (exit 5);
   with `--if-exists` it succeeds with `"killed": false, "alreadyGone": true`.
 
@@ -245,7 +237,7 @@ tree is killed, over ssh/gateway the remote command may keep running.
 ## The resident daemon and the classic path
 
 On Linux and macOS `psc` routes the read-heavy commands (`ls`, `status`,
-`capture`, `send`, `hosts`, `hosts --check`) through a per-user resident
+`capture`, `hosts`, `hosts --check`) through a per-user resident
 daemon by default: one open gateway channel to the host helper
 (`a rpc --stdio`), so a warm `psc hetzner ls` costs about one network round
 trip instead of a fresh WebSocket + SSH handshake per call. The daemon is
@@ -301,11 +293,8 @@ local and exact.
   reads fall back to a live round trip and never serve stale data silently.
   After an auth close the replica is dropped immediately.
 - Writes stay request/response (exactly one round trip) and are never
-  replayed when uncertain. `send` returns after the helper acknowledges;
-  `--wait` additionally confirms prompt delivery synchronously (against the
-  replica when live) and reports the outcome, while without it the daemon
-  only observes delivery in the background (PSC_TRACE stages
-  `send_observed`/`send_unconfirmed`) and never resends.
+  replayed when uncertain. Session `send` writes keystrokes directly through
+  aplexer and does not wait for agent readiness or inspect an outcome.
 
 ### Windows named-pipe daemon (opt-in)
 
@@ -327,10 +316,8 @@ The classic path itself is one connection per command wherever possible:
   directory stays at the worktree. Repository identity uses a batched Git
   lookup, cached per client. Directories outside Git keep their directory name.
 - Flash and Argon use the Antigravity input screen model; Codex Orin uses
-  the Codex model. `start --prompt` accepts the workspace trust dialog and
-  waits for a rendered input prompt. Sends verify the paste before pressing
-  Enter separately, retry Enter if needed, and fail if submission cannot be
-  confirmed. Antigravity idle redraws do not count as model work.
+  the Codex model to estimate activity in session listings. These models do
+  not automate prompts, trust dialogs, or keystroke submission.
 
 - psc prefers a **direct `a --json snapshot`** over the `pocketshell`
   wrapper whenever the host's `a` is known to work — the snapshot answers in
@@ -351,16 +338,17 @@ The classic path itself is one connection per command wherever possible:
   directory, `$USERPROFILE` on Windows hosts), so a Windows host never gets
   an MSYS-internal home as its workspace.
 
-## For agents
+## JSON output
 
-The CLI is meant to be driven by coding agents as well as people:
+JSON output supports inspection and human-initiated scripts. Managed agent
+workflows use Hub; PocketShell keeps session commands for people.
 
 - `--json` (or `PSC_JSON=1`) prints exactly one JSON document on stdout per
   command — including usage errors (bad flags, missing arguments). Successes
   carry `"ok": true`; failures are
   `{"ok": false, "error": {"code": "...", "message": "...", ...details}}`, also
-  on stdout. Some errors add fields to `error`: `candidates: [{name, id}]` for
-  `SESSION_AMBIGUOUS`, `text` (the last capture) for a `--wait-for` timeout.
+  on stdout. Some errors add fields to `error`, such as
+  `candidates: [{name, id}]` for `SESSION_AMBIGUOUS`.
   The one exception is `login --json`, which first prints a `pending` line
   (`{"event":"pending","userCode","verificationUri","verificationUriComplete","expiresIn"}`)
   holding the code for the human, then the result.
@@ -386,7 +374,7 @@ Result shapes worth knowing:
 ```text
 sessions create   {"ok":true,"host","name","id","created","session":{"name","id","created"}}
 sessions send     {"ok":true,"host","session":{"name","id"},"bytes","enter"}
-sessions capture  {"ok":true,"host","session":{"name","id"},"mode","text"[,"matched","match"]}
+sessions capture  {"ok":true,"host","session":{"name","id"},"mode","text"}
 sessions kill     {"ok":true,"host","session":{"name","id"},"killed","alreadyGone"}
 exec              {"ok","host","command","exitCode","stdout","stderr","timedOut"[,"error"]}
                   non-zero exit N → ok:false, error {"code":"COMMAND_FAILED","message":"exit N"}, exit N
@@ -400,15 +388,6 @@ A failed server revoke still deletes the local credentials but exits 1 with
 `"revoked":false` and `"revokeError":{"code","message"}` — the session stays
 valid until `expiresAt`. See [Corporate / environment proxies](docs/corporate-proxy.md)
 for `NO_PROXY` / `PSC_TRUSTED_PROXY` behavior (fail-closed under `NODE_USE_ENV_PROXY`).
-
-A typical loop for an agent that drives another agent:
-
-```bash
-psc -H box sessions create review -C '~/git/project' -e claude --json   # → project:review
-psc -H box sessions send review "review the open PR and summarise" --enter --json
-psc -H box sessions capture review --wait-for 'summary' --timeout 600 --json  # block until it shows up
-psc -H box sessions list --json                # agentState: working / waiting / idle
-```
 
 ## State
 

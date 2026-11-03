@@ -3,7 +3,7 @@ import { PassThrough } from 'node:stream';
 import { requests, type RequestContext } from '../src/daemon/context.js';
 import { frame, frames, MAX_FRAME } from '../src/daemon/framing.js';
 import { emit, isJsonMode, setJsonMode } from '../src/output.js';
-import { resolveSendText } from '../src/commands/a.js';
+import { resolveSendText } from '../src/commands/humanA.js';
 function context(json: boolean, stdin: string): RequestContext {
   return { json, stdin, tty: false, exitCode: 0, signal: new AbortController().signal, write: () => {} };
 }

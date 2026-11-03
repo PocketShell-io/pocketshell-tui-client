@@ -1,13 +1,12 @@
 /**
- * The session verbs — what an agent drives a host with:
+ * The human session verbs for a host:
  * `sessions list|create|kill|send|capture|attach|warnings|ack`,
  * `workspaces list|add|remove`, `engines`, `profiles`, and `exec`.
  */
 import type { Command } from 'commander';
 import type { SessionRow } from '@pocketshell/core';
-import { deliveryExitCode, execCommandLine, SessionNotFound, type HostClient } from '../hostClient.js';
-import { setExitCode } from '../daemon/context.js';
-import { CliError, emit, EXIT, isJsonMode, note, setJsonMode, usageError } from '../output.js';
+import { execCommandLine, SessionNotFound } from '../hostClient.js';
+import { emit, EXIT, isJsonMode, keystrokeSendResult, note, setJsonMode, usageError } from '../output.js';
 import { safeLine, safeText } from '../sanitize.js';
 import { action, hostOptions, parsePositiveInt, parseSeconds, withHost } from './common.js';
 
@@ -76,46 +75,11 @@ function humanCapture(text: string, raw: boolean): string {
   return raw && !process.stdout.isTTY ? text : safeText(text);
 }
 
-function compileRegex(source: string): RegExp {
-  try {
-    return new RegExp(source, 'm');
-  } catch (error) {
-    throw usageError(`invalid --wait-for regex: ${(error as Error).message}`);
-  }
-}
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Poll the capture every ~500 ms until `pattern` matches or `timeoutS` passes. */
-async function waitForCapture(
-  client: HostClient,
-  row: SessionRow,
-  options: { mode: 'screen' | 'raw'; bytes?: number },
-  pattern: RegExp,
-  timeoutS: number,
-): Promise<{ text: string; match: string }> {
-  const deadline = Date.now() + timeoutS * 1000;
-  for (;;) {
-    const text = await client.capture(row, options);
-    const match = pattern.exec(text);
-    if (match) return { text, match: match[0] };
-    if (Date.now() >= deadline) {
-      throw new CliError(
-        'TIMEOUT',
-        `${JSON.stringify(pattern.source)} did not appear in ${row.name} within ${timeoutS}s`,
-        EXIT.TIMEOUT,
-        { session: ref(row), text },
-      );
-    }
-    await sleep(Math.min(500, Math.max(0, deadline - Date.now())));
-  }
-}
-
 export function registerSessions(program: Command): void {
   const sessions = program
     .command('sessions')
     .alias('s')
-    .description('list, create, drive and attach to sessions')
+    .description('list, create, send keystrokes to, and attach to sessions')
     .addHelpText('after', SESSION_HELP);
 
   hostOptions(sessions.command('list').alias('ls').description('list sessions on the host')).action(
@@ -195,14 +159,12 @@ export function registerSessions(program: Command): void {
     sessions
       .command('send <session> [text]')
       .description('type TEXT into a session without attaching; it is NOT submitted unless --enter is given')
-      .option('--enter', 'press Enter after the text and acknowledge delivery (`a send --enter`)')
+      .option('--enter', 'press Enter after the text')
       .addHelpText(
         'after',
         '\nTEXT `-` or omitted reads stdin; ONE trailing newline is stripped from stdin input\n' +
           '(so `echo hi | psc sessions send x --enter` types "hi" and presses Enter once).\n' +
           'Without --enter the text sits typed but unsubmitted.\n' +
-          'With --enter, exit 0 means delivered, 3 means submitted but the agent stayed idle,\n' +
-          'and 1 means the text was not submitted. --json includes "delivery" when Enter was sent.\n' +
           '--json: {"ok":true,"host":...,"session":{"name","id"},"bytes":N,"enter":true|false}' +
           `\n${SESSION_HELP}`,
       ),
@@ -212,23 +174,8 @@ export function registerSessions(program: Command): void {
         const payload = text === undefined || text === '-' ? (await readStdin()).replace(/\r?\n$/, '') : text;
         const row = await client.resolveSession(selector);
         const enter = Boolean(opts.enter);
-        const delivery = await client.send(row, payload, { enter });
-        if (delivery && deliveryExitCode(delivery.status) === 3) setExitCode(3);
-        if (delivery && (delivery.status === 'delivered_idle' || delivery.status === 'unverified')) {
-          const detail = typeof delivery.detail === 'string' ? delivery.detail : '';
-          note(`${delivery.status.replace(/_/g, ' ')}${detail ? `: ${detail}` : ''}`);
-        }
-        emit(
-          {
-            ok: true,
-            host: host.name,
-            session: ref(row),
-            bytes: Buffer.byteLength(payload),
-            enter,
-            ...(delivery ? { delivery } : {}),
-          },
-          () => '',
-        );
+        await client.send(row, payload, { enter });
+        emit(keystrokeSendResult(host.name, row, payload, enter), () => '');
       }),
     ),
   );
@@ -239,31 +186,19 @@ export function registerSessions(program: Command): void {
       .description('print what a session shows now (default: the rendered screen as plain text)')
       .option('--raw', 'recent raw output bytes instead of the rendered screen')
       .option('--bytes <n>', 'with --raw: how many history bytes', parsePositiveInt)
-      .option('--wait-for <regex>', 'poll (~every 500 ms) until the capture matches this JavaScript regex (multiline: ^/$ match per line)')
-      .option('--timeout <seconds>', 'with --wait-for: give up after this long (exit 124, error TIMEOUT)', parseSeconds, 30)
       .addHelpText(
         'after',
-        '\n--json: {"ok":true,"host":...,"session":{"name","id"},"mode":"screen"|"raw","text":...}\n' +
-          '        with --wait-for also "matched":true,"match":"<matched text>"; on timeout\n' +
-          '        {"ok":false,"error":{"code":"TIMEOUT","message",...,"text":"<last capture>"}}' +
+        '\n--json: {"ok":true,"host":...,"session":{"name","id"},"mode":"screen"|"raw","text":...}' +
           `\n${SESSION_HELP}`,
       ),
   ).action(
-    action(async (selector: string, opts: HostOpts & { raw?: boolean; bytes?: number; waitFor?: string; timeout: number }) => {
+    action(async (selector: string, opts: HostOpts & { raw?: boolean; bytes?: number }) => {
       if (opts.json) setJsonMode(true);
       if (opts.bytes !== undefined && !opts.raw) throw usageError('--bytes only applies with --raw');
-      const pattern = opts.waitFor === undefined ? null : compileRegex(opts.waitFor);
       await withHost(opts, async (client, host) => {
         const row = await client.resolveSession(selector);
         const mode = opts.raw ? 'raw' : 'screen';
         const captureOptions = { mode, bytes: opts.bytes } as const;
-        if (pattern) {
-          const { text, match } = await waitForCapture(client, row, captureOptions, pattern, opts.timeout);
-          emit({ ok: true, host: host.name, session: ref(row), mode, text, matched: true, match }, () =>
-            humanCapture(text, Boolean(opts.raw)),
-          );
-          return;
-        }
         const text = await client.capture(row, captureOptions);
         emit({ ok: true, host: host.name, session: ref(row), mode, text }, () => humanCapture(text, Boolean(opts.raw)));
       });

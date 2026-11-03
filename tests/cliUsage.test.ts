@@ -56,7 +56,7 @@ describe('usage errors', () => {
     ['bad port', ['hosts', 'add', 'z', '--ssh', 'h', '-p', '99999', '--json']],
     ['missing subcommand', ['sessions', '--json']],
     ['--bytes without --raw', ['sessions', 'capture', 'x', '--bytes', '10', '--json']],
-    ['bad --wait-for regex', ['sessions', 'capture', 'x', '--wait-for', '(', '--json']],
+    ['removed --wait-for option', ['sessions', 'capture', 'x', '--wait-for', 'done', '--json']],
     ['create --attach --json', ['sessions', 'create', 'x', '--attach', '--json']],
   ];
   for (const [label, args] of cases) {

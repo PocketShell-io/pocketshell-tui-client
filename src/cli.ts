@@ -3,10 +3,10 @@
  * pocketshell-tui-client (alias `psc`): PocketShell from a terminal.
  *
  * With no arguments on a TTY it opens the TUI. Every TUI action also exists
- * as a subcommand with `--json`, so agents and scripts get the same reach.
+ * as a subcommand with `--json`, so people can use them from scripts.
  */
 import { Command, CommanderError } from 'commander';
-import { dispatchA, registerA, remoteAplexerArgs } from './commands/a.js';
+import { dispatchA, registerA, remoteAplexerArgs } from './commands/humanA.js';
 import { registerAccount } from './commands/account.js';
 import { registerGateway } from './commands/gateway.js';
 import { registerHosts } from './commands/hosts.js';
@@ -29,19 +29,18 @@ program
   .name('pocketshell-tui-client')
   .description(
     'PocketShell in the terminal: sessions on your hosts over local, ssh, or gateway connections.\n' +
-      'Run with no arguments for the interactive UI; every action is also a subcommand (add --json for agents).',
+      'Run with no arguments for the interactive UI; every action is also a subcommand (add --json for scripts).',
   )
   .version(VERSION)
-  .usage('[options] [command] | <host> <connect|ls|start|send|wait|capture|status|stop> ...')
+  .usage('[options] [command] | <host> <connect|ls|start|send|capture|status|stop> ...')
   .addHelpText(
     'after',
-    '\nRemote aplexer (any saved host, gateway device id, or unique prefix):\n' +
+    '\nRemote sessions (any saved host, gateway device id, or unique prefix):\n' +
       '  psc hosts [--check]                 saved hosts + gateway presence (--check: live ssh round trip)\n' +
       '  psc <host> connect                  interactive shell on <host> (like ssh)\n' +
       '  psc <host> ls                       sessions on <host>\n' +
-      '  psc <host> start <tag> -C DIR -e ENGINE [--model MODEL] [--prompt TEXT|-]\n' +
-      '  psc <host> send <session> [TEXT|-]  type + submit, then confirm delivery\n' +
-      '  psc <host> wait <session>           until the agent is idle again\n' +
+      '  psc <host> start <tag> -C DIR -e ENGINE [--model MODEL]\n' +
+      '  psc <host> send <session> [TEXT|-]  type keystrokes and optionally press Enter\n' +
       '  psc <host> capture <session>        plain-text screen\n' +
       '  psc <host> status|stop <session>\n' +
       '  psc help <verb>                     options of one verb (e.g. `psc help start`)\n' +

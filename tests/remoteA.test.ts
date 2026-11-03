@@ -2,10 +2,9 @@
  * Unit and subprocess tests for `psc a` (remote aplexer):
  * - host resolution (exact, deviceId, prefix/substring, ambiguity, friendly names)
  * - argument parsing and usage errors
- * - stdin handling (`send` and `start --prompt`)
+ * - stdin handling for human keystroke sends
  * - multi-line send encoding (bracketed paste ESC[200~ … ESC[201~ + CR)
  * - capture trimming and `--lines N`
- * - `wait` (agentState vs screen-idle fallback + timeout exit 124)
  * - device `presence` parsing and `HOST_OFFLINE` detail enrichment
  * - EPIPE safety (`psc --help | head`)
  * - standalone bundle (`dist-bundle/psc.mjs`) executed outside the repo
@@ -18,16 +17,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SessionRow } from '@pocketshell/core';
 import {
   allCandidateHosts,
-  confirmPromptDelivery,
-  normalizeAArgs,
   remoteAplexerArgs,
   resolveAHost,
-  resolvePromptText,
   resolveSendText,
   trimCapture,
-  waitForAgentReady,
-  waitForSessionIdle,
-} from '../src/commands/a.js';
+} from '../src/commands/humanA.js';
+import { keystrokeSendResult } from '../src/output.js';
 import { parseDevices } from '../src/gateway/devices.js';
 import {
   BP_END,
@@ -176,12 +171,6 @@ describe('stdin handling and argument normalization', () => {
     });
   });
 
-  it('resolvePromptText handles undefined, literal text, and `-` stdin', async () => {
-    expect(await resolvePromptText(undefined, async () => 'ignored')).toBeNull();
-    expect(await resolvePromptText('reply PONG', async () => 'ignored')).toBe('reply PONG');
-    expect(await resolvePromptText('-', async () => 'line1\nline2\n')).toBe('line1\nline2');
-  });
-
   it('remoteAplexerArgs routes `psc <host> <verb>`, bare `psc hosts`, `psc help <verb>`, and legacy `psc a`', () => {
     const top = new Set(['hosts', 'sessions', 's', 'exec', 'gateway', 'login', 'a', 'tui']);
     expect(remoteAplexerArgs(['hetzner', 'ls'], top)).toEqual(['hetzner', 'ls']);
@@ -205,27 +194,23 @@ describe('stdin handling and argument normalization', () => {
     expect(remoteAplexerArgs([], top)).toBeNull();
   });
 
-  it('normalizeAArgs turns a bare `--prompt` flag into `--prompt -`', () => {
-    expect(normalizeAArgs(['hetzner', 'start', 'tag', '--prompt'])).toEqual(['hetzner', 'start', 'tag', '--prompt', '-']);
-    expect(normalizeAArgs(['hetzner', 'start', 'tag', '--prompt', '--json'])).toEqual([
-      'hetzner',
-      'start',
-      'tag',
-      '--prompt',
-      '-',
-      '--json',
-    ]);
-    expect(normalizeAArgs(['hetzner', 'start', 'tag', '--prompt', 'hello'])).toEqual([
-      'hetzner',
-      'start',
-      'tag',
-      '--prompt',
-      'hello',
-    ]);
-  });
 });
 
 describe('multi-line send encoding and HostClient.send', () => {
+  it('reports only keystroke submission facts in send JSON', () => {
+    const result = keystrokeSendResult('hetzner', makeRow({ id: 'sess-1234' }), 'hello', true);
+
+    expect(JSON.parse(JSON.stringify(result))).toEqual({
+      ok: true,
+      host: 'hetzner',
+      session: { name: 'proj:work', id: 'sess-1234' },
+      bytes: 5,
+      enter: true,
+    });
+    expect(result).not.toHaveProperty('delivery');
+    expect(result).not.toHaveProperty('status');
+  });
+
   it('single-line text is not wrapped in bracketed paste', () => {
     expect(encodeSendPayload('hello world', { enter: true })).toEqual({
       framed: 'hello world',
@@ -258,14 +243,14 @@ describe('multi-line send encoding and HostClient.send', () => {
     });
   });
 
-  it('HostClient.send submits raw text through a send --enter and requires a verdict', async () => {
+  it('HostClient.send writes plain keystrokes, adding Enter only when requested', async () => {
     const calls: Array<{ command: string; stdin?: string | Uint8Array }> = [];
     const client = new HostClient(
       fakeConnection(async (command, stdin) => {
         calls.push({ command, stdin });
         return {
           exitCode: 0,
-          stdout: `${JSON.stringify({ delivery: { status: 'submitted', detail: 'submitted' } })}\n`,
+          stdout: '{"ok":true}\n',
           stderr: '',
           timedOut: false,
         };
@@ -273,90 +258,26 @@ describe('multi-line send encoding and HostClient.send', () => {
     );
     const session = makeRow({ id: 'sess-1234' });
 
-    await expect(client.send(session, 'single line', { enter: true })).resolves.toMatchObject({ status: 'submitted' });
+    await expect(client.send(session, 'single line', { enter: true })).resolves.toBeUndefined();
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.command).toContain('--stdin --json --enter');
-    expect(calls[0]!.command).not.toContain('--hex');
+    expect(calls[0]!.command).toContain('--stdin --raw');
+    expect(calls[0]!.command).not.toContain('--json');
+    expect(calls[0]!.command).not.toContain('--enter');
     expect(calls[0]!.command).toContain('sess-1234');
-    expect(calls[0]!.stdin).toBe('single line');
+    expect(calls[0]!.stdin).toBe(`single line${SUBMIT_KEY}`);
 
     calls.length = 0;
-    await expect(client.send(session, 'line1\nline2', { enter: true })).resolves.toMatchObject({ status: 'submitted' });
+    await client.send(session, 'line1\nline2', { enter: true });
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.command).toContain('--stdin --json --enter');
-    expect(calls[0]!.command).not.toContain('--hex 0d');
-    expect(calls[0]!.command).not.toContain('sleep');
-    expect(calls[0]!.stdin).toBe('line1\nline2');
+    expect(calls[0]!.command).toContain('--stdin --raw');
+    expect(calls[0]!.stdin).toBe('\x1b[200~line1\nline2\x1b[201~\r');
 
     calls.length = 0;
     await client.send(session, 'line1\nline2', { enter: false });
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.command).toContain('--stdin');
-    expect(calls[0]!.command).not.toContain('--enter');
-    expect(calls[0]!.command).not.toContain('--hex 0d');
+    expect(calls[0]!.command).toContain('--stdin --raw');
+    expect(calls[0]!.command).not.toContain('--json');
     expect(calls[0]!.stdin).toBe('\x1b[200~line1\nline2\x1b[201~');
-  });
-
-  it('HostClient.send fails when a send --enter writes bytes but does not acknowledge them', async () => {
-    const client = new HostClient(
-      fakeConnection(async () => ({ exitCode: 0, stdout: '{"bytes":4,"status":"pty_written"}\n', stderr: '', timedOut: false })),
-    );
-    await expect(client.send(makeRow({ id: 'sess-1234' }), 'line1\nline2', { enter: true })).rejects.toMatchObject({
-      code: 'DELIVERY_UNCONFIRMED',
-      exitCode: 1,
-    });
-  });
-
-  it('HostClient.send fails when the verdict says the text was not submitted', async () => {
-    const client = new HostClient(
-      fakeConnection(async () => ({
-        exitCode: 1,
-        stdout: `${JSON.stringify({ delivery: { status: 'failed', detail: 'stayed in the input box' } })}\n`,
-        stderr: '',
-        timedOut: false,
-      })),
-    );
-    await expect(client.send(makeRow({ id: 'sess-1234' }), 'hello', { enter: true })).rejects.toMatchObject({
-      code: 'DELIVERY_FAILED',
-      exitCode: 1,
-      message: 'stayed in the input box',
-    });
-  });
-
-  it('HostClient.send treats a queued delivered_idle verdict as submitted', async () => {
-    const client = new HostClient(
-      fakeConnection(async () => ({
-        exitCode: 3,
-        stdout: `${JSON.stringify({
-          delivery: {
-            status: 'delivered_idle',
-            queued: true,
-            detail: 'submitted and echoed, but no sign of work within 10000ms',
-          },
-        })}\n`,
-        stderr: '',
-        timedOut: false,
-      })),
-    );
-    await expect(client.send(makeRow({ id: 'sess-9' }), 'queued please', { enter: true })).resolves.toMatchObject({
-      status: 'submitted',
-      queued: true,
-      detail: 'submitted while the agent was busy; queued behind its current turn',
-    });
-  });
-
-  it('HostClient.send returns delivered_idle when a exits 3', async () => {
-    const client = new HostClient(
-      fakeConnection(async (command) => ({
-        exitCode: 3,
-        stdout: `${JSON.stringify({ delivery: { status: 'delivered_idle', detail: 'no sign of work' } })}\n`,
-        stderr: command.includes('idle') ? '' : '',
-        timedOut: false,
-      })),
-    );
-    await expect(client.send(makeRow({ id: 'sess-9' }), 'idle please', { enter: true })).resolves.toMatchObject({
-      status: 'delivered_idle',
-    });
   });
 });
 
@@ -376,99 +297,6 @@ describe('capture trimming and systemd noise stripping', () => {
   it('strips truncated systemd invocation ID noise lines at the top of a capture', () => {
     expect(stripSystemdNoise('vocation ID: 68acea72bc744047b6854a1b590546cb\nPONG\n')).toBe('PONG\n');
     expect(stripSystemdNoise('invocation ID: 68acea72bc744047b6854a1b590546cb\nPONG\n')).toBe('PONG\n');
-  });
-});
-
-describe('waitForAgentReady and waitForSessionIdle', () => {
-  it.each(['flash', 'argon', 'codex-orin'])('waits for %s input and accepts startup trust once', async (engine) => {
-    const trust = 'Do you trust the contents of this project?\n> Yes, I trust this folder\n No, exit';
-    const ready = engine === 'codex-orin' ? '› Ask Codex to do anything' : '> \n? for shortcuts';
-    const screens = ['Loading...', 'Loading...', trust, trust, ready, ready];
-    let i = 0;
-    const keys: string[] = [];
-    const row = makeRow({ engine, agentState: 'working' });
-    await waitForAgentReady({
-      listSessions: async () => ({ sessions: [row], errors: [] }),
-      capture: async () => screens[Math.min(i++, screens.length - 1)]!,
-      sendKeys: async (_row, bytes) => { keys.push(bytes); },
-    }, { name: row.name, id: row.id, created: true }, { engine, timeoutS: 5, pollMs: 1, sleepFn: async () => {} });
-    expect(i).toBe(6);
-    expect(keys).toEqual(['\r']);
-  });
-  it('waitForAgentReady waits until an engine session renders a stable non-empty screen and is not working', async () => {
-    const screens = ['', 'loading...', '❯ ', '❯ '];
-    const states: Array<'working' | 'waiting'> = ['working', 'working', 'waiting', 'waiting'];
-    let i = 0;
-    const row = await waitForAgentReady(
-      {
-        listSessions: async () => ({
-          sessions: [makeRow({ id: 's1', name: 'proj:e2e', agentState: states[Math.min(i, states.length - 1)]! })],
-          errors: [],
-        }),
-        capture: async () => screens[Math.min(i++, screens.length - 1)]!,
-      },
-      { name: 'proj:e2e', id: 's1', created: true },
-      { engine: 'claude', timeoutS: 5, pollMs: 1, sleepFn: async () => {} },
-    );
-    expect(row.name).toBe('proj:e2e');
-    expect(i).toBeGreaterThanOrEqual(4);
-  });
-
-  it('waitForSessionIdle resolves when agentState becomes idle or waiting', async () => {
-    const seq: Array<'working' | 'waiting'> = ['working', 'working', 'waiting'];
-    let idx = 0;
-    const res = await waitForSessionIdle(
-      {
-        resolveSession: async () => makeRow({ agentState: seq[Math.min(idx++, seq.length - 1)]! }),
-        capture: async () => 'screen',
-      },
-      'proj:work',
-      { timeoutS: 5, pollMs: 1, sleepFn: async () => {} },
-    );
-    expect(res).toMatchObject({ state: 'waiting', reason: 'agent_state' });
-    expect(idx).toBe(3);
-  });
-
-  it('waitForSessionIdle ignores an idle state seen before the agent picked the prompt up', async () => {
-    const seq: Array<'idle' | 'working'> = ['idle', 'idle', 'working', 'idle'];
-    let idx = 0;
-    const res = await waitForSessionIdle(
-      {
-        resolveSession: async () => makeRow({ agentState: seq[Math.min(idx++, seq.length - 1)]! }),
-        capture: async () => 'screen',
-      },
-      'proj:work',
-      { timeoutS: 5, pollMs: 1, sleepFn: async () => {} },
-    );
-    expect(res).toMatchObject({ state: 'idle', reason: 'agent_state' });
-    expect(idx).toBe(4);
-  });
-
-  it('waitForSessionIdle accepts a steady idle state once the settle window has passed', async () => {
-    let idx = 0;
-    const res = await waitForSessionIdle(
-      {
-        resolveSession: async () => (idx++, makeRow({ agentState: 'idle' })),
-        capture: async () => 'screen',
-      },
-      'proj:work',
-      { settleS: 0, timeoutS: 5, pollMs: 1, sleepFn: async () => {} },
-    );
-    expect(res).toMatchObject({ state: 'idle', reason: 'agent_state' });
-    expect(idx).toBe(1);
-  });
-
-  it('waitForSessionIdle falls back to screen stability when agentState is null, and exits 124 on timeout', async () => {
-    await expect(
-      waitForSessionIdle(
-        {
-          resolveSession: async () => makeRow({ agentState: 'working' }),
-          capture: async () => 'busy',
-        },
-        'proj:work',
-        { timeoutS: 0.01, pollMs: 5 },
-      ),
-    ).rejects.toMatchObject({ code: 'TIMEOUT', exitCode: 124 });
   });
 });
 
@@ -625,7 +453,21 @@ describe('CLI subprocess, EPIPE handling, and standalone bundle', () => {
   it('`psc help start` prints the verb help', async () => {
     const r = await runScript(BUNDLE, ['help', 'start']);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain('--prompt');
+    expect(r.stdout).not.toContain('--prompt');
+  });
+
+  it('rejects removed agent orchestration flags and verbs', async () => {
+    for (const args of [
+      ['a', 'hetzner', 'start', 'review', '--prompt', 'do work', '--json'],
+      ['a', 'hetzner', 'wait', 'review', '--json'],
+      ['hetzner', 'wait', 'review', '--json'],
+      ['a', 'hetzner', 'capture', 'review', '--wait-for', 'done', '--json'],
+      ['sessions', 'capture', 'review', '--wait-for', 'done', '--json'],
+    ]) {
+      const r = await runScript(BUNDLE, args);
+      expect(r.code).toBe(2);
+      expect(JSON.parse(r.stdout.trim())).toMatchObject({ ok: false, error: { code: 'USAGE' } });
+    }
   });
 
   it('returns USAGE (exit 2) for invalid `psc a` invocations in JSON mode', async () => {
@@ -650,7 +492,7 @@ describe('CLI subprocess, EPIPE handling, and standalone bundle', () => {
 
     const aHelp = await runScript(externalBundle, ['a', '--help'], standaloneCwd);
     expect(aHelp.code).toBe(0);
-    expect(aHelp.stdout).toContain('Remote aplexer');
+    expect(aHelp.stdout).toContain('Human session control');
 
     const hostsPlain = await runScript(externalBundle, ['a', 'hosts'], standaloneCwd);
     expect(hostsPlain.code).toBe(0);
@@ -662,63 +504,5 @@ describe('CLI subprocess, EPIPE handling, and standalone bundle', () => {
       ok: true,
       hosts: [{ name: 'local', mode: 'local', online: true, status: 'online' }],
     });
-  });
-});
-
-describe('confirmPromptDelivery', () => {
-  const row = { name: 'p:t', id: 'id1' } as SessionRow;
-  function fake(script: { state?: string; screen: string }[]) {
-    let i = 0;
-    const sent: string[] = [];
-    const client = {
-      listSessions: async () => ({ sessions: [{ ...row, agentState: script[Math.min(i, script.length - 1)]!.state ?? 'waiting' }] }),
-      capture: async () => script[Math.min(i++, script.length - 1)]!.screen,
-      send: async (_r: SessionRow, text: string) => {
-        sent.push(text);
-      },
-    };
-    return { client: client as never, sent };
-  }
-  const opts = { windowS: 3, pollMs: 1000, sleepFn: async () => {} };
-
-  it('returns at once when the agent is working', async () => {
-    const { client, sent } = fake([{ state: 'working', screen: '' }]);
-    expect(await confirmPromptDelivery(client, row, 'hello', opts)).toBe('working');
-    expect(sent).toEqual([]);
-  });
-
-  it('resends a swallowed prompt once', async () => {
-    const { client, sent } = fake([{ screen: '› Ask Codex to do anything' }]);
-    expect(await confirmPromptDelivery(client, row, 'line one\nline two', opts)).toBe('resent');
-    expect(sent).toEqual(['line one\nline two']);
-  });
-
-  it('presses Enter when the prompt is typed but not submitted', async () => {
-    const { client, sent } = fake([{ screen: '› line   one' }]);
-    expect(await confirmPromptDelivery(client, row, 'line one', opts)).toBe('entered');
-    expect(sent).toEqual(['']);
-  });
-
-  it('treats a paste placeholder as delivered (never a double prompt)', async () => {
-    const { client, sent } = fake([{ screen: '› [Pasted Content 812 chars]' }]);
-    expect(await confirmPromptDelivery(client, row, 'a\nb\nc', opts)).toBe('entered');
-    expect(sent).toEqual(['']);
-  });
-
-  it('readOnly observes without ever writing', async () => {
-    const working = fake([{ state: 'working', screen: '' }]);
-    expect(await confirmPromptDelivery(working.client, row, 'hello', { ...opts, readOnly: true })).toBe('working');
-    expect(working.sent).toEqual([]);
-    const visible = fake([{ screen: '› line   one' }]);
-    expect(await confirmPromptDelivery(visible.client, row, 'line one', { ...opts, readOnly: true })).toBe('visible');
-    expect(visible.sent).toEqual([]);
-  });
-
-  it('readOnly reports unconfirmed instead of resending a swallowed prompt', async () => {
-    const { client, sent } = fake([{ screen: '› Ask Codex to do anything' }]);
-    expect(await confirmPromptDelivery(client, row, 'line one\nline two', { ...opts, readOnly: true })).toBe(
-      'unconfirmed',
-    );
-    expect(sent).toEqual([]);
   });
 });
